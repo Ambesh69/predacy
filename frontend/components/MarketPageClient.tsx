@@ -59,38 +59,35 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   const walletAddress = wallet?.address as `0x${string}` | undefined;
   const isConnected   = authenticated && !!walletAddress;
 
-  // Track the wallet's current chain reactively via EIP-1193 events.
-  // wallet.chainId from Privy is a snapshot and doesn't update when MetaMask
-  // switches networks externally — we need to listen for chainChanged ourselves.
-  const [walletChainId, setWalletChainId] = useState<string | null>(null);
+  // ── Chain tracking ──────────────────────────────────────────────────────────
+  // Privy exposes wallet.chainId as "eip155:XXXXX" synchronously on every
+  // render, so we can derive a hex chain ID immediately (no async gap).
+  // We also subscribe to chainChanged events so the value stays live after
+  // the user switches networks inside MetaMask.
+  const privyChainHex = wallet?.chainId
+    ? `0x${parseInt(wallet.chainId.split(":")[1] ?? "0").toString(16)}`
+    : null;
+  const [liveChainHex, setLiveChainHex] = useState<string | null>(null);
   useEffect(() => {
-    if (!wallet) { setWalletChainId(null); return; }
-    let provider: any;
-    let cleanup = false;
-
-    wallet.getEthereumProvider().then((p) => {
-      if (cleanup) return;
-      provider = p;
-      // Read initial chain
+    if (!wallet) { setLiveChainHex(null); return; }
+    let active = true;
+    wallet.getEthereumProvider().then((p: any) => {
+      if (!active) return;
+      // Confirm initial chain via provider (more reliable than Privy snapshot)
       p.request({ method: "eth_chainId" }).then((id: string) => {
-        if (!cleanup) setWalletChainId(id);
+        if (active) setLiveChainHex(id);
       });
-      // Listen for chain switches (cast avoids EIP-1193 overload conflict)
-      const onChainChanged = (id: unknown) => setWalletChainId(id as string);
-      (p as any).on("chainChanged", onChainChanged);
-      (provider as any)._onChainChanged = onChainChanged;
+      const handler = (id: unknown) => { if (active) setLiveChainHex(id as string); };
+      p.on("chainChanged", handler);
+      return () => p.removeListener?.("chainChanged", handler);
     });
-
-    return () => {
-      cleanup = true;
-      if (provider?._onChainChanged) {
-        provider.removeListener?.("chainChanged", provider._onChainChanged);
-      }
-    };
+    return () => { active = false; };
   }, [wallet]);
 
-  // Polygon Amoy chain ID in hex = 0x13882 (80002)
-  const wrongChain = isConnected && walletChainId !== null && walletChainId !== "0x13882";
+  // Polygon Amoy = 0x13882 (80002 decimal)
+  const AMOY_HEX = "0x13882";
+  const effectiveChainHex = liveChainHex ?? privyChainHex;
+  const wrongChain = isConnected && effectiveChainHex !== null && effectiveChainHex.toLowerCase() !== AMOY_HEX;
 
   // ── Load market ─────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -162,16 +159,15 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
 
     setChainError(null);
 
-    // Verify the wallet is on Polygon Amoy
-    const walletChainId = wallet.chainId; // format: "eip155:80002"
-    const chainIdNum = parseInt(walletChainId.split(":")[1] ?? "0");
-    if (chainIdNum !== polygonAmoy.id) {
+    const provider = await wallet.getEthereumProvider();
+
+    // Verify chain directly from provider (avoids stale Privy snapshot)
+    const currentChain = await (provider as any).request({ method: "eth_chainId" }) as string;
+    if (currentChain.toLowerCase() !== AMOY_HEX) {
       throw new Error(
         `Please switch your wallet to Polygon Amoy (Chain ID ${polygonAmoy.id}) before submitting.`
       );
     }
-
-    const provider = await wallet.getEthereumProvider();
     const walletClient = createWalletClient({
       account: walletAddress,
       chain: polygonAmoy,
@@ -252,13 +248,15 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   // ── USDC faucet (Amoy only) ──────────────────────────────────────────────────
   const handleGetTestUsdc = async () => {
     if (!walletAddress || !wallet) return;
-    if (wrongChain) {
+    // Check chain directly from provider — never rely on potentially-stale state
+    const provider = await wallet.getEthereumProvider();
+    const currentChain = await (provider as any).request({ method: "eth_chainId" }) as string;
+    if (currentChain.toLowerCase() !== AMOY_HEX) {
       await handleSwitchChain();
       return;
     }
     setFaucetLoading(true);
     try {
-      const provider = await wallet.getEthereumProvider();
       const walletClient = createWalletClient({
         account: walletAddress,
         chain: polygonAmoy,
