@@ -28,6 +28,7 @@ const publicClient = createPublicClient({
 // ── Fallback batch state shown before chain data loads ────────────────────────
 const MOCK_BATCH = {
   batchId: 0n,
+  batchMarketId: ("0x" + "0".repeat(64)) as `0x${string}`,
   openedAt: Math.floor(Date.now() / 1000) - 8,
   batchWindow: 30,
   commitmentCount: 0,
@@ -219,6 +220,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
           functionName: "getBatch",
           args: [batchId],
         }) as {
+          marketId: `0x${string}`;
           openedAt: bigint; closedAt: bigint; status: number;
           totalDeposited: bigint; clearingPrice: bigint;
           commitmentCount: bigint;
@@ -227,6 +229,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         if (!cancelled) {
           setBatch({
             batchId,
+            batchMarketId:   b.marketId,
             openedAt:        Number(b.openedAt),
             batchWindow:     30,
             commitmentCount: Number(b.commitmentCount),
@@ -539,6 +542,22 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         </div>
       )}
 
+      {/* Market mismatch banner — batch on chain is for a different market */}
+      {batch.batchMarketId !== ("0x" + "0".repeat(64)) &&
+       batch.batchMarketId.toLowerCase() !== id.toLowerCase() && (
+        <div className="border-b border-yellow-500/20 bg-yellow-500/5 px-6 py-2 flex items-start gap-3">
+          <span className="text-yellow-400/60 text-xs flex-shrink-0">⚠</span>
+          <p className="text-yellow-400/80 text-[11px] leading-relaxed">
+            The relayer is currently running batches for a different market.
+            Your commitment will be sealed on-chain, but settlement routing may not apply to this market.
+            Active market:{" "}
+            <span className="hash-text text-[10px]">
+              {batch.batchMarketId.slice(0, 10)}…{batch.batchMarketId.slice(-6)}
+            </span>
+          </p>
+        </div>
+      )}
+
       {/* Wrong-network banner */}
       {onWrongChain && (
         <div className="border-b border-yellow-500/30 bg-yellow-500/5 px-6 py-2">
@@ -604,7 +623,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
             <div className="space-y-1.5">
               {[
                 { item: "Your direction (buy/sell)", hidden: true },
-                { item: "Your limit price",          hidden: true },
+                { item: "Your order type & price",   hidden: true },
                 { item: "Your trade amount",         hidden: true },
                 { item: "Clearing price (until settle)", hidden: true },
                 { item: "Commitment hash",           hidden: false },
@@ -689,7 +708,16 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
               ) : position === null ? (
                 <p className="text-muted text-xs text-center animate-pulse">Loading position…</p>
               ) : position.claimed ? (
-                <p className="text-accent text-[11px] tracking-widest uppercase text-center">✓ CLAIMED</p>
+                <div className="space-y-2 text-center">
+                  <p className="text-accent text-[11px] tracking-widest uppercase">✓ CLAIMED</p>
+                  {position.filledAmount > 0n && batch.clearingPrice > 0n && (
+                    <p className="text-muted-dim text-[10px]">
+                      ~{(Number(position.filledAmount) / Number(batch.clearingPrice)).toFixed(2)}{" "}
+                      {position.isBuy ? "YES" : "NO"} tokens received
+                      {position.refundAmount > 0n && ` + $${(Number(position.refundAmount) / 1e6).toFixed(2)} refund`}
+                    </p>
+                  )}
+                </div>
               ) : position.filledAmount === 0n && position.refundAmount === 0n ? (
                 <p className="text-muted text-xs text-center">No position in this batch</p>
               ) : (
