@@ -162,10 +162,20 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       .finally(() => setLoading(false));
   }, [id]);
 
+  // ── Clear stale per-batch state when batchId advances ───────────────────────
+  // When a new batch opens the position from the settled batch and the old
+  // commitment feed must be wiped so they don't appear for the new cycle.
+  useEffect(() => {
+    if (batch.batchId === 0n) return; // don't clear on initial load
+    setPosition(null);
+    setCommitments([]);
+  }, [batch.batchId]);
+
   // ── Fetch on-chain commitment feed via getLogs ───────────────────────────────
   // Runs once on mount and whenever the batchId advances.
-  // Merges with locally-submitted commitments (dedup by hash).
+  // Only fetches events for the current batchId; merges with locally-submitted.
   useEffect(() => {
+    if (batch.batchId === 0n) return;
     let cancelled = false;
     const fetchOnChainCommitments = async () => {
       try {
@@ -175,6 +185,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
           event:     parseAbiItem(
             "event OrderCommitted(uint256 indexed batchId, address indexed trader, bytes32 commitment, uint256 amount)",
           ),
+          args:      { batchId: batch.batchId }, // only current batch's orders
           fromBlock: 0n,
           toBlock:   "latest",
         });
