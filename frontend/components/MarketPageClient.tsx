@@ -46,6 +46,14 @@ const MOCK_COMMITMENTS: Array<{
 // Polygon Amoy chain ID in hex
 const AMOY_CHAIN_ID_HEX = "0x13882"; // 80002
 
+// Polygon Amoy requires a minimum priority fee of 25 gwei. viem defaults to
+// 1.5 gwei which is always rejected. Set explicit EIP-1559 gas params for all
+// write calls to guarantee acceptance.
+const AMOY_GAS = {
+  maxPriorityFeePerGas: 30_000_000_000n, // 30 gwei  (> 25 gwei floor)
+  maxFeePerGas:         35_000_000_000n, // 35 gwei  (priority + base buffer)
+} as const;
+
 // ── Provider discovery ────────────────────────────────────────────────────────
 // When multiple wallet extensions are installed (e.g. Backpack + MetaMask),
 // another wallet can seize window.ethereum as a read-only getter, completely
@@ -291,6 +299,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         abi: ERC20_ABI,
         functionName: "approve",
         args: [contracts.batchVault, params.amount],
+        ...AMOY_GAS,
       });
       await publicClient.waitForTransactionReceipt({ hash: approveTx });
     }
@@ -302,6 +311,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       abi: BATCH_VAULT_ABI,
       functionName: "commitOrder",
       args: [params.commitment, params.amount],
+      ...AMOY_GAS,
     });
     await publicClient.waitForTransactionReceipt({ hash: commitTx });
 
@@ -332,6 +342,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         abi: MOCK_USDC_ABI,
         functionName: "mint",
         args: [walletAddress, 10_000_000_000n], // $10,000 USDC
+        ...AMOY_GAS,
       });
       await publicClient.waitForTransactionReceipt({ hash: tx });
     } catch (e: any) {
