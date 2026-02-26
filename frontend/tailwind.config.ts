@@ -23,7 +23,9 @@ const config: Config = {
         blue: "#4D83FF",
         "blue-dim": "#2D5AE0",
         text: "#C8C8E0",
-        muted: "#42425A",
+        muted: "#6B6B8A",
+        "muted-dim": "#545470",
+        "muted-bright": "#8585A8",
         hash: "#6B9FFF",
       },
       animation: {

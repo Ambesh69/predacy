@@ -110,8 +110,8 @@ export default function OrderForm({
 
         <div className="text-center space-y-1">
           <p className="text-accent text-sm tracking-wide">ORDER SEALED</p>
-          <p className="text-muted text-xs">Your commitment is locked in the batch.</p>
-          <p className="text-muted text-xs">No one can see your position until settlement.</p>
+          <p className="text-muted-bright text-xs">Your commitment is locked in the batch.</p>
+          <p className="text-muted-bright text-xs">No one can see your position until settlement.</p>
         </div>
 
         <div className="w-full p-3 border border-border bg-surface/50 space-y-1">
@@ -119,7 +119,7 @@ export default function OrderForm({
           <p className="hash-text text-[11px] break-all">{commitment}</p>
         </div>
 
-        <p className="text-[11px] text-muted/60 text-center">
+        <p className="text-[11px] text-muted text-center">
           Wait for batch settlement. Clearing price and positions will be revealed in aggregate only.
         </p>
       </div>
@@ -231,7 +231,7 @@ export default function OrderForm({
             className={clsx("w-full", !isBuy && "danger")}
           />
 
-          <div className="flex justify-between text-[10px] text-muted/50">
+          <div className="flex justify-between text-[10px] text-muted-dim">
             <span>1¢</span>
             <span>50¢</span>
             <span>99¢</span>
@@ -242,7 +242,7 @@ export default function OrderForm({
         <div className="space-y-2">
           <div className="flex items-center justify-between">
             <label className="text-[11px] text-muted tracking-widest uppercase">Sealed Commitment</label>
-            <span className="text-[10px] text-muted/50">keccak256</span>
+            <span className="text-[10px] text-muted-dim">keccak256</span>
           </div>
           <div className="p-2 border border-border bg-surface/50 relative overflow-hidden">
             <div className="absolute inset-y-0 left-0 w-1 bg-blue/40" />
@@ -250,7 +250,7 @@ export default function OrderForm({
               {walletAddress ? commitment : "0x" + "?".repeat(64)}
             </p>
           </div>
-          <p className="text-[10px] text-muted/50">
+          <p className="text-[10px] text-muted">
             This hash — not your order details — is what gets recorded on-chain.
           </p>
         </div>
@@ -311,7 +311,7 @@ export default function OrderForm({
         )}
 
         {isConnected && batchOpen && (
-          <p className="text-center text-[10px] text-muted/50 mt-2">
+          <p className="text-center text-[10px] text-muted mt-2">
             Approves USDC + commits hash in one transaction
           </p>
         )}

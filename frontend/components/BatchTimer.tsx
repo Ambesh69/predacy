@@ -129,7 +129,7 @@ export default function BatchTimer({
               >
                 {formatTime(remaining)}
               </span>
-              <span className="text-muted text-[10px] tracking-widest uppercase mt-1">
+              <span className="text-muted-dim text-[10px] tracking-widest uppercase mt-1">
                 seconds
               </span>
             </>
