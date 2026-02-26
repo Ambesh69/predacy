@@ -32,7 +32,7 @@ export default function HomePage() {
       <div className="border-b border-border overflow-hidden py-2">
         <div className="flex ticker-content gap-8">
           {[...TICKER_ITEMS, ...TICKER_ITEMS].map((item, i) => (
-            <span key={i} className="text-[10px] text-muted/50 tracking-widest uppercase whitespace-nowrap flex items-center gap-2">
+            <span key={i} className="text-[10px] text-muted-dim tracking-widest uppercase whitespace-nowrap flex items-center gap-2">
               <span className="text-accent/30">◆</span>
               {item}
             </span>
@@ -79,7 +79,7 @@ export default function HomePage() {
               { n: "04", label: "SETTLE", desc: "Net position routes to Polymarket — only aggregate visible" },
             ].map(({ n, label, desc }) => (
               <div key={n} className="flex items-start gap-4 group">
-                <span className="text-[10px] text-muted/40 mt-0.5 w-4 flex-shrink-0">{n}</span>
+                <span className="text-[10px] text-muted-dim mt-0.5 w-4 flex-shrink-0">{n}</span>
                 <div>
                   <span
                     className="text-sm font-black text-text mr-2"
@@ -87,7 +87,7 @@ export default function HomePage() {
                   >
                     {label}
                   </span>
-                  <span className="text-xs text-muted/70">{desc}</span>
+                  <span className="text-xs text-muted-dim">{desc}</span>
                 </div>
               </div>
             ))}
@@ -107,7 +107,7 @@ export default function HomePage() {
               <div key={label} className="flex items-end justify-between">
                 <div>
                   <p className="text-[10px] text-muted uppercase tracking-wider">{label}</p>
-                  <p className="text-[11px] text-muted/50">{sub}</p>
+                  <p className="text-[11px] text-muted-dim">{sub}</p>
                 </div>
                 <span
                   className="text-xl font-black text-text"
@@ -135,7 +135,7 @@ export default function HomePage() {
               <div className="w-3 h-3 border border-muted/40 border-t-transparent rounded-full animate-spin" />
             )}
           </div>
-          <span className="text-[11px] text-muted/50 tracking-widest">
+          <span className="text-[11px] text-muted-dim tracking-widest">
             LIVE · POLYMARKET PRICES
           </span>
         </div>
@@ -151,11 +151,11 @@ export default function HomePage() {
 
       {/* Footer */}
       <footer className="border-t border-border px-6 py-4 flex items-center justify-between">
-        <span className="text-[10px] text-muted/40 tracking-widest uppercase">
+        <span className="text-[10px] text-muted-dim tracking-widest uppercase">
           Predacy · Private Prediction Markets · Powered by Polymarket Liquidity
         </span>
         <div className="flex items-center gap-4">
-          <span className="text-[10px] text-muted/30">
+          <span className="text-[10px] text-muted-dim">
             <span className="text-accent/30">●</span> No position info leaks on-chain
           </span>
         </div>

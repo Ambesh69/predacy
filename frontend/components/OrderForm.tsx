@@ -146,7 +146,7 @@ export default function OrderForm({
           <p className="hash-text text-[11px] break-all">{commitment}</p>
         </div>
 
-        <p className="text-[11px] text-muted/60 text-center">
+        <p className="text-[11px] text-muted-dim text-center">
           Wait for batch settlement. Clearing price and positions will be revealed in aggregate only.
         </p>
       </div>
@@ -190,7 +190,7 @@ export default function OrderForm({
           onClick={() => setOrderType("market")}
           className={clsx(
             "py-1.5 text-[10px] tracking-widest uppercase transition-colors",
-            orderType === "market" ? "text-text bg-surface/60" : "text-muted/60 hover:text-muted",
+            orderType === "market" ? "text-text bg-surface/60" : "text-muted-dim hover:text-muted",
           )}
         >
           Market
@@ -200,7 +200,7 @@ export default function OrderForm({
           onClick={() => setOrderType("limit")}
           className={clsx(
             "py-1.5 text-[10px] tracking-widest uppercase transition-colors border-l border-border",
-            orderType === "limit" ? "text-text bg-surface/60" : "text-muted/60 hover:text-muted",
+            orderType === "limit" ? "text-text bg-surface/60" : "text-muted-dim hover:text-muted",
           )}
         >
           Limit
@@ -283,7 +283,7 @@ export default function OrderForm({
               className={clsx("w-full", !isBuy && "danger")}
             />
 
-            <div className="flex justify-between text-[10px] text-muted/50">
+            <div className="flex justify-between text-[10px] text-muted-dim">
               <span>1¢</span>
               <span>50¢</span>
               <span>99¢</span>
@@ -294,7 +294,7 @@ export default function OrderForm({
           <div className="flex items-center justify-between border border-border bg-surface/40 px-3 py-2.5">
             <div>
               <p className="text-[10px] text-muted tracking-widest uppercase">Fill price</p>
-              <p className="text-[11px] text-muted/70 mt-0.5">At batch clearing price</p>
+              <p className="text-[11px] text-muted-dim mt-0.5">At batch clearing price</p>
             </div>
             <div className="text-right">
               <p className="text-[10px] text-muted">Polymarket now</p>
@@ -312,7 +312,7 @@ export default function OrderForm({
         <div className="space-y-2">
           <div className="flex items-center justify-between">
             <label className="text-[11px] text-muted tracking-widest uppercase">Sealed Commitment</label>
-            <span className="text-[10px] text-muted/50">keccak256</span>
+            <span className="text-[10px] text-muted-dim">keccak256</span>
           </div>
           <div className="p-2 border border-border bg-surface/50 relative overflow-hidden">
             <div className="absolute inset-y-0 left-0 w-1 bg-blue/40" />
@@ -320,7 +320,7 @@ export default function OrderForm({
               {walletAddress ? commitment : "0x" + "?".repeat(64)}
             </p>
           </div>
-          <p className="text-[10px] text-muted/50">
+          <p className="text-[10px] text-muted-dim">
             This hash — not your order details — is what gets recorded on-chain.
           </p>
         </div>
@@ -381,7 +381,7 @@ export default function OrderForm({
         )}
 
         {isConnected && batchOpen && (
-          <p className="text-center text-[10px] text-muted/50 mt-2">
+          <p className="text-center text-[10px] text-muted-dim mt-2">
             Approves USDC + commits hash in one transaction
           </p>
         )}

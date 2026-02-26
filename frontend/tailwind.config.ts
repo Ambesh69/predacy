@@ -23,7 +23,8 @@ const config: Config = {
         blue: "#4D83FF",
         "blue-dim": "#2D5AE0",
         text: "#C8C8E0",
-        muted: "#42425A",
+        muted: "#6B6B8A",      // readable secondary text (~4.5:1 on bg)
+        "muted-dim": "#42425A", // decorative / purely ornamental elements
         hash: "#6B9FFF",
       },
       animation: {

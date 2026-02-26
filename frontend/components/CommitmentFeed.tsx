@@ -101,7 +101,7 @@ function HashEntry({ entry, isMe }: { entry: CommitmentEntry; isMe: boolean }) {
             ${(Number(entry.amount) / 1_000_000).toFixed(0)}
           </span>
         ) : (
-          <span className="text-xs text-muted/60">
+          <span className="text-xs text-muted-dim">
             {hovered ? "???" : "·····"}
           </span>
         )}
@@ -112,7 +112,7 @@ function HashEntry({ entry, isMe }: { entry: CommitmentEntry; isMe: boolean }) {
         {isMe ? (
           <span className="text-[10px] text-muted">{shortTrader}</span>
         ) : (
-          <span className="text-[10px] text-muted/40">
+          <span className="text-[10px] text-muted-dim">
             {hovered ? "0x???…????" : shortTrader}
           </span>
         )}
@@ -144,7 +144,7 @@ export default function CommitmentFeed({ entries, myAddress }: CommitmentFeedPro
 
       {/* Privacy notice */}
       <div className="px-3 py-2 border-b border-border bg-surface/50">
-        <p className="text-[10px] text-muted/70 leading-relaxed">
+        <p className="text-[10px] text-muted-dim leading-relaxed">
           <span className="text-accent/60">//</span> Only commitment hashes are visible on-chain.{" "}
           Amounts and directions are cryptographically hidden until settlement.
         </p>
@@ -175,10 +175,10 @@ export default function CommitmentFeed({ entries, myAddress }: CommitmentFeedPro
       {/* What others see vs what you see */}
       {myAddress && entries.find((e) => e.trader.toLowerCase() === myAddress.toLowerCase()) && (
         <div className="border-t border-border p-3 space-y-1.5">
-          <span className="text-[10px] text-muted/60 tracking-widest uppercase">Privacy Status</span>
+          <span className="text-[10px] text-muted-dim tracking-widest uppercase">Privacy Status</span>
           <div className="grid grid-cols-2 gap-2">
             <div className="bg-border/30 p-2 rounded-sm">
-              <p className="text-[10px] text-muted/50 mb-0.5">others see</p>
+              <p className="text-[10px] text-muted-dim mb-0.5">others see</p>
               <p className="text-[10px] text-muted hash-text">0x4f2a…c3d1</p>
             </div>
             <div className="bg-accent/5 p-2 rounded-sm border border-accent/20">

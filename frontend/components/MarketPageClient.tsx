@@ -600,7 +600,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
 
           {/* Privacy explainer */}
           <div className="border border-border p-3 space-y-2">
-            <p className="text-[10px] text-muted/60 tracking-widest uppercase">What's hidden</p>
+            <p className="text-[10px] text-muted-dim tracking-widest uppercase">What's hidden</p>
             <div className="space-y-1.5">
               {[
                 { item: "Your direction (buy/sell)", hidden: true },
@@ -611,10 +611,10 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
                 { item: "USDC deposited",            hidden: false },
               ].map(({ item, hidden }) => (
                 <div key={item} className="flex items-center gap-2">
-                  <span className={clsx("text-[10px]", hidden ? "text-accent/60" : "text-muted/40")}>
+                  <span className={clsx("text-[10px]", hidden ? "text-accent/60" : "text-muted-dim")}>
                     {hidden ? "✓" : "○"}
                   </span>
-                  <span className={clsx("text-[11px]", hidden ? "text-text/70" : "text-muted/50")}>
+                  <span className={clsx("text-[11px]", hidden ? "text-text/70" : "text-muted-dim")}>
                     {item}
                   </span>
                   {hidden && (
@@ -644,7 +644,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
               )} />
               <span className={clsx(
                 "text-[10px] tracking-widest uppercase",
-                batch.status === BatchStatus.OPEN ? "text-accent/70" : "text-muted/40"
+                batch.status === BatchStatus.OPEN ? "text-accent/70" : "text-muted-dim"
               )}>
                 {batch.status === BatchStatus.OPEN
                   ? "OPEN"
