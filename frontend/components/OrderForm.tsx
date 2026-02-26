@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { clsx } from "clsx";
 import { computeCommitment, generateSalt, formatUsdc } from "@/lib/commitmentHash";
+import { getErrorMessage } from "@/lib/validation";
 import type { Market } from "@/lib/polymarket";
 
 interface OrderFormProps {
@@ -85,8 +86,8 @@ export default function OrderForm({
         limitPrice: BigInt(limitPrice),
       });
       setSubmitted(true);
-    } catch (err: any) {
-      setError(err.message ?? "Transaction failed");
+    } catch (err: unknown) {
+      setError(getErrorMessage(err));
     } finally {
       setIsSubmitting(false);
     }

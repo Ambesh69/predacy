@@ -44,6 +44,12 @@ export async function getMidPrice(tokenId: string): Promise<number> {
   return parseFloat(res.data?.mid ?? "0.5");
 }
 
+/** Raw orderbook entry from CLOB API */
+interface OrderbookEntry {
+  price: string;
+  size: string;
+}
+
 /** Get orderbook depth (top N levels) */
 export async function getOrderBook(tokenId: string): Promise<{
   bids: Array<{ price: number; size: number }>;
@@ -52,9 +58,11 @@ export async function getOrderBook(tokenId: string): Promise<{
   const res = await axios.get(`${CLOB_API}/book`, {
     params: { token_id: tokenId },
   });
+  const bids: OrderbookEntry[] = res.data?.bids ?? [];
+  const asks: OrderbookEntry[] = res.data?.asks ?? [];
   return {
-    bids: (res.data?.bids ?? []).map((b: any) => ({ price: parseFloat(b.price), size: parseFloat(b.size) })),
-    asks: (res.data?.asks ?? []).map((a: any) => ({ price: parseFloat(a.price), size: parseFloat(a.size) })),
+    bids: bids.map((b) => ({ price: parseFloat(b.price), size: parseFloat(b.size) })),
+    asks: asks.map((a) => ({ price: parseFloat(a.price), size: parseFloat(a.size) })),
   };
 }
 
