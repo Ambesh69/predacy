@@ -20,10 +20,22 @@ export interface Market {
   tags?: string[];
 }
 
+/** Parse fields that Gamma API returns as JSON-encoded strings */
+function normalizeMarket(m: any): Market {
+  const parse = (v: any) => (typeof v === "string" ? JSON.parse(v) : v);
+  return {
+    ...m,
+    outcomePrices: parse(m.outcomePrices) ?? [],
+    outcomes:      parse(m.outcomes)      ?? [],
+    tokens:        parse(m.tokens)        ?? [],
+    tags:          parse(m.tags)          ?? [],
+  };
+}
+
 /** Fetch active markets — uses server-side proxy to avoid CORS */
 export async function getMarkets(limit = 20): Promise<Market[]> {
   const res = await axios.get(`/api/markets`, { params: { limit } });
-  return res.data ?? [];
+  return (res.data ?? []).map(normalizeMarket);
 }
 
 /** Get a single market by condition ID */
