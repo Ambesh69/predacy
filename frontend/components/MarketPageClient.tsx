@@ -58,7 +58,39 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   const wallet        = wallets[0];
   const walletAddress = wallet?.address as `0x${string}` | undefined;
   const isConnected   = authenticated && !!walletAddress;
-  const wrongChain    = isConnected && wallet?.chainId !== "eip155:80002";
+
+  // Track the wallet's current chain reactively via EIP-1193 events.
+  // wallet.chainId from Privy is a snapshot and doesn't update when MetaMask
+  // switches networks externally — we need to listen for chainChanged ourselves.
+  const [walletChainId, setWalletChainId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!wallet) { setWalletChainId(null); return; }
+    let provider: any;
+    let cleanup = false;
+
+    wallet.getEthereumProvider().then((p) => {
+      if (cleanup) return;
+      provider = p;
+      // Read initial chain
+      p.request({ method: "eth_chainId" }).then((id: string) => {
+        if (!cleanup) setWalletChainId(id);
+      });
+      // Listen for chain switches (cast avoids EIP-1193 overload conflict)
+      const onChainChanged = (id: unknown) => setWalletChainId(id as string);
+      (p as any).on("chainChanged", onChainChanged);
+      (provider as any)._onChainChanged = onChainChanged;
+    });
+
+    return () => {
+      cleanup = true;
+      if (provider?._onChainChanged) {
+        provider.removeListener?.("chainChanged", provider._onChainChanged);
+      }
+    };
+  }, [wallet]);
+
+  // Polygon Amoy chain ID in hex = 0x13882 (80002)
+  const wrongChain = isConnected && walletChainId !== null && walletChainId !== "0x13882";
 
   // ── Load market ─────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -220,6 +252,10 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   // ── USDC faucet (Amoy only) ──────────────────────────────────────────────────
   const handleGetTestUsdc = async () => {
     if (!walletAddress || !wallet) return;
+    if (wrongChain) {
+      await handleSwitchChain();
+      return;
+    }
     setFaucetLoading(true);
     try {
       const provider = await wallet.getEthereumProvider();
