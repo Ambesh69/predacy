@@ -20,11 +20,9 @@ export interface Market {
   tags?: string[];
 }
 
-/** Fetch active markets from Polymarket Gamma API */
+/** Fetch active markets — uses server-side proxy to avoid CORS */
 export async function getMarkets(limit = 20): Promise<Market[]> {
-  const res = await axios.get(`${GAMMA_API}/markets`, {
-    params: { limit, active: true, closed: false, order: "volume", ascending: false },
-  });
+  const res = await axios.get(`/api/markets`, { params: { limit } });
   return res.data ?? [];
 }
 
