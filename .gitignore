@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Next.js
+frontend/.next/
+frontend/out/
+frontend/.vercel
+
+# Environment
+.env
+.env.local
+.env.*.local
+relayer/.env
+
+# Foundry
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+
+# Noir
+circuits/*/target/
+circuits/**/Prover.toml
+
+# Build outputs
+dist/
+build/
+
+# OS
+.DS_Store
+*.swp
+*.swo
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+
+# TypeScript
+*.tsbuildinfo

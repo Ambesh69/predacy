@@ -1,0 +1,180 @@
+@import url('https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;900&family=Azeret+Mono:wght@300;400;500;600;700&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-display: 'Big Shoulders Display', sans-serif;
+  --font-mono: 'Azeret Mono', monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: #03030A;
+  color: #C8C8E0;
+  font-family: var(--font-mono);
+  cursor: crosshair;
+}
+
+/* Scanline overlay */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 0, 10, 0.15) 2px,
+    rgba(0, 0, 10, 0.15) 4px
+  );
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* Subtle noise texture on body */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 9998;
+  opacity: 0.4;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: #03030A; }
+::-webkit-scrollbar-thumb { background: #13131F; }
+::-webkit-scrollbar-thumb:hover { background: #1E1E30; }
+
+/* Selection */
+::selection {
+  background: rgba(0, 255, 179, 0.2);
+  color: #00FFB3;
+}
+
+/* Hash text styling */
+.hash-text {
+  color: #6B9FFF;
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+}
+
+/* Glow effects */
+.glow-accent {
+  text-shadow: 0 0 12px rgba(0, 255, 179, 0.7),
+               0 0 24px rgba(0, 255, 179, 0.4);
+}
+
+.glow-danger {
+  text-shadow: 0 0 12px rgba(255, 51, 85, 0.7),
+               0 0 24px rgba(255, 51, 85, 0.4);
+}
+
+.glow-blue {
+  text-shadow: 0 0 12px rgba(77, 131, 255, 0.7),
+               0 0 24px rgba(77, 131, 255, 0.4);
+}
+
+/* Border glow */
+.border-glow-accent {
+  box-shadow: 0 0 0 1px rgba(0, 255, 179, 0.4),
+              0 0 16px rgba(0, 255, 179, 0.1);
+}
+
+.border-glow-danger {
+  box-shadow: 0 0 0 1px rgba(255, 51, 85, 0.4),
+              0 0 16px rgba(255, 51, 85, 0.1);
+}
+
+/* Crypto char animation */
+@keyframes cryptoReveal {
+  0% { color: #4D83FF; }
+  100% { color: #6B9FFF; }
+}
+
+.crypto-char {
+  animation: cryptoReveal 0.1s ease-out;
+}
+
+/* Batch ring */
+@keyframes ringPulse {
+  0%, 100% { stroke-opacity: 0.4; }
+  50% { stroke-opacity: 1; }
+}
+
+.ring-pulse {
+  animation: ringPulse 2s ease-in-out infinite;
+}
+
+/* Market card hover */
+.market-card {
+  transition: all 0.2s ease;
+  position: relative;
+  overflow: hidden;
+}
+
+.market-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, transparent 0%, rgba(0, 255, 179, 0.03) 100%);
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.market-card:hover::before {
+  opacity: 1;
+}
+
+.market-card:hover {
+  border-color: #1E1E30;
+  transform: translateY(-1px);
+}
+
+/* Ticker tape animation */
+@keyframes ticker {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+
+.ticker-content {
+  animation: ticker 30s linear infinite;
+  white-space: nowrap;
+}
+
+/* Input styles */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 2px;
+  background: #13131F;
+  outline: none;
+  cursor: crosshair;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  background: #00FFB3;
+  cursor: crosshair;
+  clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
+  box-shadow: 0 0 8px rgba(0, 255, 179, 0.6);
+}
+
+input[type="range"].danger::-webkit-slider-thumb {
+  background: #FF3355;
+  box-shadow: 0 0 8px rgba(255, 51, 85, 0.6);
+}
+
+/* Focus styles */
+input:focus, textarea:focus, select:focus {
+  outline: none;
+}

@@ -1,0 +1,8 @@
+[package]
+name = "batch_clearing"
+type = "bin"
+authors = ["Predacy"]
+compiler_version = ">=0.36.0"
+
+[dependencies]
+# std is included by default in Noir
