@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import MarketCard from "@/components/MarketCard";
+import WalletButton from "@/components/WalletButton";
 import { MOCK_MARKETS, getMarkets, type Market } from "@/lib/polymarket";
 
 const TICKER_ITEMS = [
@@ -61,9 +62,7 @@ export default function HomePage() {
             <span className="text-[11px] text-muted tracking-widest">POLYGON</span>
           </div>
 
-          <button className="border border-border-bright px-4 py-1.5 text-text text-xs tracking-widest uppercase hover:border-text/20 transition-colors">
-            Connect
-          </button>
+          <WalletButton />
         </div>
       </header>
 
