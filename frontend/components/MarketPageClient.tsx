@@ -46,6 +46,22 @@ const MOCK_COMMITMENTS: Array<{
 // Polygon Amoy chain ID in hex
 const AMOY_CHAIN_ID_HEX = "0x13882"; // 80002
 
+// ── Raw EIP-1193 provider (bypasses Privy's wrapper) ─────────────────────────
+// Privy wraps window.ethereum and intercepts wallet_switchEthereumChain without
+// surfacing MetaMask's actual network-switch dialog. We go direct to fix this.
+function getRawProvider(): any {
+  if (typeof window === "undefined") throw new Error("Not in browser");
+  const eth = (window as any).ethereum;
+  if (!eth) throw new Error("No Ethereum wallet found. Please install MetaMask.");
+  // When multiple wallet extensions are installed, MetaMask injects .providers[]
+  if (Array.isArray(eth.providers)) {
+    const mm = eth.providers.find((p: any) => p.isMetaMask);
+    if (mm) return mm;
+    return eth.providers[0];
+  }
+  return eth;
+}
+
 export default function MarketPageClient({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const [market, setMarket]           = useState<Market | null>(null);
@@ -62,10 +78,20 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   const walletAddress = wallet?.address as `0x${string}` | undefined;
   const isConnected   = authenticated && !!walletAddress;
 
-  // Simple banner: Privy exposes wallet.chainId as "eip155:XXXXX" synchronously.
-  // This may not update instantly after MetaMask switches, but ensureAmoy() below
-  // guarantees the right chain before any tx regardless of this value.
-  const onWrongChain = isConnected && !!wallet?.chainId && wallet.chainId !== `eip155:${polygonAmoy.id}`;
+  // Track the real MetaMask chain via window.ethereum events (not Privy's wrapper).
+  const [rawChainId, setRawChainId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!isConnected) { setRawChainId(null); return; }
+    try {
+      const provider = getRawProvider();
+      provider.request({ method: "eth_chainId" }).then((id: string) => setRawChainId(id));
+      const handler = (id: string) => setRawChainId(id);
+      provider.on("chainChanged", handler);
+      return () => provider.removeListener?.("chainChanged", handler);
+    } catch { /* no MetaMask */ }
+  }, [isConnected]);
+
+  const onWrongChain = isConnected && rawChainId !== null && rawChainId.toLowerCase() !== AMOY_CHAIN_ID_HEX;
 
   // ── Load market ─────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -126,24 +152,22 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   }, []);
 
   // ── ensureAmoy ───────────────────────────────────────────────────────────────
-  // Switches MetaMask to Polygon Amoy if needed, then returns a ready walletClient.
-  // - Already on Amoy → wallet_switchEthereumChain returns immediately, no prompt.
-  // - Wrong chain     → MetaMask shows switch-network prompt.
-  // - Chain unknown   → wallet_addEthereumChain first, then switch.
-  // Called at the start of every tx handler so the chain is always right.
+  // Switches MetaMask to Polygon Amoy if needed, returns a ready walletClient.
+  // Uses window.ethereum directly — Privy's provider wrapper intercepts
+  // wallet_switchEthereumChain internally and never shows MetaMask's dialog.
   const ensureAmoy = async () => {
-    if (!wallet || !walletAddress) throw new Error("Wallet not connected");
-    const provider = await wallet.getEthereumProvider();
+    if (!walletAddress) throw new Error("Wallet not connected");
+    const provider = getRawProvider(); // direct MetaMask, not Privy's wrapper
 
     try {
-      await (provider as any).request({
+      await provider.request({
         method: "wallet_switchEthereumChain",
         params: [{ chainId: AMOY_CHAIN_ID_HEX }],
       });
     } catch (err: any) {
       if (err.code === 4902) {
         // Chain not in wallet yet — add it, then switch
-        await (provider as any).request({
+        await provider.request({
           method: "wallet_addEthereumChain",
           params: [{
             chainId: AMOY_CHAIN_ID_HEX,
@@ -153,12 +177,13 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
             blockExplorerUrls: ["https://amoy.polygonscan.com/"],
           }],
         });
-        await (provider as any).request({
+        await provider.request({
           method: "wallet_switchEthereumChain",
           params: [{ chainId: AMOY_CHAIN_ID_HEX }],
         });
-      } else if (err.code !== 4001) {
-        // 4001 = user rejected — rethrow anything unexpected
+      } else if (err.code === 4001) {
+        throw new Error("Please switch to Polygon Amoy to continue.");
+      } else {
         throw err;
       }
     }
@@ -166,7 +191,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     return createWalletClient({
       account: walletAddress,
       chain: polygonAmoy,
-      transport: custom(provider),
+      transport: custom(provider), // same raw provider — chain already switched
     });
   };
 
