@@ -1,39 +1,26 @@
 "use client";
 
-import { PrivyProvider, type PrivyClientConfig } from "@privy-io/react-auth";
-import { polygon } from "viem/chains";
+import { useState, useEffect, type ReactNode } from "react";
+import dynamic from "next/dynamic";
 
-const PRIVY_APP_ID = process.env.NEXT_PUBLIC_PRIVY_APP_ID;
+// PrivyInner is only ever imported on the client (ssr: false) so that
+// @privy-io/react-auth's module-level localStorage access never runs
+// during Next.js server prerendering.
+const PrivyInner = dynamic(() => import("./PrivyInner"), { ssr: false });
 
-// Privy config — themed to match the Predacy dark palette
-const privyConfig: PrivyClientConfig = {
-  appearance: {
-    theme: "dark" as const,
-    accentColor: "#00FFB3" as `#${string}`,
-    logo: "",
-    showWalletLoginFirst: true,
-    walletList: ["metamask", "coinbase_wallet", "wallet_connect", "phantom"],
-    landingHeader: "Connect to Predacy",
-    loginMessage: "Trade without trace.",
-  },
-  loginMethods: ["wallet"],
-  defaultChain: polygon,
-  supportedChains: [polygon],
-  embeddedWallets: {
-    createOnLogin: "off",
-  },
-};
+export default function Providers({ children }: { children: ReactNode }) {
+  const [mounted, setMounted] = useState(false);
 
-export default function Providers({ children }: { children: React.ReactNode }) {
-  // Skip Privy during builds without a real App ID (e.g. CI, preview deploys)
-  // Once NEXT_PUBLIC_PRIVY_APP_ID is set, full wallet functionality activates.
-  if (!PRIVY_APP_ID) {
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  // Before mount: render children directly (SSR + first hydration pass).
+  // This prevents hydration mismatches and keeps the initial HTML intact.
+  if (!mounted) {
     return <>{children}</>;
   }
 
-  return (
-    <PrivyProvider appId={PRIVY_APP_ID} config={privyConfig}>
-      {children}
-    </PrivyProvider>
-  );
+  // After mount: wrap children with the client-only Privy context.
+  return <PrivyInner>{children}</PrivyInner>;
 }
