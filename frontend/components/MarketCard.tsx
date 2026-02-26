@@ -6,6 +6,7 @@ import type { Market } from "@/lib/polymarket";
 
 interface MarketCardProps {
   market: Market;
+  isLive?: boolean;
 }
 
 function formatVolume(vol: number): string {
@@ -48,25 +49,34 @@ function ProbBar({ prob }: { prob: number }) {
   );
 }
 
-export default function MarketCard({ market }: MarketCardProps) {
+export default function MarketCard({ market, isLive = false }: MarketCardProps) {
   const yesPrice = parseFloat(market.outcomePrices[0]);
   const yesProb = Math.round(yesPrice * 100);
   const volume = market.volumeNum ?? parseFloat(market.volume ?? "0");
 
   return (
     <Link href={`/market/${market.conditionId}`} className="block">
-      <div className="market-card border border-border bg-surface p-5 cursor-crosshair">
-        {/* Category tag */}
-        {market.category && (
-          <div className="flex items-center gap-2 mb-3">
+      <div className={clsx(
+        "market-card border bg-surface p-5 cursor-crosshair",
+        isLive ? "border-accent/40" : "border-border",
+      )}>
+        {/* Live badge + Category tag */}
+        <div className="flex items-center gap-2 mb-3">
+          {isLive && (
+            <span className="flex items-center gap-1 text-[10px] text-accent tracking-widest uppercase border border-accent/30 px-2 py-0.5 bg-accent/5">
+              <span className="w-1 h-1 rounded-full bg-accent animate-pulse inline-block" />
+              LIVE
+            </span>
+          )}
+          {market.category && (
             <span className="text-[10px] text-muted tracking-widest uppercase border border-border px-2 py-0.5">
               {market.category}
             </span>
-            <span className="text-[10px] text-muted">
-              Closes {formatDate(market.endDate)}
-            </span>
-          </div>
-        )}
+          )}
+          <span className="text-[10px] text-muted">
+            Closes {formatDate(market.endDate)}
+          </span>
+        </div>
 
         {/* Question */}
         <h3 className="text-text text-sm leading-snug mb-4 line-clamp-2">

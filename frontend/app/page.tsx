@@ -1,9 +1,12 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { createPublicClient, http } from "viem";
 import MarketCard from "@/components/MarketCard";
 import WalletButton from "@/components/WalletButton";
 import { MOCK_MARKETS, getMarkets, type Market } from "@/lib/polymarket";
+import { ACTIVE_CHAIN } from "@/lib/chain";
+import { getContracts, BATCH_VAULT_ABI } from "@/lib/contracts";
 
 const TICKER_ITEMS = [
   "SEALED BIDS",
@@ -15,16 +18,56 @@ const TICKER_ITEMS = [
   "PRIVATE POSITIONS",
 ];
 
+const publicClient = createPublicClient({
+  chain: ACTIVE_CHAIN,
+  transport: http(process.env.NEXT_PUBLIC_RPC_URL ?? ACTIVE_CHAIN.rpcUrls.default.http[0]),
+});
+
 export default function HomePage() {
   const [markets, setMarkets] = useState<Market[]>(MOCK_MARKETS);
   const [loading, setLoading] = useState(true);
+  const [liveMarketId, setLiveMarketId] = useState<string | null>(null);
+
+  // Fetch the live Predacy batch's marketId so we can pin + badge it
+  useEffect(() => {
+    (async () => {
+      try {
+        const contracts = getContracts(ACTIVE_CHAIN.id);
+        const batchId = await publicClient.readContract({
+          address: contracts.batchVault,
+          abi: BATCH_VAULT_ABI,
+          functionName: "currentBatchId",
+        }) as bigint;
+        if (batchId > 0n) {
+          const batch = await publicClient.readContract({
+            address: contracts.batchVault,
+            abi: BATCH_VAULT_ABI,
+            functionName: "getBatch",
+            args: [batchId],
+          }) as { marketId: `0x${string}` };
+          const mid = batch.marketId.toLowerCase();
+          if (mid !== ("0x" + "0".repeat(64))) setLiveMarketId(mid);
+        }
+      } catch { /* non-fatal */ }
+    })();
+  }, []);
 
   useEffect(() => {
-    getMarkets(8)
-      .then(setMarkets)
+    getMarkets(20)
+      .then((fetched) => {
+        // Pin the live Predacy market at index 0
+        if (liveMarketId) {
+          const idx = fetched.findIndex((m) => m.conditionId.toLowerCase() === liveMarketId);
+          if (idx > 0) {
+            const live = fetched.splice(idx, 1)[0];
+            fetched.unshift(live);
+          }
+        }
+        setMarkets(fetched);
+      })
       .catch(() => setMarkets(MOCK_MARKETS))
       .finally(() => setLoading(false));
-  }, []);
+  }, [liveMarketId]);
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -143,7 +186,10 @@ export default function HomePage() {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-px bg-border">
           {markets.map((market) => (
             <div key={market.conditionId} className="bg-bg">
-              <MarketCard market={market} />
+              <MarketCard
+                market={market}
+                isLive={!!liveMarketId && market.conditionId.toLowerCase() === liveMarketId}
+              />
             </div>
           ))}
         </div>
