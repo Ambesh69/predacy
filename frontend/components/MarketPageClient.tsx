@@ -2,7 +2,7 @@
 
 import { useState, useEffect, use } from "react";
 import Link from "next/link";
-import { createPublicClient, createWalletClient, custom, http } from "viem";
+import { createPublicClient, createWalletClient, custom, http, parseAbiItem } from "viem";
 import { polygonAmoy } from "viem/chains";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
 import BatchTimer from "@/components/BatchTimer";
@@ -153,6 +153,42 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       .catch(() => setMarket(null))
       .finally(() => setLoading(false));
   }, [id]);
+
+  // ── Fetch on-chain commitment feed via getLogs ───────────────────────────────
+  // Runs once on mount and whenever the batchId advances.
+  // Merges with locally-submitted commitments (dedup by hash).
+  useEffect(() => {
+    let cancelled = false;
+    const fetchOnChainCommitments = async () => {
+      try {
+        const contracts = getContracts(polygonAmoy.id);
+        const logs = await publicClient.getLogs({
+          address:   contracts.batchVault,
+          event:     parseAbiItem(
+            "event OrderCommitted(uint256 indexed batchId, address indexed trader, bytes32 commitment, uint256 amount)",
+          ),
+          fromBlock: 0n,
+          toBlock:   "latest",
+        });
+        if (cancelled) return;
+        const onChain = logs.map((log) => ({
+          hash:      log.args.commitment as `0x${string}`,
+          amount:    log.args.amount     as bigint,
+          trader:    log.args.trader     as `0x${string}`,
+          timestamp: Number(log.blockNumber ?? 0n) * 1000,
+        }));
+        setCommitments((prev) => {
+          const existing = new Set(prev.map((c) => c.hash));
+          const newOnes  = onChain.filter((c) => !existing.has(c.hash));
+          return newOnes.length ? [...prev, ...newOnes] : prev;
+        });
+      } catch {
+        // RPC hiccup — keep showing current state
+      }
+    };
+    fetchOnChainCommitments();
+    return () => { cancelled = true; };
+  }, [batch.batchId]);
 
   // ── Poll batch state from chain ─────────────────────────────────────────────
   useEffect(() => {

@@ -1,32 +1,36 @@
 import axios from "axios";
+import { createHmac } from "node:crypto";
 import type { PolymarketMarket } from "./types.js";
 
-const CLOB_API = "https://clob.polymarket.com";
+const CLOB_API  = "https://clob.polymarket.com";
 const GAMMA_API = "https://gamma-api.polymarket.com";
 
 /**
  * Polymarket CLOB REST API client.
- * Handles market data fetching and order execution.
  *
- * Polymarket's CLOB is an off-chain matching engine that settles on Polygon.
- * For order submission you need a Polymarket API key (L2 key derived from a wallet).
+ * Auth: Polymarket uses HMAC-SHA256 request signing (L2 API key scheme).
+ * Signature = base64( HMAC-SHA256( apiSecret, timestamp + method + path + body ) )
+ * Docs: https://docs.polymarket.com/#authentication
  *
- * Docs: https://docs.polymarket.com/
+ * To obtain API keys:
+ *   1. Go to polymarket.com, connect your wallet
+ *   2. Settings → API Keys → Generate new key
+ *   3. Set POLYMARKET_API_KEY, POLYMARKET_API_SECRET, POLYMARKET_API_PASSPHRASE in .env
  */
 export class PolymarketClient {
-  private apiKey: string;
-  private apiSecret: string;
+  private apiKey:        string;
+  private apiSecret:     string;
   private apiPassphrase: string;
 
   constructor(apiKey: string, apiSecret: string, apiPassphrase: string) {
-    this.apiKey = apiKey;
-    this.apiSecret = apiSecret;
+    this.apiKey        = apiKey;
+    this.apiSecret     = apiSecret;
     this.apiPassphrase = apiPassphrase;
   }
 
-  // ─── Market data ────────────────────────────────────────────────────────
+  // ─── Market data (no auth required) ────────────────────────────────────────
 
-  /** Fetch active markets from Polymarket */
+  /** Fetch active markets from Polymarket Gamma API */
   async getMarkets(limit = 20, offset = 0): Promise<PolymarketMarket[]> {
     const res = await axios.get(`${GAMMA_API}/markets`, {
       params: { limit, offset, active: true, closed: false },
@@ -62,31 +66,37 @@ export class PolymarketClient {
     };
   }
 
-  // ─── Order execution ────────────────────────────────────────────────────
+  /** Get the current best ask (cheapest YES tokens) for a market. */
+  async getBestAsk(tokenId: string): Promise<number> {
+    const book = await this.getOrderBook(tokenId);
+    if (!book.asks.length) throw new Error(`No asks for token ${tokenId}`);
+    return book.asks.sort((a, b) => a.price - b.price)[0].price;
+  }
+
+  // ─── Order execution (requires auth) ───────────────────────────────────────
 
   /**
    * Place a market buy order for YES tokens on Polymarket's CLOB.
    * This is the net position execution step after batch clearing.
    *
-   * @param tokenId   The YES token ID (from market.tokens[].token_id)
-   * @param usdcAmount USDC to spend (6 decimals as a number, e.g. 1000000 = $1)
+   * @param tokenId    YES token ID (from market.tokens[].token_id)
+   * @param usdcAmount USDC to spend (bigint, 6 decimals — e.g. 1_000_000n = $1)
    * @returns Order ID from Polymarket
    */
   async placeMarketBuy(tokenId: string, usdcAmount: bigint): Promise<string> {
     const amountFloat = Number(usdcAmount) / 1e6;
-
-    const body = {
+    const body = JSON.stringify({
       order: {
-        tokenID: tokenId,
-        side: "BUY",
-        price: null, // market order
-        size: amountFloat,
+        tokenID:   tokenId,
+        side:      "BUY",
+        price:     null,
+        size:      amountFloat,
         orderType: "MARKET",
       },
-    };
+    });
 
     const res = await axios.post(`${CLOB_API}/order`, body, {
-      headers: this._authHeaders("POST", "/order", JSON.stringify(body)),
+      headers: this._authHeaders("POST", "/order", body),
     });
 
     return res.data.orderId;
@@ -95,68 +105,59 @@ export class PolymarketClient {
   /**
    * Place a limit buy order on Polymarket's CLOB.
    *
-   * @param tokenId     YES token ID
-   * @param usdcAmount  USDC to spend (bigint, 6 decimals)
-   * @param limitPrice  Price in [0,1] as a float (e.g. 0.65)
+   * @param tokenId    YES token ID
+   * @param usdcAmount USDC to spend (bigint, 6 decimals)
+   * @param limitPrice Price in [0,1] as a float (e.g. 0.65)
    */
   async placeLimitBuy(tokenId: string, usdcAmount: bigint, limitPrice: number): Promise<string> {
     const size = Number(usdcAmount) / 1e6 / limitPrice;
-
-    const body = {
+    const body = JSON.stringify({
       order: {
-        tokenID: tokenId,
-        side: "BUY",
-        price: limitPrice,
-        size: size.toFixed(2),
-        orderType: "GTC", // Good-till-cancelled
+        tokenID:   tokenId,
+        side:      "BUY",
+        price:     limitPrice,
+        size:      size.toFixed(2),
+        orderType: "GTC",
       },
-    };
+    });
 
     const res = await axios.post(`${CLOB_API}/order`, body, {
-      headers: this._authHeaders("POST", "/order", JSON.stringify(body)),
+      headers: this._authHeaders("POST", "/order", body),
     });
 
     return res.data.orderId;
   }
 
-  // ─── Price utilities ────────────────────────────────────────────────────
+  // ─── Auth ────────────────────────────────────────────────────────────────────
 
   /**
-   * Get the current best ask (cheapest YES tokens) for a market.
-   * Used to estimate how many YES tokens the net buy will receive.
+   * Generate Polymarket CLOB API authentication headers.
+   * Signature = base64( HMAC-SHA256( apiSecret, timestamp + method + path + body ) )
    */
-  async getBestAsk(tokenId: string): Promise<number> {
-    const book = await this.getOrderBook(tokenId);
-    if (!book.asks.length) throw new Error(`No asks for token ${tokenId}`);
-    return book.asks.sort((a, b) => a.price - b.price)[0].price;
-  }
-
-  // ─── Auth ────────────────────────────────────────────────────────────────
-
-  /** Generate Polymarket CLOB API authentication headers */
   private _authHeaders(method: string, path: string, body: string): Record<string, string> {
     const timestamp = Math.floor(Date.now() / 1000).toString();
-    // Polymarket uses HMAC-SHA256 signature: timestamp + method + path + body
-    // Full auth implementation: https://docs.polymarket.com/#authentication
-    // For prototype, fill in with actual API credentials
     return {
-      "POLY-API-KEY": this.apiKey,
-      "POLY-SIGNATURE": this._sign(timestamp, method, path, body),
-      "POLY-TIMESTAMP": timestamp,
-      "POLY-PASSPHRASE": this.apiPassphrase,
-      "Content-Type": "application/json",
+      "POLY-API-KEY":     this.apiKey,
+      "POLY-SIGNATURE":   this._sign(timestamp, method, path, body),
+      "POLY-TIMESTAMP":   timestamp,
+      "POLY-PASSPHRASE":  this.apiPassphrase,
+      "Content-Type":     "application/json",
     };
   }
 
+  /**
+   * HMAC-SHA256 signature: base64( HMAC-SHA256( apiSecret, msg ) )
+   * where msg = timestamp + method.toUpperCase() + path + body
+   */
   private _sign(timestamp: string, method: string, path: string, body: string): string {
-    // TODO: implement HMAC-SHA256 signature using apiSecret
-    // const message = timestamp + method + path + body;
-    // return crypto.createHmac('sha256', this.apiSecret).update(message).digest('base64');
-    return "placeholder-signature";
+    const message = timestamp + method.toUpperCase() + path + body;
+    return createHmac("sha256", this.apiSecret)
+      .update(message)
+      .digest("base64");
   }
 }
 
 export interface PriceLevel {
   price: number;
-  size: number;
+  size:  number;
 }

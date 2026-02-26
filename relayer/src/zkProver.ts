@@ -1,33 +1,31 @@
+import { keccak256, encodeAbiParameters } from "viem";
 import type { Order } from "./types.js";
 
 /**
  * ZK Prover — generates proofs of correct batch clearing price computation.
  *
- * In production: calls the Noir prover (bb.js) to generate an UltraPlonk proof.
+ * Production: calls the Noir prover (bb.js) to generate an UltraPlonk proof.
  * The circuit proves:
  *   1. Each revealed order pre-image matches its on-chain commitment hash
  *   2. The clearing price maximizes filled volume (correct algorithm execution)
  *   3. The reported net buy amount matches the actual computation
  *
- * For the prototype: generates a mock proof (empty bytes).
- * The MockBatchVerifier on-chain accepts any proof — swap in the real
- * Noir verifier once the circuit is compiled.
- *
- * Circuit source: ../circuits/batch_clearing/src/main.nr
- * Compile with: cd ../circuits/batch_clearing && nargo prove
+ * Prototype: generates a mock proof (empty bytes).
+ * MockBatchVerifier on-chain accepts any proof — swap in the real Noir verifier
+ * once the circuit is compiled (cd circuits/batch_clearing && nargo build).
  */
 
 export interface ProofInputs {
-  orders: Order[];
-  commitments: `0x${string}`[];
-  clearingPrice: bigint;
-  netBuyAmount: bigint;
-  filledBuyVolume: bigint;
+  orders:           Order[];
+  commitments:      `0x${string}`[];
+  clearingPrice:    bigint;
+  netBuyAmount:     bigint;
+  filledBuyVolume:  bigint;
   filledSellVolume: bigint;
 }
 
 export interface ProofOutput {
-  proof: `0x${string}`;
+  proof:        `0x${string}`;
   publicInputs: `0x${string}`[];
   commitmentRoot: `0x${string}`;
 }
@@ -43,7 +41,7 @@ export class ZKProver {
    * Generate a ZK proof of correct batch clearing computation.
    *
    * Public inputs (matching BatchVault.sol's settleBatch expectations):
-   *   [0] commitmentRoot   - merkle root of all order commitments
+   *   [0] commitmentRoot   - sequential hash chain of all commitments
    *   [1] clearingPrice    - 6-decimal fixed point
    *   [2] filledBuyVolume  - USDC, 6 decimals
    *   [3] filledSellVolume - USDC, 6 decimals
@@ -74,22 +72,23 @@ export class ZKProver {
   }
 
   /**
-   * Compute sequential commitment root matching BatchVault._computeCommitmentRoot()
-   * root = keccak256(keccak256(... keccak256(0, h[0]), h[1] ...), h[n-1])
+   * Compute sequential commitment root matching BatchVault._computeCommitmentRoot():
+   *   root = keccak256(abi.encode(... keccak256(abi.encode(0, h[0])), h[1] ...), h[n-1])
    */
   private _computeCommitmentRoot(commitments: `0x${string}`[]): `0x${string}` {
-    // Mirror the Solidity: keccak256(abi.encode(root, commitment.hash))
-    // Using a simple sequential hash chain (not a Merkle tree)
-    // This matches BatchVault._computeCommitmentRoot()
-    let root = "0x" + "0".repeat(64);
+    let root = ("0x" + "0".repeat(64)) as `0x${string}`;
 
     for (const commitment of commitments) {
-      // abi.encode(bytes32, bytes32) = concat(pad32(root), pad32(commitment))
-      const encoded = root.slice(2).padStart(64, "0") + commitment.slice(2).padStart(64, "0");
-      root = keccak256Hex(encoded);
+      // Mirror Solidity: keccak256(abi.encode(bytes32 root, bytes32 commitment))
+      root = keccak256(
+        encodeAbiParameters(
+          [{ type: "bytes32" }, { type: "bytes32" }],
+          [root, commitment],
+        ),
+      );
     }
 
-    return root as `0x${string}`;
+    return root;
   }
 
   private _toBytes32(value: bigint): `0x${string}` {
@@ -97,13 +96,13 @@ export class ZKProver {
   }
 
   /**
-   * Real Noir prover integration (to be implemented when circuit is ready).
+   * Real Noir prover integration (implement when circuit is compiled).
    * Uses @noir-lang/backend_barretenberg and @noir-lang/noir_js.
    */
   private async _noirProve(
     _inputs: ProofInputs,
     _commitmentRoot: `0x${string}`,
-    publicInputs: `0x${string}`[]
+    _publicInputs: `0x${string}`[],
   ): Promise<ProofOutput> {
     // TODO: integrate Noir prover
     // import { Noir } from '@noir-lang/noir_js';
@@ -116,18 +115,4 @@ export class ZKProver {
     // const { proof, publicInputs } = await backend.generateProof(witness);
     throw new Error("Real Noir prover not yet integrated — set useRealProver=false for prototype");
   }
-}
-
-/** Simple keccak256 without ethers/viem dependency for this module */
-function keccak256Hex(hexData: string): string {
-  // In production: use viem's keccak256 or ethers.keccak256
-  // For now, return a deterministic mock based on input length
-  // Replace with: import { keccak256 } from 'viem'; keccak256(`0x${hexData}`)
-  const { createHash } = await import("node:crypto").catch(() => ({ createHash: null }));
-  if (createHash) {
-    // SHA3 (keccak256) — note: Node's crypto uses SHA3, not keccak256
-    // For correct keccak256, use viem in the actual implementation
-    return "0x" + createHash("sha3-256").update(Buffer.from(hexData, "hex")).digest("hex");
-  }
-  return "0x" + "0".repeat(64); // fallback
 }
