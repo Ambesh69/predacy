@@ -283,23 +283,66 @@ export class BatchProcessor {
 
     // 3. Compute batch clearing price
     const clearing = computeClearingPrice(orders);
-    const effectiveClearingPrice = clearing.clearingPrice || 650_000n; // fallback if no cross
-    console.log(`[BatchProcessor] Clearing price: ${effectiveClearingPrice}, net buy: ${clearing.netBuyAmount}`);
+    console.log(
+      `[BatchProcessor] Clearing: internalPrice=${clearing.clearingPrice}, ` +
+      `buyVol=${clearing.filledBuyVolume}, sellVol=${clearing.filledSellVolume}, ` +
+      `netBuy=${clearing.netBuyAmount}`,
+    );
 
-    // 4. Execute net position on Polymarket (only if API keys are set)
-    if (clearing.netBuyAmount > 0n && this.config.polymarket.apiKey) {
+    // 4. Fetch Polymarket data + execute net position (only when API keys are set)
+    //
+    // When the batch has an internal clearing price (orders crossed), use it.
+    // When there's no crossing (e.g. all-buy batch or no overlapping limits),
+    // fetch the live Polymarket mid price instead so settlement is anchored to
+    // real market data rather than an arbitrary fallback constant.
+    let effectiveClearingPrice = clearing.clearingPrice;
+
+    if (this.config.polymarket.apiKey) {
       try {
-        const market = await this.polymarket.getMarket(batchInfo.marketId.slice(2));
+        // Single market fetch shared by both the price-discovery and routing steps
+        const market   = await this.polymarket.getMarket(batchInfo.marketId.slice(2));
         const yesToken = market.tokens.find((t) => t.outcome === "Yes")?.token_id;
-        if (yesToken) {
-          console.log(`[BatchProcessor] Polymarket net buy: ${clearing.netBuyAmount} USDC`);
-          await this.polymarket.placeMarketBuy(yesToken, clearing.netBuyAmount);
+
+        if (!yesToken) throw new Error("YES token not found for market");
+
+        // When no internal crossing occurred, anchor clearing price to Polymarket mid
+        if (effectiveClearingPrice === 0n) {
+          const mid = await this.polymarket.getMidPrice(yesToken);
+          effectiveClearingPrice = BigInt(Math.round(mid * 1_000_000));
+          console.log(
+            `[BatchProcessor] No internal crossing — anchoring to Polymarket mid: ` +
+            `${mid} → ${effectiveClearingPrice}`,
+          );
+        }
+
+        // Route net buy position to Polymarket
+        if (clearing.netBuyAmount > 0n) {
+          const usdcStr = (Number(clearing.netBuyAmount) / 1e6).toFixed(2);
+          console.log(`[BatchProcessor] → Routing net BUY YES: $${usdcStr} USDC to Polymarket`);
+          const { orderId, limitPrice } = await this.polymarket.placeMarketBuy(yesToken, clearing.netBuyAmount);
+          console.log(`[BatchProcessor] → Polymarket order ${orderId} placed (limit ${limitPrice})`);
+
+          // If clearing was settled by Polymarket (no internal cross), use the
+          // actual limit price used on Polymarket so settlement reflects reality.
+          if (clearing.clearingPrice === 0n) {
+            effectiveClearingPrice = BigInt(Math.round(limitPrice * 1_000_000));
+          }
+        } else {
+          console.log(`[BatchProcessor] → No net position to route (fully matched internally or zero buys)`);
         }
       } catch (err) {
-        // Don't abort settlement if Polymarket fails — positions still settle on-chain
-        console.warn(`[BatchProcessor] Polymarket execution failed (non-fatal):`, err);
+        // Non-fatal: settlement proceeds on-chain with best-effort clearing price
+        console.warn(`[BatchProcessor] Polymarket step failed (non-fatal):`, err);
       }
     }
+
+    // Final safety: never settle with price = 0 (contract would reject)
+    if (effectiveClearingPrice === 0n) {
+      effectiveClearingPrice = 650_000n; // 0.65 fallback when API not configured
+      console.log(`[BatchProcessor] No Polymarket API — using fallback clearing price: ${effectiveClearingPrice}`);
+    }
+
+    console.log(`[BatchProcessor] Effective clearing price: ${effectiveClearingPrice}`);
 
     // 5. Generate ZK proof (mock in prototype mode)
     const { proof } = await this.zkProver.generateProof({

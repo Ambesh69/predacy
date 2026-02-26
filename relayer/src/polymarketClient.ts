@@ -76,22 +76,37 @@ export class PolymarketClient {
   // ─── Order execution (requires auth) ───────────────────────────────────────
 
   /**
-   * Place a market buy order for YES tokens on Polymarket's CLOB.
-   * This is the net position execution step after batch clearing.
+   * Place a market-like buy order for YES tokens on Polymarket's CLOB.
+   * Uses a FOK (fill-or-kill) order at mid + 1% slippage so it fills immediately.
    *
-   * @param tokenId    YES token ID (from market.tokens[].token_id)
+   * Polymarket CLOB does not have a true "MARKET" order type.  FOK with an
+   * aggressive limit achieves the same effect in normal liquidity conditions.
+   *
+   * @param tokenId    YES (or NO) token ID from market.tokens[].token_id
    * @param usdcAmount USDC to spend (bigint, 6 decimals — e.g. 1_000_000n = $1)
-   * @returns Order ID from Polymarket
+   * @returns orderId and the limit price used (as a float in [0, 1])
    */
-  async placeMarketBuy(tokenId: string, usdcAmount: bigint): Promise<string> {
-    const amountFloat = Number(usdcAmount) / 1e6;
+  async placeMarketBuy(
+    tokenId: string,
+    usdcAmount: bigint,
+  ): Promise<{ orderId: string; limitPrice: number }> {
+    // Fetch current mid to size the order and set a realistic limit
+    const mid = await this.getMidPrice(tokenId);
+
+    // Accept up to 1% above mid — ensures fill without excess slippage
+    const limitPrice = parseFloat(Math.min(0.999, mid * 1.01).toFixed(4));
+
+    // Polymarket size = number of tokens, NOT USDC amount
+    const usdcFloat = Number(usdcAmount) / 1e6;
+    const tokenSize = parseFloat((usdcFloat / limitPrice).toFixed(2));
+
     const body = JSON.stringify({
       order: {
         tokenID:   tokenId,
         side:      "BUY",
-        price:     null,
-        size:      amountFloat,
-        orderType: "MARKET",
+        price:     limitPrice,
+        size:      tokenSize,
+        orderType: "FOK",
       },
     });
 
@@ -99,7 +114,7 @@ export class PolymarketClient {
       headers: this._authHeaders("POST", "/order", body),
     });
 
-    return res.data.orderId;
+    return { orderId: res.data.orderId as string, limitPrice };
   }
 
   /**
@@ -108,15 +123,21 @@ export class PolymarketClient {
    * @param tokenId    YES token ID
    * @param usdcAmount USDC to spend (bigint, 6 decimals)
    * @param limitPrice Price in [0,1] as a float (e.g. 0.65)
+   * @returns orderId and the limit price used
    */
-  async placeLimitBuy(tokenId: string, usdcAmount: bigint, limitPrice: number): Promise<string> {
-    const size = Number(usdcAmount) / 1e6 / limitPrice;
+  async placeLimitBuy(
+    tokenId: string,
+    usdcAmount: bigint,
+    limitPrice: number,
+  ): Promise<{ orderId: string; limitPrice: number }> {
+    // size = tokens to receive at this price for the given USDC spend
+    const tokenSize = parseFloat((Number(usdcAmount) / 1e6 / limitPrice).toFixed(2));
     const body = JSON.stringify({
       order: {
         tokenID:   tokenId,
         side:      "BUY",
         price:     limitPrice,
-        size:      size.toFixed(2),
+        size:      tokenSize,
         orderType: "GTC",
       },
     });
@@ -125,7 +146,7 @@ export class PolymarketClient {
       headers: this._authHeaders("POST", "/order", body),
     });
 
-    return res.data.orderId;
+    return { orderId: res.data.orderId as string, limitPrice };
   }
 
   // ─── Auth ────────────────────────────────────────────────────────────────────
