@@ -116,6 +116,13 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   const [submitStep, setSubmitStep]   = useState<"approving" | "committing" | null>(null);
   const [faucetLoading, setFaucetLoading] = useState(false);
   const [chainError, setChainError]   = useState<string | null>(null);
+  const [position, setPosition]       = useState<{
+    filledAmount: bigint;
+    refundAmount: bigint;
+    isBuy: boolean;
+    claimed: boolean;
+  } | null>(null);
+  const [claimLoading, setClaimLoading] = useState(false);
 
   const { authenticated, login } = usePrivy();
   const { wallets } = useWallets();
@@ -237,6 +244,28 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     const interval = setInterval(fetchBatch, 5000);
     return () => { cancelled = true; clearInterval(interval); };
   }, []);
+
+  // ── Poll position when batch is SETTLED ─────────────────────────────────────
+  useEffect(() => {
+    if (batch.status !== BatchStatus.SETTLED || !isConnected || !walletAddress) return;
+    let cancelled = false;
+    const fetchPosition = async () => {
+      try {
+        const contracts = getContracts(polygonAmoy.id);
+        const pos = await publicClient.readContract({
+          address: contracts.batchVault,
+          abi: BATCH_VAULT_ABI,
+          functionName: "getPosition",
+          args: [batch.batchId, walletAddress],
+        }) as { filledAmount: bigint; refundAmount: bigint; isBuy: boolean; claimed: boolean };
+        if (!cancelled) setPosition(pos);
+      } catch {
+        // RPC hiccup — keep current
+      }
+    };
+    fetchPosition();
+    return () => { cancelled = true; };
+  }, [batch.status, batch.batchId, walletAddress, isConnected]);
 
   // ── ensureAmoy ───────────────────────────────────────────────────────────────
   // Uses EIP-6963 to find MetaMask (works even when Backpack/another wallet has
@@ -416,6 +445,29 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     }
   };
 
+  // ── Claim position ───────────────────────────────────────────────────────────
+  const handleClaimPosition = async () => {
+    setClaimLoading(true);
+    setChainError(null);
+    try {
+      const walletClient = await ensureAmoy();
+      const contracts = getContracts(polygonAmoy.id);
+      const tx = await walletClient.writeContract({
+        address: contracts.batchVault,
+        abi: BATCH_VAULT_ABI,
+        functionName: "claimPosition",
+        args: [batch.batchId],
+        ...AMOY_GAS,
+      });
+      await publicClient.waitForTransactionReceipt({ hash: tx });
+      setPosition((p) => p ? { ...p, claimed: true } : p);
+    } catch (e: any) {
+      if (e?.code !== 4001) setChainError(e.message ?? "Claim failed");
+    } finally {
+      setClaimLoading(false);
+    }
+  };
+
   // ── Render ───────────────────────────────────────────────────────────────────
   if (loading) {
     return (
@@ -436,6 +488,13 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
 
   const yesPrice = parseFloat(market.outcomePrices[0]);
   const yesProb  = Math.round(yesPrice * 100);
+
+  const Row = ({ label, value }: { label: string; value: string }) => (
+    <div className="flex justify-between">
+      <span className="text-[11px] text-muted">{label}</span>
+      <span className="text-[11px] text-text">{value}</span>
+    </div>
+  );
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -572,10 +631,12 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
           <CommitmentFeed entries={commitments} myAddress={walletAddress} />
         </div>
 
-        {/* Column 3: Order form */}
+        {/* Column 3: Order form / Claim panel */}
         <div className="flex flex-col">
           <div className="border-b border-border px-4 py-3 flex items-center justify-between">
-            <span className="text-[11px] text-muted tracking-widest uppercase">Place Order</span>
+            <span className="text-[11px] text-muted tracking-widest uppercase">
+              {batch.status === BatchStatus.SETTLED ? "Batch Result" : "Place Order"}
+            </span>
             <div className="flex items-center gap-1.5">
               <div className={clsx(
                 "w-1.5 h-1.5 rounded-full",
@@ -593,18 +654,69 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
               </span>
             </div>
           </div>
-          <div className="flex-1">
-            <OrderForm
-              market={market}
-              marketId={id as `0x${string}`}
-              batchOpen={batch.status === BatchStatus.OPEN}
-              onSubmit={handleOrderSubmit}
-              walletAddress={walletAddress}
-              isConnected={isConnected}
-              onConnect={login}
-              submitStep={submitStep}
-            />
-          </div>
+
+          {batch.status === BatchStatus.SETTLED ? (
+            /* Claim panel — shown after batch settles */
+            <div className="flex-1 p-5 flex flex-col gap-4">
+              <div className="border border-border p-4 space-y-3">
+                <Row
+                  label="Clearing price"
+                  value={
+                    batch.clearingPrice > 0n
+                      ? `${(Number(batch.clearingPrice) / 1e6 * 100).toFixed(1)}¢`
+                      : "No cross"
+                  }
+                />
+                {position && (
+                  <>
+                    <div className="border-t border-border/40 pt-3 space-y-3">
+                      <Row label="Filled" value={`$${(Number(position.filledAmount) / 1e6).toFixed(2)}`} />
+                      <Row label="Refund" value={`$${(Number(position.refundAmount) / 1e6).toFixed(2)}`} />
+                      <Row label="Side" value={position.isBuy ? "BUY YES" : "SELL YES"} />
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {/* Claim button / status */}
+              {!isConnected ? (
+                <button
+                  onClick={login}
+                  className="w-full border border-border text-muted text-[11px] tracking-widest uppercase py-3 hover:border-border-bright hover:text-text transition-colors"
+                >
+                  CONNECT TO CLAIM
+                </button>
+              ) : position === null ? (
+                <p className="text-muted text-xs text-center animate-pulse">Loading position…</p>
+              ) : position.claimed ? (
+                <p className="text-accent text-[11px] tracking-widest uppercase text-center">✓ CLAIMED</p>
+              ) : position.filledAmount === 0n && position.refundAmount === 0n ? (
+                <p className="text-muted text-xs text-center">No position in this batch</p>
+              ) : (
+                <button
+                  onClick={handleClaimPosition}
+                  disabled={claimLoading}
+                  className="w-full border border-accent text-accent text-[11px] tracking-widest uppercase py-3 hover:bg-accent/5 transition-colors disabled:opacity-40"
+                >
+                  {claimLoading ? "CLAIMING…" : "CLAIM POSITION"}
+                </button>
+              )}
+            </div>
+          ) : (
+            /* Order form — shown while batch is OPEN or SETTLING */
+            <div className="flex-1">
+              <OrderForm
+                market={market}
+                marketId={id as `0x${string}`}
+                batchOpen={batch.status === BatchStatus.OPEN}
+                onSubmit={handleOrderSubmit}
+                walletAddress={walletAddress}
+                isConnected={isConnected}
+                onConnect={login}
+                submitStep={submitStep}
+              />
+            </div>
+          )}
         </div>
       </div>
     </div>
