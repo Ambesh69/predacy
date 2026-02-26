@@ -25,6 +25,13 @@ interface OrderFormProps {
 
 const PRICE_STEP = 10_000; // 0.01 in 6-decimal space = 1%
 
+// Sentinel limitPrices for market orders.
+// Market buy  = willing to pay any price → MAX_UINT256
+// Market sell = willing to accept any price → 0
+// Both always cross in the clearing algorithm; no refund possible.
+const MARKET_BUY_LIMIT  = 2n ** 256n - 1n;
+const MARKET_SELL_LIMIT = 0n;
+
 export default function OrderForm({
   market,
   marketId,
@@ -35,7 +42,8 @@ export default function OrderForm({
   onConnect,
   submitStep,
 }: OrderFormProps) {
-  const [isBuy, setIsBuy] = useState(true);
+  const [isBuy, setIsBuy]         = useState(true);
+  const [orderType, setOrderType] = useState<"market" | "limit">("market");
   const [amountDisplay, setAmountDisplay] = useState("100");
   const [limitPrice, setLimitPrice] = useState(
     Math.round(parseFloat(market.outcomePrices[0]) * 1_000_000)
@@ -46,6 +54,12 @@ export default function OrderForm({
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Effective limit price: sentinel value for market orders, user input for limit orders.
+  const effectiveLimitPrice =
+    orderType === "market"
+      ? (isBuy ? MARKET_BUY_LIMIT : MARKET_SELL_LIMIT)
+      : BigInt(limitPrice);
+
   // Live commitment hash computation
   const updateCommitment = useCallback(() => {
     if (!walletAddress) return;
@@ -53,11 +67,16 @@ export default function OrderForm({
       const amountParsed = BigInt(Math.round(parseFloat(amountDisplay || "0") * 1_000_000));
       if (amountParsed === 0n) return;
 
+      const effLP =
+        orderType === "market"
+          ? (isBuy ? MARKET_BUY_LIMIT : MARKET_SELL_LIMIT)
+          : BigInt(limitPrice);
+
       const hash = computeCommitment({
         marketId,
         isBuy,
         amount: amountParsed,
-        limitPrice: BigInt(limitPrice),
+        limitPrice: effLP,
         salt,
         trader: walletAddress,
       });
@@ -65,7 +84,7 @@ export default function OrderForm({
     } catch {
       // ignore parse errors while typing
     }
-  }, [walletAddress, amountDisplay, isBuy, limitPrice, marketId, salt]);
+  }, [walletAddress, amountDisplay, isBuy, limitPrice, orderType, marketId, salt]);
 
   useEffect(() => {
     updateCommitment();
@@ -85,7 +104,7 @@ export default function OrderForm({
         amount,
         salt,
         isBuy,
-        limitPrice: BigInt(limitPrice),
+        limitPrice: effectiveLimitPrice,
       });
       setSubmitted(true);
     } catch (err: any) {
@@ -114,7 +133,11 @@ export default function OrderForm({
         <div className="text-center space-y-1">
           <p className="text-accent text-sm tracking-wide">ORDER SEALED</p>
           <p className="text-muted text-xs">Your commitment is locked in the batch.</p>
-          <p className="text-muted text-xs">No one can see your position until settlement.</p>
+          <p className="text-muted text-xs">
+            {orderType === "market"
+              ? "Market order — fills at the batch clearing price."
+              : "Limit order — fills only if clearing price meets your limit."}
+          </p>
         </div>
 
         <div className="w-full p-3 border border-border bg-surface/50 space-y-1">
@@ -159,6 +182,30 @@ export default function OrderForm({
         </button>
       </div>
 
+      {/* Order type toggle */}
+      <div className="grid grid-cols-2 border-b border-border">
+        <button
+          type="button"
+          onClick={() => setOrderType("market")}
+          className={clsx(
+            "py-1.5 text-[10px] tracking-widest uppercase transition-colors",
+            orderType === "market" ? "text-text bg-surface/60" : "text-muted/60 hover:text-muted",
+          )}
+        >
+          Market
+        </button>
+        <button
+          type="button"
+          onClick={() => setOrderType("limit")}
+          className={clsx(
+            "py-1.5 text-[10px] tracking-widest uppercase transition-colors border-l border-border",
+            orderType === "limit" ? "text-text bg-surface/60" : "text-muted/60 hover:text-muted",
+          )}
+        >
+          Limit
+        </button>
+      </div>
+
       <div className="flex-1 overflow-y-auto p-4 space-y-5">
         {/* Amount */}
         <div className="space-y-2">
@@ -196,50 +243,69 @@ export default function OrderForm({
           </div>
         </div>
 
-        {/* Limit price */}
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <label className="text-[11px] text-muted tracking-widest uppercase">Limit Price</label>
-            <span className={clsx(
-              "text-[11px] tabular-nums",
-              priceDiff > 0 ? "text-accent" : priceDiff < 0 ? "text-danger" : "text-muted"
-            )}>
-              {priceDiff > 0 ? "+" : ""}{priceDiff.toFixed(1)}% vs Polymarket
-            </span>
-          </div>
+        {/* Limit price — only shown for limit orders */}
+        {orderType === "limit" ? (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <label className="text-[11px] text-muted tracking-widest uppercase">Limit Price</label>
+              <span className={clsx(
+                "text-[11px] tabular-nums",
+                priceDiff > 0 ? "text-accent" : priceDiff < 0 ? "text-danger" : "text-muted"
+              )}>
+                {priceDiff > 0 ? "+" : ""}{priceDiff.toFixed(1)}% vs Polymarket
+              </span>
+            </div>
 
-          <div className="flex items-center border border-border bg-surface px-3 py-3">
-            <span
-              className={clsx(
-                "text-2xl font-black tabular-nums tracking-tight",
-                isBuy ? "text-accent" : "text-danger",
-              )}
-              style={{ fontFamily: "var(--font-display)" }}
-            >
-              {pricePercent}¢
-            </span>
-            <div className="ml-auto text-right">
-              <p className="text-[10px] text-muted">Polymarket</p>
-              <p className="text-xs text-text tabular-nums">{(polyPrice * 100).toFixed(1)}¢</p>
+            <div className="flex items-center border border-border bg-surface px-3 py-3">
+              <span
+                className={clsx(
+                  "text-2xl font-black tabular-nums tracking-tight",
+                  isBuy ? "text-accent" : "text-danger",
+                )}
+                style={{ fontFamily: "var(--font-display)" }}
+              >
+                {pricePercent}¢
+              </span>
+              <div className="ml-auto text-right">
+                <p className="text-[10px] text-muted">Polymarket</p>
+                <p className="text-xs text-text tabular-nums">{(polyPrice * 100).toFixed(1)}¢</p>
+              </div>
+            </div>
+
+            <input
+              type="range"
+              min={1_000}
+              max={990_000}
+              step={PRICE_STEP}
+              value={limitPrice}
+              onChange={(e) => setLimitPrice(parseInt(e.target.value))}
+              className={clsx("w-full", !isBuy && "danger")}
+            />
+
+            <div className="flex justify-between text-[10px] text-muted/50">
+              <span>1¢</span>
+              <span>50¢</span>
+              <span>99¢</span>
             </div>
           </div>
-
-          <input
-            type="range"
-            min={1_000}
-            max={990_000}
-            step={PRICE_STEP}
-            value={limitPrice}
-            onChange={(e) => setLimitPrice(parseInt(e.target.value))}
-            className={clsx("w-full", !isBuy && "danger")}
-          />
-
-          <div className="flex justify-between text-[10px] text-muted/50">
-            <span>1¢</span>
-            <span>50¢</span>
-            <span>99¢</span>
+        ) : (
+          /* Market order: show current Polymarket price as reference */
+          <div className="flex items-center justify-between border border-border bg-surface/40 px-3 py-2.5">
+            <div>
+              <p className="text-[10px] text-muted tracking-widest uppercase">Fill price</p>
+              <p className="text-[11px] text-muted/70 mt-0.5">At batch clearing price</p>
+            </div>
+            <div className="text-right">
+              <p className="text-[10px] text-muted">Polymarket now</p>
+              <p className={clsx(
+                "text-lg font-black tabular-nums",
+                isBuy ? "text-accent" : "text-danger",
+              )} style={{ fontFamily: "var(--font-display)" }}>
+                {(polyPrice * 100).toFixed(1)}¢
+              </p>
+            </div>
           </div>
-        </div>
+        )}
 
         {/* Live commitment hash */}
         <div className="space-y-2">
@@ -308,7 +374,7 @@ export default function OrderForm({
                 {submitStep === "approving" ? "APPROVING USDC…" : "SEALING ORDER…"}
               </span>
             ) : (
-              `SEAL ${isBuy ? "BUY" : "SELL"} — $${amountDisplay || "0"}`
+              `SEAL ${orderType === "market" ? "MKT" : "LMT"} ${isBuy ? "BUY YES" : "BUY NO"} — $${amountDisplay || "0"}`
             )}
           </button>
         )}

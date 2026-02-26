@@ -668,13 +668,13 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
                   }
                 />
                 {position && (
-                  <>
-                    <div className="border-t border-border/40 pt-3 space-y-3">
-                      <Row label="Filled" value={`$${(Number(position.filledAmount) / 1e6).toFixed(2)}`} />
+                  <div className="border-t border-border/40 pt-3 space-y-3">
+                    <Row label="Side" value={position.isBuy ? "BUY YES" : "BUY NO"} />
+                    <Row label="Filled" value={`$${(Number(position.filledAmount) / 1e6).toFixed(2)}`} />
+                    {position.refundAmount > 0n && (
                       <Row label="Refund" value={`$${(Number(position.refundAmount) / 1e6).toFixed(2)}`} />
-                      <Row label="Side" value={position.isBuy ? "BUY YES" : "SELL YES"} />
-                    </div>
-                  </>
+                    )}
+                  </div>
                 )}
               </div>
 
