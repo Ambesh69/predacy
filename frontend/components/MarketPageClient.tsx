@@ -351,6 +351,32 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     });
     await publicClient.waitForTransactionReceipt({ hash: commitTx });
 
+    // Send off-chain order details to relayer so it can settle at batch close.
+    // The on-chain commitment only contains the hash + USDC amount — the relayer
+    // needs the full plaintext (isBuy, limitPrice, salt) to verify + settle.
+    // Non-fatal: commitment is already sealed on-chain regardless.
+    const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
+    if (relayerUrl && walletAddress) {
+      try {
+        await fetch(`${relayerUrl}/order`, {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            batchId:    batch.batchId.toString(),
+            trader:     walletAddress,
+            isBuy:      params.isBuy,
+            amount:     params.amount.toString(),
+            limitPrice: params.limitPrice.toString(),
+            salt:       params.salt,
+          }),
+        });
+      } catch {
+        // Relayer unreachable — commitment is already on-chain, order may still
+        // be recoverable if the relayer is back before the batch closes.
+        console.warn("[Predacy] Could not reach relayer at", relayerUrl);
+      }
+    }
+
     // Update local state optimistically
     if (walletAddress) {
       setCommitments((prev) => [
