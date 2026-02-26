@@ -1,14 +1,28 @@
-import { polygon } from "wagmi/chains";
+import { polygon, polygonAmoy } from "viem/chains";
 
 // ── Contract Addresses ────────────────────────────────────────────────────────
 
 export const CONTRACTS = {
+  // Polygon mainnet (live Polymarket) — BatchVault pending mainnet deploy
   [polygon.id]: {
-    batchVault: "0x0000000000000000000000000000000000000000" as `0x${string}`, // TODO: deploy
+    batchVault: "0x0000000000000000000000000000000000000000" as `0x${string}`, // TODO: mainnet deploy
     usdc: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174" as `0x${string}`,
-    ctf: "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045" as `0x${string}`,
+    ctf:  "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045" as `0x${string}`,
+  },
+  // Polygon Amoy testnet — deployed 2026-02-26
+  [polygonAmoy.id]: {
+    batchVault: "0xE7C482d5a56aB116F28778044Da62ec12B5EAfc4" as `0x${string}`,
+    usdc:       "0x2b39cF3CF32bBB2A98F8F63E4Edaf4610FBb68D6" as `0x${string}`, // MockUSDC
+    ctf:        "0xfb6F125d5C5FC9Ec383019006dA99Ec86f67C3A3" as `0x${string}`, // MockCTF
   },
 } as const;
+
+/** Returns contract addresses for the given chainId. Throws if unsupported. */
+export function getContracts(chainId: number) {
+  const c = CONTRACTS[chainId as keyof typeof CONTRACTS];
+  if (!c) throw new Error(`Predacy not deployed on chain ${chainId}`);
+  return c;
+}
 
 // ── BatchVault ABI (subset needed by frontend) ────────────────────────────────
 
@@ -18,7 +32,7 @@ export const BATCH_VAULT_ABI = [
     type: "function",
     inputs: [
       { name: "commitment", type: "bytes32" },
-      { name: "amount", type: "uint256" },
+      { name: "amount",     type: "uint256" },
     ],
     outputs: [],
     stateMutability: "nonpayable",
@@ -39,16 +53,16 @@ export const BATCH_VAULT_ABI = [
         name: "",
         type: "tuple",
         components: [
-          { name: "marketId", type: "bytes32" },
-          { name: "openedAt", type: "uint256" },
-          { name: "closedAt", type: "uint256" },
-          { name: "status", type: "uint8" },
-          { name: "totalDeposited", type: "uint256" },
-          { name: "clearingPrice", type: "uint256" },
-          { name: "netBuyAmount", type: "uint256" },
-          { name: "yesTokensReceived", type: "uint256" },
-          { name: "commitmentCount", type: "uint256" },
-          { name: "commitmentRoot", type: "bytes32" },
+          { name: "marketId",         type: "bytes32" },
+          { name: "openedAt",         type: "uint256" },
+          { name: "closedAt",         type: "uint256" },
+          { name: "status",           type: "uint8"   },
+          { name: "totalDeposited",   type: "uint256" },
+          { name: "clearingPrice",    type: "uint256" },
+          { name: "netBuyAmount",     type: "uint256" },
+          { name: "yesTokensReceived",type: "uint256" },
+          { name: "commitmentCount",  type: "uint256" },
+          { name: "commitmentRoot",   type: "bytes32" },
         ],
       },
     ],
@@ -59,7 +73,7 @@ export const BATCH_VAULT_ABI = [
     type: "function",
     inputs: [
       { name: "batchId", type: "uint256" },
-      { name: "trader", type: "address" },
+      { name: "trader",  type: "address" },
     ],
     outputs: [
       {
@@ -68,8 +82,8 @@ export const BATCH_VAULT_ABI = [
         components: [
           { name: "filledAmount", type: "uint256" },
           { name: "refundAmount", type: "uint256" },
-          { name: "isBuy", type: "bool" },
-          { name: "claimed", type: "bool" },
+          { name: "isBuy",        type: "bool"    },
+          { name: "claimed",      type: "bool"    },
         ],
       },
     ],
@@ -94,22 +108,22 @@ export const BATCH_VAULT_ABI = [
     name: "OrderCommitted",
     type: "event",
     inputs: [
-      { name: "batchId", type: "uint256", indexed: true },
-      { name: "trader", type: "address", indexed: true },
+      { name: "batchId",    type: "uint256", indexed: true  },
+      { name: "trader",     type: "address", indexed: true  },
       { name: "commitment", type: "bytes32", indexed: false },
-      { name: "amount", type: "uint256", indexed: false },
+      { name: "amount",     type: "uint256", indexed: false },
     ],
   },
   {
     name: "BatchSettled",
     type: "event",
     inputs: [
-      { name: "batchId", type: "uint256", indexed: true },
-      { name: "clearingPrice", type: "uint256", indexed: false },
-      { name: "totalBuyVolume", type: "uint256", indexed: false },
-      { name: "totalSellVolume", type: "uint256", indexed: false },
-      { name: "netBuyAmount", type: "uint256", indexed: false },
-      { name: "yesTokensReceived", type: "uint256", indexed: false },
+      { name: "batchId",          type: "uint256", indexed: true  },
+      { name: "clearingPrice",    type: "uint256", indexed: false },
+      { name: "totalBuyVolume",   type: "uint256", indexed: false },
+      { name: "totalSellVolume",  type: "uint256", indexed: false },
+      { name: "netBuyAmount",     type: "uint256", indexed: false },
+      { name: "yesTokensReceived",type: "uint256", indexed: false },
     ],
   },
 ] as const;
@@ -120,7 +134,7 @@ export const ERC20_ABI = [
     type: "function",
     inputs: [
       { name: "spender", type: "address" },
-      { name: "amount", type: "uint256" },
+      { name: "amount",  type: "uint256" },
     ],
     outputs: [{ name: "", type: "bool" }],
     stateMutability: "nonpayable",
@@ -129,7 +143,7 @@ export const ERC20_ABI = [
     name: "allowance",
     type: "function",
     inputs: [
-      { name: "owner", type: "address" },
+      { name: "owner",   type: "address" },
       { name: "spender", type: "address" },
     ],
     outputs: [{ name: "", type: "uint256" }],
@@ -144,10 +158,25 @@ export const ERC20_ABI = [
   },
 ] as const;
 
+/** ABI for MockUSDC faucet (testnet only) */
+export const MOCK_USDC_ABI = [
+  ...ERC20_ABI,
+  {
+    name: "mint",
+    type: "function",
+    inputs: [
+      { name: "to",     type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+] as const;
+
 // ── Batch status enum (mirrors Solidity) ─────────────────────────────────────
 
 export enum BatchStatus {
-  OPEN = 0,
+  OPEN     = 0,
   SETTLING = 1,
-  SETTLED = 2,
+  SETTLED  = 2,
 }

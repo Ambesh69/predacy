@@ -2,60 +2,122 @@
 
 import { useState, useEffect, use } from "react";
 import Link from "next/link";
+import { createPublicClient, createWalletClient, custom, http } from "viem";
+import { polygonAmoy } from "viem/chains";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
 import BatchTimer from "@/components/BatchTimer";
 import CommitmentFeed from "@/components/CommitmentFeed";
 import OrderForm from "@/components/OrderForm";
 import WalletButton from "@/components/WalletButton";
 import { getMarket, MOCK_MARKETS, type Market } from "@/lib/polymarket";
-import { BatchStatus } from "@/lib/contracts";
+import {
+  BATCH_VAULT_ABI,
+  ERC20_ABI,
+  MOCK_USDC_ABI,
+  BatchStatus,
+  getContracts,
+} from "@/lib/contracts";
 import { clsx } from "clsx";
 
-// Mock batch state for prototype UI (replace with wagmi hooks for production)
+// ── Viem public client (read-only, no wallet needed) ─────────────────────────
+const publicClient = createPublicClient({
+  chain: polygonAmoy,
+  transport: http(),
+});
+
+// ── Fallback batch state shown before chain data loads ────────────────────────
 const MOCK_BATCH = {
-  batchId: 47n,
-  openedAt: Math.floor(Date.now() / 1000) - 8, // opened 8s ago
+  batchId: 0n,
+  openedAt: Math.floor(Date.now() / 1000) - 8,
   batchWindow: 30,
-  commitmentCount: 6,
-  totalDeposited: 2840_000_000n, // $2840
+  commitmentCount: 0,
+  totalDeposited: 0n,
   status: BatchStatus.OPEN,
   clearingPrice: 0n,
 };
 
-const MOCK_COMMITMENTS = [
-  { hash: "0x4f2ac3d1e89b5f72a06c1d3e8f9b2c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b" as `0x${string}`, amount: 500_000_000n, trader: "0xaB1C2D3E4F5A6B7C8D9E0F1A2B3C4D5E6F7A8B9C" as `0x${string}`, timestamp: Date.now() - 22000 },
-  { hash: "0x9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b" as `0x${string}`, amount: 100_000_000n, trader: "0xdEaDbEeFdEaDbEeFdEaDbEeFdEaDbEeFdEaDbEeF" as `0x${string}`, timestamp: Date.now() - 18000 },
-  { hash: "0x3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d" as `0x${string}`, amount: 750_000_000n, trader: "0xfEeFEEfEefEEFEEFEEfEefEEfEEfEEfEEFEEFEEF" as `0x${string}`, timestamp: Date.now() - 14000 },
-  { hash: "0x7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f" as `0x${string}`, amount: 200_000_000n, trader: "0xBaDbAdBaDbAdBaDbAdBaDbAdBaDbAdBaDbAdBaDb" as `0x${string}`, timestamp: Date.now() - 10000 },
-  { hash: "0x2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c" as `0x${string}`, amount: 1000_000_000n, trader: "0xC0FFEEC0fFEEC0FFEEC0fFEEC0FFEEC0FFEEC0FF" as `0x${string}`, timestamp: Date.now() - 6000 },
-  { hash: "0x8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e" as `0x${string}`, amount: 290_000_000n, trader: "0x1234567890123456789012345678901234567890" as `0x${string}`, timestamp: Date.now() - 2000 },
-];
+const MOCK_COMMITMENTS: Array<{
+  hash: `0x${string}`;
+  amount: bigint;
+  trader: `0x${string}`;
+  timestamp: number;
+}> = [];
 
 export default function MarketPageClient({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
-  const [market, setMarket] = useState<Market | null>(null);
-  const [batch, setBatch] = useState(MOCK_BATCH);
+  const [market, setMarket]           = useState<Market | null>(null);
+  const [batch, setBatch]             = useState(MOCK_BATCH);
   const [commitments, setCommitments] = useState(MOCK_COMMITMENTS);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading]         = useState(true);
+  const [submitStep, setSubmitStep]   = useState<"approving" | "committing" | null>(null);
+  const [faucetLoading, setFaucetLoading] = useState(false);
+  const [chainError, setChainError]   = useState<string | null>(null);
 
   const { authenticated, login } = usePrivy();
   const { wallets } = useWallets();
-  const walletAddress = wallets[0]?.address as `0x${string}` | undefined;
-  const isConnected = authenticated && !!walletAddress;
+  const wallet        = wallets[0];
+  const walletAddress = wallet?.address as `0x${string}` | undefined;
+  const isConnected   = authenticated && !!walletAddress;
 
+  // ── Load market ─────────────────────────────────────────────────────────────
   useEffect(() => {
     const found = MOCK_MARKETS.find((m) => m.conditionId === id);
-    if (found) {
-      setMarket(found);
-      setLoading(false);
-      return;
-    }
+    if (found) { setMarket(found); setLoading(false); return; }
     getMarket(id)
       .then((m) => setMarket(m))
       .catch(() => setMarket(null))
       .finally(() => setLoading(false));
   }, [id]);
 
+  // ── Poll batch state from chain ─────────────────────────────────────────────
+  useEffect(() => {
+    let cancelled = false;
+
+    const fetchBatch = async () => {
+      try {
+        const contracts = getContracts(polygonAmoy.id);
+
+        const batchId = await publicClient.readContract({
+          address: contracts.batchVault,
+          abi: BATCH_VAULT_ABI,
+          functionName: "currentBatchId",
+        }) as bigint;
+
+        if (batchId === 0n) return;
+
+        const b = await publicClient.readContract({
+          address: contracts.batchVault,
+          abi: BATCH_VAULT_ABI,
+          functionName: "getBatch",
+          args: [batchId],
+        }) as {
+          openedAt: bigint; closedAt: bigint; status: number;
+          totalDeposited: bigint; clearingPrice: bigint;
+          commitmentCount: bigint;
+        };
+
+        if (!cancelled) {
+          setBatch({
+            batchId,
+            openedAt:        Number(b.openedAt),
+            batchWindow:     30,
+            commitmentCount: Number(b.commitmentCount),
+            totalDeposited:  b.totalDeposited,
+            status:          b.status as BatchStatus,
+            clearingPrice:   b.clearingPrice,
+          });
+        }
+      } catch {
+        // RPC hiccup — keep showing current state
+      }
+    };
+
+    fetchBatch();
+    const interval = setInterval(fetchBatch, 5000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, []);
+
+  // ── Submit order ─────────────────────────────────────────────────────────────
   const handleOrderSubmit = async (params: {
     commitment: `0x${string}`;
     amount: bigint;
@@ -63,33 +125,98 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     isBuy: boolean;
     limitPrice: bigint;
   }) => {
-    // Production flow:
-    // 1. Approve USDC for the BatchVault contract
-    // 2. Call BatchVault.commitOrder(commitment, amount)
-    // 3. POST order details to relayer API (off-chain order book)
-    //
-    // For prototype: simulate with a 1.5s delay
-    await new Promise((r) => setTimeout(r, 1500));
+    if (!walletAddress || !wallet) throw new Error("Wallet not connected");
 
-    // Simulate adding a new commitment
+    setChainError(null);
+
+    // Verify the wallet is on Polygon Amoy
+    const walletChainId = wallet.chainId; // format: "eip155:80002"
+    const chainIdNum = parseInt(walletChainId.split(":")[1] ?? "0");
+    if (chainIdNum !== polygonAmoy.id) {
+      throw new Error(
+        `Please switch your wallet to Polygon Amoy (Chain ID ${polygonAmoy.id}) before submitting.`
+      );
+    }
+
+    const provider = await wallet.getEthereumProvider();
+    const walletClient = createWalletClient({
+      account: walletAddress,
+      chain: polygonAmoy,
+      transport: custom(provider),
+    });
+
+    const contracts = getContracts(polygonAmoy.id);
+
+    // Step 1 — approve USDC if allowance is insufficient
+    setSubmitStep("approving");
+    const allowance = await publicClient.readContract({
+      address: contracts.usdc,
+      abi: ERC20_ABI,
+      functionName: "allowance",
+      args: [walletAddress, contracts.batchVault],
+    }) as bigint;
+
+    if (allowance < params.amount) {
+      const approveTx = await walletClient.writeContract({
+        address: contracts.usdc,
+        abi: ERC20_ABI,
+        functionName: "approve",
+        args: [contracts.batchVault, params.amount],
+      });
+      await publicClient.waitForTransactionReceipt({ hash: approveTx });
+    }
+
+    // Step 2 — submit sealed commitment
+    setSubmitStep("committing");
+    const commitTx = await walletClient.writeContract({
+      address: contracts.batchVault,
+      abi: BATCH_VAULT_ABI,
+      functionName: "commitOrder",
+      args: [params.commitment, params.amount],
+    });
+    await publicClient.waitForTransactionReceipt({ hash: commitTx });
+
+    // Update local state optimistically
     if (walletAddress) {
       setCommitments((prev) => [
         ...prev,
-        {
-          hash: params.commitment,
-          amount: params.amount,
-          trader: walletAddress,
-          timestamp: Date.now(),
-        },
+        { hash: params.commitment, amount: params.amount, trader: walletAddress, timestamp: Date.now() },
       ]);
       setBatch((prev) => ({
         ...prev,
         commitmentCount: prev.commitmentCount + 1,
-        totalDeposited: prev.totalDeposited + params.amount,
+        totalDeposited:  prev.totalDeposited + params.amount,
       }));
     }
   };
 
+  // ── USDC faucet (Amoy only) ──────────────────────────────────────────────────
+  const handleGetTestUsdc = async () => {
+    if (!walletAddress || !wallet) return;
+    setFaucetLoading(true);
+    try {
+      const provider = await wallet.getEthereumProvider();
+      const walletClient = createWalletClient({
+        account: walletAddress,
+        chain: polygonAmoy,
+        transport: custom(provider),
+      });
+      const contracts = getContracts(polygonAmoy.id);
+      const tx = await walletClient.writeContract({
+        address: contracts.usdc,
+        abi: MOCK_USDC_ABI,
+        functionName: "mint",
+        args: [walletAddress, 10_000_000_000n], // $10,000 USDC
+      });
+      await publicClient.waitForTransactionReceipt({ hash: tx });
+    } catch (e: any) {
+      setChainError(e.message ?? "Faucet failed");
+    } finally {
+      setFaucetLoading(false);
+    }
+  };
+
+  // ── Render ───────────────────────────────────────────────────────────────────
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -108,7 +235,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   }
 
   const yesPrice = parseFloat(market.outcomePrices[0]);
-  const yesProb = Math.round(yesPrice * 100);
+  const yesProb  = Math.round(yesPrice * 100);
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -130,10 +257,27 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         >
           PREDACY
         </h1>
-        <div className="ml-auto">
+        <div className="ml-auto flex items-center gap-3">
+          {/* Faucet button — Amoy testnet only */}
+          {isConnected && (
+            <button
+              onClick={handleGetTestUsdc}
+              disabled={faucetLoading}
+              className="text-[10px] tracking-widest uppercase border border-border text-muted px-3 py-1.5 hover:border-border-bright hover:text-text transition-colors disabled:opacity-40"
+            >
+              {faucetLoading ? "MINTING…" : "GET TEST USDC"}
+            </button>
+          )}
           <WalletButton compact />
         </div>
       </header>
+
+      {/* Chain error banner */}
+      {chainError && (
+        <div className="border-b border-danger/30 bg-danger/5 px-6 py-2">
+          <p className="text-danger text-xs">{chainError}</p>
+        </div>
+      )}
 
       {/* Market info bar */}
       <div className="border-b border-border px-6 py-4">
@@ -189,11 +333,11 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
             <div className="space-y-1.5">
               {[
                 { item: "Your direction (buy/sell)", hidden: true },
-                { item: "Your limit price", hidden: true },
-                { item: "Your trade amount", hidden: true },
+                { item: "Your limit price",          hidden: true },
+                { item: "Your trade amount",         hidden: true },
                 { item: "Clearing price (until settle)", hidden: true },
-                { item: "Commitment hash", hidden: false },
-                { item: "USDC deposited", hidden: false },
+                { item: "Commitment hash",           hidden: false },
+                { item: "USDC deposited",            hidden: false },
               ].map(({ item, hidden }) => (
                 <div key={item} className="flex items-center gap-2">
                   <span className={clsx("text-[10px]", hidden ? "text-accent/60" : "text-muted/40")}>
@@ -213,10 +357,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
 
         {/* Column 2: Commitment feed */}
         <div className="flex flex-col min-h-[400px] lg:min-h-0 border-b lg:border-b-0">
-          <CommitmentFeed
-            entries={commitments}
-            myAddress={walletAddress}
-          />
+          <CommitmentFeed entries={commitments} myAddress={walletAddress} />
         </div>
 
         {/* Column 3: Order form */}
@@ -232,7 +373,11 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
                 "text-[10px] tracking-widest uppercase",
                 batch.status === BatchStatus.OPEN ? "text-accent/70" : "text-muted/40"
               )}>
-                {batch.status === BatchStatus.OPEN ? "OPEN" : batch.status === BatchStatus.SETTLING ? "SETTLING" : "SETTLED"}
+                {batch.status === BatchStatus.OPEN
+                  ? "OPEN"
+                  : batch.status === BatchStatus.SETTLING
+                  ? "SETTLING"
+                  : "SETTLED"}
               </span>
             </div>
           </div>
@@ -245,6 +390,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
               walletAddress={walletAddress}
               isConnected={isConnected}
               onConnect={login}
+              submitStep={submitStep}
             />
           </div>
         </div>

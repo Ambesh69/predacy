@@ -19,6 +19,8 @@ interface OrderFormProps {
   walletAddress?: `0x${string}`;
   isConnected: boolean;
   onConnect: () => void;
+  /** Current tx step driven by parent — controls submit button label */
+  submitStep?: "approving" | "committing" | null;
 }
 
 const PRICE_STEP = 10_000; // 0.01 in 6-decimal space = 1%
@@ -31,6 +33,7 @@ export default function OrderForm({
   walletAddress,
   isConnected,
   onConnect,
+  submitStep,
 }: OrderFormProps) {
   const [isBuy, setIsBuy] = useState(true);
   const [amountDisplay, setAmountDisplay] = useState("100");
@@ -302,7 +305,7 @@ export default function OrderForm({
             {isSubmitting ? (
               <span className="flex items-center justify-center gap-2">
                 <span className="w-3 h-3 border border-current border-t-transparent rounded-full animate-spin" />
-                SEALING ORDER…
+                {submitStep === "approving" ? "APPROVING USDC…" : "SEALING ORDER…"}
               </span>
             ) : (
               `SEAL ${isBuy ? "BUY" : "SELL"} — $${amountDisplay || "0"}`
