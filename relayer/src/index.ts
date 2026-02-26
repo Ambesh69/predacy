@@ -20,6 +20,7 @@ const config = {
   chainId,
   vaultAddress:      (process.env.VAULT_ADDRESS      ?? "0x0000000000000000000000000000000000000000") as `0x${string}`,
   relayerPrivateKey: (process.env.RELAYER_PRIVATE_KEY ?? "0x0000000000000000000000000000000000000000000000000000000000000001") as `0x${string}`,
+  redisUrl:          process.env.REDIS_URL,   // Optional — in-memory fallback if not set
   polymarket: {
     apiKey:        process.env.POLYMARKET_API_KEY        ?? "",
     apiSecret:     process.env.POLYMARKET_API_SECRET     ?? "",
@@ -60,7 +61,7 @@ const server = createServer((req, res) => {
   if (req.method === "POST" && req.url === "/order") {
     let body = "";
     req.on("data", (chunk) => (body += chunk));
-    req.on("end", () => {
+    req.on("end", async () => {
       try {
         const data = JSON.parse(body);
         const { batchId, trader, isBuy, amount, limitPrice, salt } = data;
@@ -74,7 +75,7 @@ const server = createServer((req, res) => {
           return;
         }
 
-        processor.receiveOrder(BigInt(batchId), {
+        await processor.receiveOrder(BigInt(batchId), {
           trader:     trader     as `0x${string}`,
           isBuy:      Boolean(isBuy),
           amount:     BigInt(amount),
@@ -82,7 +83,8 @@ const server = createServer((req, res) => {
           salt:       salt       as `0x${string}`,
         });
 
-        send(200, { ok: true, batchId: batchId.toString(), orders: processor.orderCount(BigInt(batchId)) });
+        const orders = await processor.orderCount(BigInt(batchId));
+        send(200, { ok: true, batchId: batchId.toString(), orders });
       } catch (e: any) {
         send(400, { error: e.message });
       }

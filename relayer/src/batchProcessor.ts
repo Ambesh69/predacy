@@ -4,6 +4,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { computeClearingPrice } from "./clearingPrice.js";
 import { ZKProver } from "./zkProver.js";
 import { PolymarketClient } from "./polymarketClient.js";
+import { createOrderStore, type OrderStore } from "./orderStore.js";
 import type { Order, Commitment, BatchInfo } from "./types.js";
 
 // Polygon Amoy requires min 25 gwei priority fee. Apply to every write.
@@ -143,6 +144,7 @@ export interface RelayerConfig {
   chainId: number;          // 137 = Polygon mainnet, 80002 = Polygon Amoy
   vaultAddress: `0x${string}`;
   relayerPrivateKey: `0x${string}`;
+  redisUrl?: string;        // Optional — falls back to in-memory if not set
   polymarket: {
     apiKey: string;
     apiSecret: string;
@@ -168,10 +170,7 @@ export class BatchProcessor {
   private config: RelayerConfig;
   private zkProver: ZKProver;
   private polymarket: PolymarketClient;
-
-  // In-memory store: batchId => trader => Order (off-chain order book)
-  // Production: use Redis/Postgres
-  private pendingOrders: Map<string, Map<string, Order>> = new Map();
+  private store: OrderStore;
 
   constructor(config: RelayerConfig) {
     this.config = config;
@@ -195,6 +194,7 @@ export class BatchProcessor {
       config.polymarket.apiSecret,
       config.polymarket.apiPassphrase,
     );
+    this.store = createOrderStore(config.redisUrl);
   }
 
   // ─── Order intake (called from HTTP /order endpoint) ──────────────────────
@@ -203,18 +203,14 @@ export class BatchProcessor {
    * Store off-chain order details from a trader.
    * The trader must have already submitted the commitment on-chain first.
    */
-  receiveOrder(batchId: bigint, order: Order): void {
-    const key = batchId.toString();
-    if (!this.pendingOrders.has(key)) {
-      this.pendingOrders.set(key, new Map());
-    }
-    this.pendingOrders.get(key)!.set(order.trader.toLowerCase(), order);
+  async receiveOrder(batchId: bigint, order: Order): Promise<void> {
+    await this.store.save(batchId.toString(), order.trader.toLowerCase(), order);
     console.log(`[BatchProcessor] Stored order from ${order.trader} for batch ${batchId}`);
   }
 
   /** Returns how many off-chain orders are stored for a batch */
-  orderCount(batchId: bigint): number {
-    return this.pendingOrders.get(batchId.toString())?.size ?? 0;
+  async orderCount(batchId: bigint): Promise<number> {
+    return this.store.count(batchId.toString());
   }
 
   // ─── Batch lifecycle ───────────────────────────────────────────────────────
@@ -275,7 +271,7 @@ export class BatchProcessor {
     console.log(`[BatchProcessor] ${commitments.length} on-chain commitments`);
 
     // 2. Match to off-chain order details (verifies commitment hashes)
-    const orders = this._matchOrdersToCommitments(batchId, commitments, batchInfo.marketId);
+    const orders = await this._matchOrdersToCommitments(batchId, commitments, batchInfo.marketId);
     console.log(`[BatchProcessor] ${orders.length}/${commitments.length} orders matched`);
 
     if (orders.length === 0) {
@@ -382,8 +378,8 @@ export class BatchProcessor {
     await this.publicClient.waitForTransactionReceipt({ hash: settleHash });
     console.log(`[BatchProcessor] Batch ${batchId} settled! tx: ${settleHash}`);
 
-    // Clean up in-memory store
-    this.pendingOrders.delete(batchId.toString());
+    // Clean up order store
+    await this.store.delete(batchId.toString());
   }
 
   // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -403,13 +399,13 @@ export class BatchProcessor {
     return commitments;
   }
 
-  private _matchOrdersToCommitments(
+  private async _matchOrdersToCommitments(
     batchId: bigint,
     commitments: Commitment[],
     marketId: `0x${string}`,
-  ): Order[] {
-    const stored = this.pendingOrders.get(batchId.toString());
-    if (!stored) return [];
+  ): Promise<Order[]> {
+    const stored = await this.store.load(batchId.toString());
+    if (!stored.size) return [];
 
     const matched: Order[] = [];
     for (const commitment of commitments) {
