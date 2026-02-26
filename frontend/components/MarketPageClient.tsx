@@ -58,6 +58,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   const wallet        = wallets[0];
   const walletAddress = wallet?.address as `0x${string}` | undefined;
   const isConnected   = authenticated && !!walletAddress;
+  const wrongChain    = isConnected && wallet?.chainId !== "eip155:80002";
 
   // ── Load market ─────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -190,6 +191,32 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     }
   };
 
+  // ── Switch to Polygon Amoy ───────────────────────────────────────────────────
+  const handleSwitchChain = async () => {
+    if (!wallet) return;
+    const provider = await wallet.getEthereumProvider();
+    try {
+      await provider.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: "0x13882" }], // 80002 = Polygon Amoy
+      });
+    } catch (err: any) {
+      if (err.code === 4902) {
+        // Chain not yet added to wallet — add it first
+        await provider.request({
+          method: "wallet_addEthereumChain",
+          params: [{
+            chainId: "0x13882",
+            chainName: "Polygon Amoy",
+            nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 },
+            rpcUrls: ["https://rpc-amoy.polygon.technology/"],
+            blockExplorerUrls: ["https://amoy.polygonscan.com/"],
+          }],
+        });
+      }
+    }
+  };
+
   // ── USDC faucet (Amoy only) ──────────────────────────────────────────────────
   const handleGetTestUsdc = async () => {
     if (!walletAddress || !wallet) return;
@@ -276,6 +303,21 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       {chainError && (
         <div className="border-b border-danger/30 bg-danger/5 px-6 py-2">
           <p className="text-danger text-xs">{chainError}</p>
+        </div>
+      )}
+
+      {/* Wrong-network banner */}
+      {wrongChain && (
+        <div className="border-b border-yellow-500/30 bg-yellow-500/5 px-6 py-2 flex items-center justify-between">
+          <p className="text-yellow-400 text-xs">
+            Wrong network — switch to Polygon Amoy to trade.
+          </p>
+          <button
+            onClick={handleSwitchChain}
+            className="text-[10px] tracking-widest uppercase border border-yellow-500/40 text-yellow-400 px-3 py-1 hover:border-yellow-400 transition-colors"
+          >
+            Switch Network
+          </button>
         </div>
       )}
 
