@@ -43,6 +43,9 @@ const MOCK_COMMITMENTS: Array<{
   timestamp: number;
 }> = [];
 
+// Polygon Amoy chain ID in hex
+const AMOY_CHAIN_ID_HEX = "0x13882"; // 80002
+
 export default function MarketPageClient({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const [market, setMarket]           = useState<Market | null>(null);
@@ -59,35 +62,10 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   const walletAddress = wallet?.address as `0x${string}` | undefined;
   const isConnected   = authenticated && !!walletAddress;
 
-  // ── Chain tracking ──────────────────────────────────────────────────────────
-  // Privy exposes wallet.chainId as "eip155:XXXXX" synchronously on every
-  // render, so we can derive a hex chain ID immediately (no async gap).
-  // We also subscribe to chainChanged events so the value stays live after
-  // the user switches networks inside MetaMask.
-  const privyChainHex = wallet?.chainId
-    ? `0x${parseInt(wallet.chainId.split(":")[1] ?? "0").toString(16)}`
-    : null;
-  const [liveChainHex, setLiveChainHex] = useState<string | null>(null);
-  useEffect(() => {
-    if (!wallet) { setLiveChainHex(null); return; }
-    let active = true;
-    wallet.getEthereumProvider().then((p: any) => {
-      if (!active) return;
-      // Confirm initial chain via provider (more reliable than Privy snapshot)
-      p.request({ method: "eth_chainId" }).then((id: string) => {
-        if (active) setLiveChainHex(id);
-      });
-      const handler = (id: unknown) => { if (active) setLiveChainHex(id as string); };
-      p.on("chainChanged", handler);
-      return () => p.removeListener?.("chainChanged", handler);
-    });
-    return () => { active = false; };
-  }, [wallet]);
-
-  // Polygon Amoy = 0x13882 (80002 decimal)
-  const AMOY_HEX = "0x13882";
-  const effectiveChainHex = liveChainHex ?? privyChainHex;
-  const wrongChain = isConnected && effectiveChainHex !== null && effectiveChainHex.toLowerCase() !== AMOY_HEX;
+  // Simple banner: Privy exposes wallet.chainId as "eip155:XXXXX" synchronously.
+  // This may not update instantly after MetaMask switches, but ensureAmoy() below
+  // guarantees the right chain before any tx regardless of this value.
+  const onWrongChain = isConnected && !!wallet?.chainId && wallet.chainId !== `eip155:${polygonAmoy.id}`;
 
   // ── Load market ─────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -147,6 +125,51 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     return () => { cancelled = true; clearInterval(interval); };
   }, []);
 
+  // ── ensureAmoy ───────────────────────────────────────────────────────────────
+  // Switches MetaMask to Polygon Amoy if needed, then returns a ready walletClient.
+  // - Already on Amoy → wallet_switchEthereumChain returns immediately, no prompt.
+  // - Wrong chain     → MetaMask shows switch-network prompt.
+  // - Chain unknown   → wallet_addEthereumChain first, then switch.
+  // Called at the start of every tx handler so the chain is always right.
+  const ensureAmoy = async () => {
+    if (!wallet || !walletAddress) throw new Error("Wallet not connected");
+    const provider = await wallet.getEthereumProvider();
+
+    try {
+      await (provider as any).request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: AMOY_CHAIN_ID_HEX }],
+      });
+    } catch (err: any) {
+      if (err.code === 4902) {
+        // Chain not in wallet yet — add it, then switch
+        await (provider as any).request({
+          method: "wallet_addEthereumChain",
+          params: [{
+            chainId: AMOY_CHAIN_ID_HEX,
+            chainName: "Polygon Amoy",
+            nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 },
+            rpcUrls: ["https://rpc-amoy.polygon.technology/"],
+            blockExplorerUrls: ["https://amoy.polygonscan.com/"],
+          }],
+        });
+        await (provider as any).request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: AMOY_CHAIN_ID_HEX }],
+        });
+      } else if (err.code !== 4001) {
+        // 4001 = user rejected — rethrow anything unexpected
+        throw err;
+      }
+    }
+
+    return createWalletClient({
+      account: walletAddress,
+      chain: polygonAmoy,
+      transport: custom(provider),
+    });
+  };
+
   // ── Submit order ─────────────────────────────────────────────────────────────
   const handleOrderSubmit = async (params: {
     commitment: `0x${string}`;
@@ -155,34 +178,19 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     isBuy: boolean;
     limitPrice: bigint;
   }) => {
-    if (!walletAddress || !wallet) throw new Error("Wallet not connected");
-
     setChainError(null);
 
-    const provider = await wallet.getEthereumProvider();
-
-    // Verify chain directly from provider (avoids stale Privy snapshot)
-    const currentChain = await (provider as any).request({ method: "eth_chainId" }) as string;
-    if (currentChain.toLowerCase() !== AMOY_HEX) {
-      throw new Error(
-        `Please switch your wallet to Polygon Amoy (Chain ID ${polygonAmoy.id}) before submitting.`
-      );
-    }
-    const walletClient = createWalletClient({
-      account: walletAddress,
-      chain: polygonAmoy,
-      transport: custom(provider),
-    });
-
+    // ensureAmoy() switches to Amoy if needed, then gives us a ready walletClient
+    setSubmitStep("approving");
+    const walletClient = await ensureAmoy();
     const contracts = getContracts(polygonAmoy.id);
 
     // Step 1 — approve USDC if allowance is insufficient
-    setSubmitStep("approving");
     const allowance = await publicClient.readContract({
       address: contracts.usdc,
       abi: ERC20_ABI,
       functionName: "allowance",
-      args: [walletAddress, contracts.batchVault],
+      args: [walletAddress!, contracts.batchVault],
     }) as bigint;
 
     if (allowance < params.amount) {
@@ -219,49 +227,13 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     }
   };
 
-  // ── Switch to Polygon Amoy ───────────────────────────────────────────────────
-  const handleSwitchChain = async () => {
-    if (!wallet) return;
-    const provider = await wallet.getEthereumProvider();
-    try {
-      await provider.request({
-        method: "wallet_switchEthereumChain",
-        params: [{ chainId: "0x13882" }], // 80002 = Polygon Amoy
-      });
-    } catch (err: any) {
-      if (err.code === 4902) {
-        // Chain not yet added to wallet — add it first
-        await provider.request({
-          method: "wallet_addEthereumChain",
-          params: [{
-            chainId: "0x13882",
-            chainName: "Polygon Amoy",
-            nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 },
-            rpcUrls: ["https://rpc-amoy.polygon.technology/"],
-            blockExplorerUrls: ["https://amoy.polygonscan.com/"],
-          }],
-        });
-      }
-    }
-  };
-
   // ── USDC faucet (Amoy only) ──────────────────────────────────────────────────
   const handleGetTestUsdc = async () => {
     if (!walletAddress || !wallet) return;
-    // Check chain directly from provider — never rely on potentially-stale state
-    const provider = await wallet.getEthereumProvider();
-    const currentChain = await (provider as any).request({ method: "eth_chainId" }) as string;
-    if (currentChain.toLowerCase() !== AMOY_HEX) {
-      await handleSwitchChain();
-      return;
-    }
     setFaucetLoading(true);
     try {
-      const walletClient = createWalletClient({
-        account: walletAddress,
-        chain: polygonAmoy,
-        transport: custom(provider),
-      });
+      // ensureAmoy() switches to Amoy first, then returns a ready walletClient
+      const walletClient = await ensureAmoy();
       const contracts = getContracts(polygonAmoy.id);
       const tx = await walletClient.writeContract({
         address: contracts.usdc,
@@ -271,7 +243,9 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       });
       await publicClient.waitForTransactionReceipt({ hash: tx });
     } catch (e: any) {
-      setChainError(e.message ?? "Faucet failed");
+      if (e?.code !== 4001) { // ignore user rejection
+        setChainError(e.message ?? "Faucet failed");
+      }
     } finally {
       setFaucetLoading(false);
     }
@@ -335,23 +309,19 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
 
       {/* Chain error banner */}
       {chainError && (
-        <div className="border-b border-danger/30 bg-danger/5 px-6 py-2">
+        <div className="border-b border-danger/30 bg-danger/5 px-6 py-2 flex items-center justify-between gap-4">
           <p className="text-danger text-xs">{chainError}</p>
+          <button onClick={() => setChainError(null)} className="text-danger/60 hover:text-danger text-xs">✕</button>
         </div>
       )}
 
       {/* Wrong-network banner */}
-      {wrongChain && (
+      {onWrongChain && (
         <div className="border-b border-yellow-500/30 bg-yellow-500/5 px-6 py-2 flex items-center justify-between">
           <p className="text-yellow-400 text-xs">
-            Wrong network — switch to Polygon Amoy to trade.
+            Wrong network — this app runs on Polygon Amoy.
+            Clicking any action will prompt you to switch.
           </p>
-          <button
-            onClick={handleSwitchChain}
-            className="text-[10px] tracking-widest uppercase border border-yellow-500/40 text-yellow-400 px-3 py-1 hover:border-yellow-400 transition-colors"
-          >
-            Switch Network
-          </button>
         </div>
       )}
 
