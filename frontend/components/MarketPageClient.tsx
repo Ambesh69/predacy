@@ -152,46 +152,54 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   }, []);
 
   // ── ensureAmoy ───────────────────────────────────────────────────────────────
-  // Switches MetaMask to Polygon Amoy if needed, returns a ready walletClient.
-  // Uses window.ethereum directly — Privy's provider wrapper intercepts
-  // wallet_switchEthereumChain internally and never shows MetaMask's dialog.
+  // Three-step approach that handles all known failure modes:
+  //
+  // 1. wallet.switchChain() — Privy's official external-wallet chain-switch API.
+  //    This correctly surfaces MetaMask's "Switch network?" dialog (unlike calling
+  //    wallet_switchEthereumChain on Privy's provider wrapper, which resolves
+  //    silently without showing any dialog).
+  //
+  // 2. After the switch promise resolves, poll window.ethereum for eth_chainId
+  //    until it matches Amoy. MetaMask sometimes resolves the switch promise
+  //    before its internal chain state updates (race condition).
+  //
+  // 3. Create the walletClient with window.ethereum as the transport (direct
+  //    MetaMask, no Privy wrapper) so viem's chain verification uses real state.
   const ensureAmoy = async () => {
-    if (!walletAddress) throw new Error("Wallet not connected");
-    const provider = getRawProvider(); // direct MetaMask, not Privy's wrapper
+    if (!wallet || !walletAddress) throw new Error("Wallet not connected");
 
+    // Step 1 — switch via Privy's official API
     try {
-      await provider.request({
-        method: "wallet_switchEthereumChain",
-        params: [{ chainId: AMOY_CHAIN_ID_HEX }],
-      });
+      await wallet.switchChain(polygonAmoy.id);
     } catch (err: any) {
-      if (err.code === 4902) {
-        // Chain not in wallet yet — add it, then switch
-        await provider.request({
-          method: "wallet_addEthereumChain",
-          params: [{
-            chainId: AMOY_CHAIN_ID_HEX,
-            chainName: "Polygon Amoy",
-            nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 },
-            rpcUrls: ["https://rpc-amoy.polygon.technology/"],
-            blockExplorerUrls: ["https://amoy.polygonscan.com/"],
-          }],
-        });
-        await provider.request({
-          method: "wallet_switchEthereumChain",
-          params: [{ chainId: AMOY_CHAIN_ID_HEX }],
-        });
-      } else if (err.code === 4001) {
-        throw new Error("Please switch to Polygon Amoy to continue.");
-      } else {
-        throw err;
+      const msg: string = err?.message ?? "";
+      if (err?.code === 4001 || msg.toLowerCase().includes("reject") || msg.toLowerCase().includes("cancel")) {
+        throw new Error("Switch rejected — please approve the Polygon Amoy network switch in MetaMask.");
       }
+      // Non-rejection errors: log and attempt to continue (might already be on Amoy)
+      console.warn("switchChain error:", err);
     }
 
+    // Step 2 — verify via window.ethereum directly, polling for up to 3 s
+    // (wallet_switchEthereumChain sometimes resolves before chain state updates)
+    const rawProvider = getRawProvider();
+    let onAmoy = false;
+    for (let i = 0; i < 10; i++) {
+      const id = await rawProvider.request({ method: "eth_chainId" }) as string;
+      if (id.toLowerCase() === AMOY_CHAIN_ID_HEX) { onAmoy = true; break; }
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    if (!onAmoy) {
+      throw new Error(
+        "MetaMask is still on the wrong network. Please switch to Polygon Amoy (Chain ID 80002) manually and try again."
+      );
+    }
+
+    // Step 3 — walletClient using raw MetaMask provider (chain confirmed above)
     return createWalletClient({
       account: walletAddress,
       chain: polygonAmoy,
-      transport: custom(provider), // same raw provider — chain already switched
+      transport: custom(rawProvider),
     });
   };
 
