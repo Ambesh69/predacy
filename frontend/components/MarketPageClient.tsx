@@ -3,7 +3,6 @@
 import { useState, useEffect, use } from "react";
 import Link from "next/link";
 import { createPublicClient, createWalletClient, custom, http, parseAbiItem } from "viem";
-import { polygonAmoy } from "viem/chains";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
 import BatchTimer from "@/components/BatchTimer";
 import CommitmentFeed from "@/components/CommitmentFeed";
@@ -17,11 +16,18 @@ import {
   BatchStatus,
   getContracts,
 } from "@/lib/contracts";
+import {
+  ACTIVE_CHAIN,
+  ACTIVE_CHAIN_ID_HEX,
+  ACTIVE_CHAIN_NAME,
+  CHAIN_GAS,
+  IS_MAINNET,
+} from "@/lib/chain";
 import { clsx } from "clsx";
 
 // ── Viem public client (read-only, no wallet needed) ─────────────────────────
 const publicClient = createPublicClient({
-  chain: polygonAmoy,
+  chain: ACTIVE_CHAIN,
   transport: http(),
 });
 
@@ -44,16 +50,7 @@ const MOCK_COMMITMENTS: Array<{
   timestamp: number;
 }> = [];
 
-// Polygon Amoy chain ID in hex
-const AMOY_CHAIN_ID_HEX = "0x13882"; // 80002
-
-// Polygon Amoy requires a minimum priority fee of 25 gwei. viem defaults to
-// 1.5 gwei which is always rejected. Set explicit EIP-1559 gas params for all
-// write calls to guarantee acceptance.
-const AMOY_GAS = {
-  maxPriorityFeePerGas: 30_000_000_000n, // 30 gwei  (> 25 gwei floor)
-  maxFeePerGas:         35_000_000_000n, // 35 gwei  (priority + base buffer)
-} as const;
+// Gas params imported from chain.ts (CHAIN_GAS adapts to mainnet vs testnet)
 
 // ── Provider discovery ────────────────────────────────────────────────────────
 // When multiple wallet extensions are installed (e.g. Backpack + MetaMask),
@@ -150,7 +147,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     return () => { active = false; };
   }, [isConnected]);
 
-  const onWrongChain = isConnected && rawChainId !== null && rawChainId.toLowerCase() !== AMOY_CHAIN_ID_HEX;
+  const onWrongChain = isConnected && rawChainId !== null && rawChainId.toLowerCase() !== ACTIVE_CHAIN_ID_HEX;
 
   // ── Load market ─────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -179,7 +176,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     let cancelled = false;
     const fetchOnChainCommitments = async () => {
       try {
-        const contracts = getContracts(polygonAmoy.id);
+        const contracts = getContracts(ACTIVE_CHAIN.id);
         const logs = await publicClient.getLogs({
           address:   contracts.batchVault,
           event:     parseAbiItem(
@@ -215,7 +212,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
 
     const fetchBatch = async () => {
       try {
-        const contracts = getContracts(polygonAmoy.id);
+        const contracts = getContracts(ACTIVE_CHAIN.id);
 
         const batchId = await publicClient.readContract({
           address: contracts.batchVault,
@@ -265,7 +262,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     let cancelled = false;
     const fetchPosition = async () => {
       try {
-        const contracts = getContracts(polygonAmoy.id);
+        const contracts = getContracts(ACTIVE_CHAIN.id);
         const pos = await publicClient.readContract({
           address: contracts.batchVault,
           abi: BATCH_VAULT_ABI,
@@ -281,7 +278,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     return () => { cancelled = true; };
   }, [batch.status, batch.batchId, walletAddress, isConnected]);
 
-  // ── ensureAmoy ───────────────────────────────────────────────────────────────
+  // ── ensureChain ───────────────────────────────────────────────────────────────
   // Uses EIP-6963 to find MetaMask (works even when Backpack/another wallet has
   // seized window.ethereum as a read-only property). Calls wallet_switchEthereumChain
   // on the discovered provider, then polls eth_chainId to confirm the switch
@@ -296,55 +293,64 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     try {
       await provider.request({
         method: "wallet_switchEthereumChain",
-        params: [{ chainId: AMOY_CHAIN_ID_HEX }],
+        params: [{ chainId: ACTIVE_CHAIN_ID_HEX }],
       });
     } catch (err: any) {
       if (err.code === 4902) {
         // Chain unknown to this wallet — add it first
+        const addParams = IS_MAINNET
+          ? {
+              chainId: ACTIVE_CHAIN_ID_HEX,
+              chainName: "Polygon",
+              nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 },
+              rpcUrls: ["https://polygon-rpc.com/"],
+              blockExplorerUrls: ["https://polygonscan.com/"],
+            }
+          : {
+              chainId: ACTIVE_CHAIN_ID_HEX,
+              chainName: "Polygon Amoy",
+              nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 },
+              rpcUrls: ["https://rpc-amoy.polygon.technology/"],
+              blockExplorerUrls: ["https://amoy.polygonscan.com/"],
+            };
         await provider.request({
           method: "wallet_addEthereumChain",
-          params: [{
-            chainId: AMOY_CHAIN_ID_HEX,
-            chainName: "Polygon Amoy",
-            nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 },
-            rpcUrls: ["https://rpc-amoy.polygon.technology/"],
-            blockExplorerUrls: ["https://amoy.polygonscan.com/"],
-          }],
+          params: [addParams],
         });
         await provider.request({
           method: "wallet_switchEthereumChain",
-          params: [{ chainId: AMOY_CHAIN_ID_HEX }],
+          params: [{ chainId: ACTIVE_CHAIN_ID_HEX }],
         });
       } else if (err.code === 4001) {
-        throw new Error("Network switch cancelled — please approve switching to Polygon Amoy.");
+        throw new Error(`Network switch cancelled — please approve switching to ${ACTIVE_CHAIN_NAME}.`);
       } else {
         // Some wallets (e.g. Backpack) reject wallet_switchEthereumChain
         // with proprietary error codes. Surface a clear message.
         throw new Error(
           `${name} declined the network switch (${err.message ?? err.code}). ` +
-          `Please manually switch ${name} to Polygon Amoy (Chain ID 80002) ` +
+          `Please manually switch ${name} to ${ACTIVE_CHAIN_NAME} (Chain ID ${ACTIVE_CHAIN.id}) ` +
           `or disable ${name} and reconnect with MetaMask.`
         );
       }
     }
 
-    // Poll until eth_chainId confirms Amoy (handles async internal state updates)
-    let onAmoy = false;
+    // Poll until eth_chainId confirms the target chain
+    let onTargetChain = false;
     for (let i = 0; i < 15; i++) {
       const id = (await provider.request({ method: "eth_chainId" })) as string;
-      if (id.toLowerCase() === AMOY_CHAIN_ID_HEX) { onAmoy = true; break; }
+      if (id.toLowerCase() === ACTIVE_CHAIN_ID_HEX) { onTargetChain = true; break; }
       await new Promise((r) => setTimeout(r, 200));
     }
-    if (!onAmoy) {
+    if (!onTargetChain) {
       throw new Error(
-        `${name} is still on the wrong network. Please switch to Polygon Amoy ` +
-        `(Chain ID 80002) inside ${name} and try again.`
+        `${name} is still on the wrong network. Please switch to ${ACTIVE_CHAIN_NAME} ` +
+        `(Chain ID ${ACTIVE_CHAIN.id}) inside ${name} and try again.`
       );
     }
 
     return createWalletClient({
       account: walletAddress,
-      chain: polygonAmoy,
+      chain: ACTIVE_CHAIN,
       transport: custom(provider),
     });
   };
@@ -362,7 +368,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     // ensureAmoy() switches to Amoy if needed, then gives us a ready walletClient
     setSubmitStep("approving");
     const walletClient = await ensureAmoy();
-    const contracts = getContracts(polygonAmoy.id);
+    const contracts = getContracts(ACTIVE_CHAIN.id);
 
     // Step 1 — approve USDC if allowance is insufficient
     const allowance = await publicClient.readContract({
@@ -378,7 +384,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         abi: ERC20_ABI,
         functionName: "approve",
         args: [contracts.batchVault, params.amount],
-        ...AMOY_GAS,
+        ...CHAIN_GAS,
       });
       await publicClient.waitForTransactionReceipt({ hash: approveTx });
     }
@@ -390,7 +396,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       abi: BATCH_VAULT_ABI,
       functionName: "commitOrder",
       args: [params.commitment, params.amount],
-      ...AMOY_GAS,
+      ...CHAIN_GAS,
     });
     await publicClient.waitForTransactionReceipt({ hash: commitTx });
 
@@ -441,13 +447,13 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     try {
       // ensureAmoy() switches to Amoy first, then returns a ready walletClient
       const walletClient = await ensureAmoy();
-      const contracts = getContracts(polygonAmoy.id);
+      const contracts = getContracts(ACTIVE_CHAIN.id);
       const tx = await walletClient.writeContract({
         address: contracts.usdc,
         abi: MOCK_USDC_ABI,
         functionName: "mint",
         args: [walletAddress, 10_000_000_000n], // $10,000 USDC
-        ...AMOY_GAS,
+        ...CHAIN_GAS,
       });
       await publicClient.waitForTransactionReceipt({ hash: tx });
     } catch (e: any) {
@@ -465,13 +471,13 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     setChainError(null);
     try {
       const walletClient = await ensureAmoy();
-      const contracts = getContracts(polygonAmoy.id);
+      const contracts = getContracts(ACTIVE_CHAIN.id);
       const tx = await walletClient.writeContract({
         address: contracts.batchVault,
         abi: BATCH_VAULT_ABI,
         functionName: "claimPosition",
         args: [batch.batchId],
-        ...AMOY_GAS,
+        ...CHAIN_GAS,
       });
       await publicClient.waitForTransactionReceipt({ hash: tx });
       setPosition((p) => p ? { ...p, claimed: true } : p);
@@ -531,8 +537,8 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
           PREDACY
         </h1>
         <div className="ml-auto flex items-center gap-3">
-          {/* Faucet button — Amoy testnet only */}
-          {isConnected && (
+          {/* Faucet button — testnet only (not shown on mainnet) */}
+          {isConnected && !IS_MAINNET && (
             <button
               onClick={handleGetTestUsdc}
               disabled={faucetLoading}
@@ -574,8 +580,8 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         <div className="border-b border-yellow-500/30 bg-yellow-500/5 px-6 py-2">
           <p className="text-yellow-400 text-xs">
             {walletName && walletName !== "MetaMask"
-              ? `Connected via ${walletName} on the wrong network. Click any action below — ${walletName} will be prompted to switch to Polygon Amoy. If ${walletName} doesn't support it, disable it and reconnect with MetaMask.`
-              : "Wrong network — click any action to switch to Polygon Amoy automatically."}
+              ? `Connected via ${walletName} on the wrong network. Click any action below — ${walletName} will be prompted to switch to ${ACTIVE_CHAIN_NAME}. If ${walletName} doesn't support it, disable it and reconnect with MetaMask.`
+              : `Wrong network — click any action to switch to ${ACTIVE_CHAIN_NAME} automatically.`}
           </p>
         </div>
       )}

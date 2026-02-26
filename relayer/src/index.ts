@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { createServer } from "node:http";
 import { createPublicClient, http } from "viem";
-import { polygonAmoy } from "viem/chains";
+import { polygon, polygonAmoy } from "viem/chains";
 import { BatchProcessor, BATCH_VAULT_ABI } from "./batchProcessor.js";
 
 // ── Environment ───────────────────────────────────────────────────────────────
@@ -9,8 +9,15 @@ import { BatchProcessor, BATCH_VAULT_ABI } from "./batchProcessor.js";
 // starts so Railway's healthcheck always gets a response.
 const missingVars = ["VAULT_ADDRESS", "RELAYER_PRIVATE_KEY"].filter((v) => !process.env[v]);
 
+// CHAIN_ID: 137 = Polygon mainnet, 80002 = Polygon Amoy (default)
+const chainId = parseInt(process.env.CHAIN_ID ?? "80002");
+const chain   = chainId === polygon.id ? polygon : polygonAmoy;
+
 const config = {
-  rpcUrl:            process.env.RPC_URL ?? "https://rpc-amoy.polygon.technology/",
+  rpcUrl:            process.env.RPC_URL ?? (chainId === polygon.id
+    ? "https://polygon-rpc.com/"
+    : "https://rpc-amoy.polygon.technology/"),
+  chainId,
   vaultAddress:      (process.env.VAULT_ADDRESS      ?? "0x0000000000000000000000000000000000000000") as `0x${string}`,
   relayerPrivateKey: (process.env.RELAYER_PRIVATE_KEY ?? "0x0000000000000000000000000000000000000000000000000000000000000001") as `0x${string}`,
   polymarket: {
@@ -105,7 +112,7 @@ if (missingVars.length > 0) {
 // ── Event watching + batch lifecycle (only when fully configured) ─────────────
 if (processor) {
   const publicClient = createPublicClient({
-    chain: polygonAmoy,
+    chain,
     transport: http(config.rpcUrl, { retryCount: 3 }),
     pollingInterval: 4_000,
   });

@@ -1,5 +1,5 @@
 import { createPublicClient, createWalletClient, http, encodeAbiParameters, keccak256 } from "viem";
-import { polygonAmoy } from "viem/chains";
+import { polygon, polygonAmoy } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 import { computeClearingPrice } from "./clearingPrice.js";
 import { ZKProver } from "./zkProver.js";
@@ -140,6 +140,7 @@ export const BATCH_VAULT_ABI = [
 
 export interface RelayerConfig {
   rpcUrl: string;
+  chainId: number;          // 137 = Polygon mainnet, 80002 = Polygon Amoy
   vaultAddress: `0x${string}`;
   relayerPrivateKey: `0x${string}`;
   polymarket: {
@@ -175,14 +176,15 @@ export class BatchProcessor {
   constructor(config: RelayerConfig) {
     this.config = config;
     const account = privateKeyToAccount(config.relayerPrivateKey);
+    const chain = config.chainId === polygon.id ? polygon : polygonAmoy;
 
     this.publicClient = createPublicClient({
-      chain: polygonAmoy,
+      chain,
       transport: http(config.rpcUrl),
     });
 
     this.walletClient = createWalletClient({
-      chain: polygonAmoy,
+      chain,
       transport: http(config.rpcUrl),
       account,
     });
