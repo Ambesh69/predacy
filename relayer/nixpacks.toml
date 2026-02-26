@@ -1,0 +1,9 @@
+# Skip tsc (build) — tsx executes TypeScript directly at runtime.
+# Nixpacks would otherwise run `npm run build` which fails on strict
+# viem generic inference that tsx handles fine at runtime.
+
+[phases.build]
+cmds = ["npm ci"]
+
+[start]
+cmd = "npm start"

@@ -1,3 +1,4 @@
+/// <reference types="vitest/importMeta" />
 import type { Order, ClearingResult } from "./types.js";
 
 const PRICE_DECIMALS = 1_000_000n; // 6 decimal places
