@@ -1,7 +1,7 @@
 "use client";
 
 import { PrivyProvider, type PrivyClientConfig } from "@privy-io/react-auth";
-import { polygon } from "viem/chains";
+import { polygon, polygonAmoy } from "viem/chains";
 
 const PRIVY_APP_ID = process.env.NEXT_PUBLIC_PRIVY_APP_ID;
 
@@ -17,7 +17,7 @@ const privyConfig: PrivyClientConfig = {
   },
   loginMethods: ["wallet"],
   defaultChain: polygon,
-  supportedChains: [polygon],
+  supportedChains: [polygon, polygonAmoy],
   embeddedWallets: {
     createOnLogin: "off",
   },
