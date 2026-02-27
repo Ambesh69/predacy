@@ -7,6 +7,7 @@ import { usePrivy, useWallets } from "@privy-io/react-auth";
 import BatchTimer from "@/components/BatchTimer";
 import CommitmentFeed from "@/components/CommitmentFeed";
 import OrderForm from "@/components/OrderForm";
+import PriceChart from "@/components/PriceChart";
 import WalletButton from "@/components/WalletButton";
 import { getMarket, MOCK_MARKETS, type Market } from "@/lib/polymarket";
 import {
@@ -662,9 +663,17 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
           </div>
         </div>
 
-        {/* Column 2: Commitment feed */}
+        {/* Column 2: Price chart + Commitment feed */}
         <div className="flex flex-col min-h-[400px] lg:min-h-0 border-b lg:border-b-0">
-          <CommitmentFeed entries={commitments} myAddress={walletAddress} />
+          {market.clobTokenIds?.[0] && (
+            <PriceChart
+              tokenId={market.clobTokenIds[0]}
+              currentPrice={parseFloat(market.outcomePrices[0] ?? "0.5")}
+            />
+          )}
+          <div className="flex-1 min-h-0">
+            <CommitmentFeed entries={commitments} myAddress={walletAddress} />
+          </div>
         </div>
 
         {/* Column 3: Order form / Claim panel */}
