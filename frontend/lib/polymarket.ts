@@ -38,12 +38,13 @@ export async function getMarkets(limit = 20): Promise<Market[]> {
   return (res.data ?? []).map(normalizeMarket);
 }
 
-/** Get a single market by condition ID */
+/** Get a single market by condition ID — uses server-side proxy to avoid CORS */
 export async function getMarket(conditionId: string): Promise<Market | null> {
-  const res = await axios.get(`${GAMMA_API}/markets`, {
+  const res = await axios.get(`/api/markets`, {
     params: { condition_id: conditionId },
   });
-  return res.data?.[0] ?? null;
+  const raw = res.data?.[0] ?? null;
+  return raw ? normalizeMarket(raw) : null;
 }
 
 /** Get current mid-price for a token ID (returns 0-1 float) */
