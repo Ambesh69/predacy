@@ -121,7 +121,10 @@ export default function OrderForm({
     (async () => {
       try {
         const contracts = getContracts(ACTIVE_CHAIN.id);
-        const yesTokenId = computeYesTokenId(contracts.usdc, marketId);
+        // Use the page's conditionId (market.conditionId), NOT the batch's marketId.
+        // batch.batchMarketId can be a different market when the relayer switches markets,
+        // causing the wrong token ID to be hashed and balance to read as 0.
+        const yesTokenId = computeYesTokenId(contracts.usdc, market.conditionId as `0x${string}`);
         const bal = await publicClient.readContract({
           address: contracts.ctf,
           abi: CTF_ABI,
