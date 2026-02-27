@@ -308,7 +308,7 @@ function PositionCard({ batchId, batchStatus, position, onClaim, isClaiming, cla
         <div className="flex justify-between">
           <span className="text-[10px] text-muted">Side</span>
           <span className={clsx("text-[10px]", position.isBuy ? "text-accent" : "text-danger")}>
-            {position.isBuy ? "BUY YES" : "BUY NO"}
+            {position.isBuy ? "BUY YES" : "SELL YES"}
           </span>
         </div>
         {position.filledAmount > 0n && (

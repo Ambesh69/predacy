@@ -844,7 +844,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
                 />
                 {position && (
                   <div className="border-t border-border/40 pt-3 space-y-3">
-                    <Row label="Side" value={position.isBuy ? "BUY YES" : "BUY NO"} />
+                    <Row label="Side" value={position.isBuy ? "BUY YES" : "SELL YES"} />
                     <Row label="Filled" value={`$${(Number(position.filledAmount) / 1e6).toFixed(2)}`} />
                     {position.refundAmount > 0n && (
                       <Row label="Refund" value={`$${(Number(position.refundAmount) / 1e6).toFixed(2)}`} />
@@ -866,11 +866,14 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
               ) : position.claimed ? (
                 <div className="space-y-2 text-center">
                   <p className="text-accent text-[11px] tracking-widest uppercase">✓ CLAIMED</p>
-                  {position.filledAmount > 0n && batch.clearingPrice > 0n && (
+                  {position.filledAmount > 0n && (
                     <p className="text-muted-dim text-[10px]">
-                      ~{(Number(position.filledAmount) / Number(batch.clearingPrice)).toFixed(2)}{" "}
-                      {position.isBuy ? "YES" : "NO"} tokens received
-                      {position.refundAmount > 0n && ` + $${(Number(position.refundAmount) / 1e6).toFixed(2)} refund`}
+                      {position.isBuy && batch.clearingPrice > 0n
+                        ? `~${(Number(position.filledAmount) / Number(batch.clearingPrice)).toFixed(2)} YES tokens received`
+                        : `$${(Number(position.filledAmount) / 1e6).toFixed(2)} USDC received`}
+                      {position.refundAmount > 0n && ` + ${position.isBuy
+                        ? `$${(Number(position.refundAmount) / 1e6).toFixed(2)} refund`
+                        : `${(Number(position.refundAmount) / 1e6).toFixed(2)} YES tokens refunded`}`}
                     </p>
                   )}
                 </div>
