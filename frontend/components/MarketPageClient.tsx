@@ -557,7 +557,10 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         ...CHAIN_GAS,
         gas: 400_000n,  // skip eth_estimateGas — Amoy RPC returns junk values for this call
       });
-      await publicClient.waitForTransactionReceipt({ hash: tx });
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: tx });
+      if (receipt.status === "reverted") {
+        throw new Error("Transaction reverted — the batch may not be fully settled yet. Try again in a few seconds.");
+      }
       // If claiming current batch, update current position state too
       if (batchId === batch.batchId) {
         setPosition((p) => p ? { ...p, claimed: true } : p);
