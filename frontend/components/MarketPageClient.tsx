@@ -126,6 +126,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   } | null>(null);
   const [claimLoading, setClaimLoading] = useState(false);
   const [balanceVersion, setBalanceVersion] = useState(0);
+  const [historicalMarketIds, setHistoricalMarketIds] = useState<`0x${string}`[]>([]);
 
   const { authenticated, login } = usePrivy();
   const { wallets } = useWallets();
@@ -825,6 +826,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
                   .filter((c) => c.trader === walletAddress)
                   .map((c) => ({ hash: c.hash, amount: c.amount }))}
                 onClaim={handleClaimPosition}
+                onMarketIdsFound={setHistoricalMarketIds}
               />
             ) : (
               <div className="flex-1 flex flex-col items-center justify-center gap-3 p-6">
@@ -909,6 +911,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
                 onConnect={login}
                 submitStep={submitStep}
                 balanceVersion={balanceVersion}
+                candidateMarketIds={[batch.batchMarketId, ...historicalMarketIds]}
               />
             </div>
           )}

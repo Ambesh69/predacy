@@ -13,6 +13,7 @@ const publicClient = createPublicClient({
 
 interface HistoricalPosition {
   batchId: bigint;
+  batchMarketId: `0x${string}`;
   batchStatus: BatchStatus;
   position: {
     filledAmount: bigint;
@@ -29,6 +30,8 @@ interface PositionsPanelProps {
   /** Commitments the user has sealed in the current batch this session */
   currentBatchCommitments: Array<{ hash: `0x${string}`; amount: bigint }>;
   onClaim: (batchId: bigint) => Promise<void>;
+  /** Called after scanning history — provides unique market IDs seen across all batches */
+  onMarketIdsFound?: (ids: `0x${string}`[]) => void;
 }
 
 const MAX_SCAN = 10; // look back at most 10 batches
@@ -60,6 +63,7 @@ export default function PositionsPanel({
   currentBatchStatus,
   currentBatchCommitments,
   onClaim,
+  onMarketIdsFound,
 }: PositionsPanelProps) {
   const [historicalPositions, setHistoricalPositions] = useState<HistoricalPosition[]>([]);
   const [scanning, setScanning] = useState(false);
@@ -128,6 +132,7 @@ export default function PositionsPanel({
 
         results.push({
           batchId: id,
+          batchMarketId: batchRaw.marketId,
           batchStatus: batchRaw.status as BatchStatus,
           position: posRaw,
         });
@@ -138,7 +143,10 @@ export default function PositionsPanel({
     }
     setHistoricalPositions(results);
     setScanning(false);
-  }, [currentBatchId, walletAddress]);
+    // Bubble up all unique market IDs so the sell form can check balance for each
+    const uniqueMarketIds = [...new Set(results.map(r => r.batchMarketId))];
+    onMarketIdsFound?.(uniqueMarketIds);
+  }, [currentBatchId, walletAddress, onMarketIdsFound]);
 
   useEffect(() => {
     scanHistory();

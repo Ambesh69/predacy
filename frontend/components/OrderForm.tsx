@@ -30,7 +30,8 @@ interface OrderFormProps {
   isConnected: boolean;
   onConnect: () => void;
   submitStep?: "approving" | "signing" | null;
-  balanceVersion?: number;  // bumped by parent after a successful claim
+  balanceVersion?: number;     // bumped by parent after a successful claim
+  candidateMarketIds?: `0x${string}`[];  // all market IDs from batch history to check balance against
 }
 
 const PRICE_STEP = 10_000;
@@ -69,6 +70,7 @@ export default function OrderForm({
   onConnect,
   submitStep,
   balanceVersion = 0,
+  candidateMarketIds = [],
 }: OrderFormProps) {
   const [mode, setMode]           = useState<"buy" | "sell">("buy");
   const [isBuy, setIsBuy]         = useState(true);   // YES vs NO within buy mode
@@ -110,7 +112,10 @@ export default function OrderForm({
 
   useEffect(() => { updateCommitment(); }, [updateCommitment]);
 
-  // Fetch YES balance when switching to sell mode
+  // Fetch YES balance when switching to sell mode.
+  // Checks ALL candidate market IDs (current batch + historical batches) because the
+  // batch.batchMarketId can differ from where the user's tokens were originally minted.
+  // Sums balances across all distinct conditionIds so nothing is missed.
   useEffect(() => {
     if (mode !== "sell" || !walletAddress || !sellYes) {
       if (!sellYes) setYesBalance(null);
@@ -121,17 +126,24 @@ export default function OrderForm({
     (async () => {
       try {
         const contracts = getContracts(ACTIVE_CHAIN.id);
-        // Use the page's conditionId (market.conditionId), NOT the batch's marketId.
-        // batch.batchMarketId can be a different market when the relayer switches markets,
-        // causing the wrong token ID to be hashed and balance to read as 0.
-        const yesTokenId = computeYesTokenId(contracts.usdc, market.conditionId as `0x${string}`);
-        const bal = await publicClient.readContract({
-          address: contracts.ctf,
-          abi: CTF_ABI,
-          functionName: "balanceOf",
-          args: [walletAddress, yesTokenId],
-        }) as bigint;
-        if (!cancelled) setYesBalance(bal);
+        // Collect all unique conditionIds to check: URL market + batch + history
+        const allIds = [...new Set([
+          market.conditionId as `0x${string}`,
+          marketId,
+          ...candidateMarketIds,
+        ])];
+        let total = 0n;
+        for (const condId of allIds) {
+          const yesTokenId = computeYesTokenId(contracts.usdc, condId);
+          const bal = await publicClient.readContract({
+            address: contracts.ctf,
+            abi: CTF_ABI,
+            functionName: "balanceOf",
+            args: [walletAddress, yesTokenId],
+          }) as bigint;
+          total += bal;
+        }
+        if (!cancelled) setYesBalance(total);
       } catch (err) {
         console.error("[OrderForm] Failed to fetch YES balance:", err);
         if (!cancelled) setYesBalance(0n);
@@ -140,7 +152,8 @@ export default function OrderForm({
       }
     })();
     return () => { cancelled = true; };
-  }, [mode, walletAddress, marketId, sellYes, balanceVersion, refreshTick]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, walletAddress, marketId, sellYes, balanceVersion, refreshTick, candidateMarketIds.join(",")]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
