@@ -125,6 +125,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     claimed: boolean;
   } | null>(null);
   const [claimLoading, setClaimLoading] = useState(false);
+  const [balanceVersion, setBalanceVersion] = useState(0);
 
   const { authenticated, login } = usePrivy();
   const { wallets } = useWallets();
@@ -565,6 +566,8 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       if (batchId === batch.batchId) {
         setPosition((p) => p ? { ...p, claimed: true } : p);
       }
+      // Signal OrderForm to re-fetch YES balance (tokens now in user's wallet)
+      setBalanceVersion(v => v + 1);
     } catch (e: any) {
       if (e?.code !== 4001) setChainError(e.message ?? "Claim failed");
       throw e; // re-throw so PositionsPanel can handle per-card error state
@@ -905,6 +908,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
                 isConnected={isConnected}
                 onConnect={login}
                 submitStep={submitStep}
+                balanceVersion={balanceVersion}
               />
             </div>
           )}

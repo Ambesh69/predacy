@@ -30,6 +30,7 @@ interface OrderFormProps {
   isConnected: boolean;
   onConnect: () => void;
   submitStep?: "approving" | "signing" | null;
+  balanceVersion?: number;  // bumped by parent after a successful claim
 }
 
 const PRICE_STEP = 10_000;
@@ -67,6 +68,7 @@ export default function OrderForm({
   isConnected,
   onConnect,
   submitStep,
+  balanceVersion = 0,
 }: OrderFormProps) {
   const [mode, setMode]           = useState<"buy" | "sell">("buy");
   const [isBuy, setIsBuy]         = useState(true);   // YES vs NO within buy mode
@@ -85,6 +87,7 @@ export default function OrderForm({
   // YES balance for sell mode
   const [yesBalance, setYesBalance] = useState<bigint | null>(null);
   const [yesBalanceLoading, setYesBalanceLoading] = useState(false);
+  const [refreshTick, setRefreshTick] = useState(0);  // manual ↻ button
 
   const effectiveLimitPrice = mode === "sell"
     ? (orderType === "market" ? MARKET_SELL_LIMIT : BigInt(limitPrice))
@@ -126,14 +129,15 @@ export default function OrderForm({
           args: [walletAddress, yesTokenId],
         }) as bigint;
         if (!cancelled) setYesBalance(bal);
-      } catch {
+      } catch (err) {
+        console.error("[OrderForm] Failed to fetch YES balance:", err);
         if (!cancelled) setYesBalance(0n);
       } finally {
         if (!cancelled) setYesBalanceLoading(false);
       }
     })();
     return () => { cancelled = true; };
-  }, [mode, walletAddress, marketId, sellYes]);
+  }, [mode, walletAddress, marketId, sellYes, balanceVersion, refreshTick]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -316,12 +320,18 @@ export default function OrderForm({
               <div className="flex items-center justify-between">
                 <label className="text-[11px] text-muted tracking-widest uppercase">YES Tokens to Sell</label>
                 {isConnected && (
-                  <span className="text-[10px] text-muted-dim tabular-nums">
+                  <span className="flex items-center gap-1 text-[10px] text-muted-dim tabular-nums">
                     {yesBalanceLoading
                       ? "loading…"
                       : yesBalanceDisplay !== null
                       ? `Balance: ${yesBalanceDisplay}`
                       : "Balance: —"}
+                    <button
+                      type="button"
+                      onClick={() => setRefreshTick(t => t + 1)}
+                      className="hover:text-muted transition-colors leading-none"
+                      title="Refresh balance"
+                    >↻</button>
                   </span>
                 )}
               </div>
