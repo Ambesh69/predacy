@@ -47,15 +47,24 @@ export default function BatchTimer({
     };
   }, [openedAt, batchWindow, status]);
 
-  const strokeDashoffset = CIRCUMFERENCE * (1 - progress);
-  const isUrgent = remaining <= 8 && status === 0;
-  const isOpen = status === 0;
+  // Idle = batch is OPEN, window has elapsed, but no orders yet.
+  // In this mode the relayer won't close the batch (saves gas), so the
+  // timer stays alive waiting for the first order to arrive.
+  const isIdle   = status === 0 && remaining <= 0 && commitmentCount === 0;
+  const isUrgent = remaining <= 8 && status === 0 && !isIdle;
+  const isOpen   = status === 0;
 
   const strokeColor = status === 2
     ? "#4D83FF"
+    : isIdle
+    ? "#42425A"   // muted — no active orders
     : isUrgent
     ? "#FF3355"
     : "#00FFB3";
+
+  // Idle: show a full dim ring (holding pattern). Otherwise use elapsed progress.
+  const ringProgress    = isIdle ? 1 : progress;
+  const strokeDashoffset = CIRCUMFERENCE * (1 - ringProgress);
 
   const formatTime = (sec: number) => {
     const s = Math.ceil(sec);
@@ -66,11 +75,13 @@ export default function BatchTimer({
     <div className="flex flex-col items-center gap-6">
       {/* Ring timer */}
       <div className="relative flex items-center justify-center">
-        {/* Outer glow ring */}
-        <div
-          className="absolute inset-0 rounded-full opacity-20 blur-xl"
-          style={{ background: strokeColor }}
-        />
+        {/* Outer glow ring — hidden when idle (no active orders) */}
+        {!isIdle && (
+          <div
+            className="absolute inset-0 rounded-full opacity-20 blur-xl"
+            style={{ background: strokeColor }}
+          />
+        )}
 
         <svg width="140" height="140" className="rotate-[-90deg]">
           {/* Background track */}
@@ -116,23 +127,38 @@ export default function BatchTimer({
         {/* Center content */}
         <div className="absolute inset-0 flex flex-col items-center justify-center">
           {status === 0 ? (
-            <>
-              <span
-                className={clsx(
-                  "font-display text-5xl font-black leading-none tracking-tight",
-                  isUrgent ? "glow-danger" : "glow-accent"
-                )}
-                style={{
-                  color: strokeColor,
-                  fontFamily: "var(--font-display)",
-                }}
-              >
-                {formatTime(remaining)}
-              </span>
-              <span className="text-muted text-[10px] tracking-widest uppercase mt-1">
-                seconds
-              </span>
-            </>
+            isIdle ? (
+              /* Idle state — no orders yet, batch stays open until first order */
+              <div className="flex flex-col items-center gap-1">
+                <span
+                  className="text-4xl font-black leading-none"
+                  style={{ color: "#42425A", fontFamily: "var(--font-display)" }}
+                >
+                  —
+                </span>
+                <span className="text-[10px] tracking-widest uppercase" style={{ color: "#42425A" }}>
+                  idle
+                </span>
+              </div>
+            ) : (
+              <>
+                <span
+                  className={clsx(
+                    "font-display text-5xl font-black leading-none tracking-tight",
+                    isUrgent ? "glow-danger" : "glow-accent"
+                  )}
+                  style={{
+                    color: strokeColor,
+                    fontFamily: "var(--font-display)",
+                  }}
+                >
+                  {formatTime(remaining)}
+                </span>
+                <span className="text-muted text-[10px] tracking-widest uppercase mt-1">
+                  seconds
+                </span>
+              </>
+            )
           ) : status === 1 ? (
             <div className="flex flex-col items-center gap-1">
               <div className="w-5 h-5 border-2 border-blue border-t-transparent rounded-full animate-spin" />
@@ -212,7 +238,12 @@ export default function BatchTimer({
           style={{ background: strokeColor, boxShadow: `0 0 4px ${strokeColor}` }}
         />
         <span className="text-[11px] tracking-widest uppercase" style={{ color: strokeColor }}>
-          {status === 0 ? (isUrgent ? "CLOSING SOON" : "ACCEPTING ORDERS") : status === 1 ? "COMPUTING PRICE" : "POSITIONS CLAIMABLE"}
+          {status === 0
+            ? isIdle    ? "WAITING FOR ORDERS"
+            : isUrgent  ? "CLOSING SOON"
+            :             "ACCEPTING ORDERS"
+            : status === 1 ? "COMPUTING PRICE"
+            : "POSITIONS CLAIMABLE"}
         </span>
       </div>
     </div>
