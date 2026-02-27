@@ -14,7 +14,7 @@ export async function GET(request: Request) {
 
   // Single-market lookup by conditionId
   const url = conditionId
-    ? `${GAMMA_API}/markets?condition_id=${encodeURIComponent(conditionId)}`
+    ? `${GAMMA_API}/markets?condition_ids=${encodeURIComponent(conditionId)}`
     : `${GAMMA_API}/markets?active=true&closed=false&limit=${limit}&order=volumeNum&ascending=false`;
 
   try {
