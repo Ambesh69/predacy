@@ -19,6 +19,7 @@ export interface Market {
   icon?: string;
   category?: string;
   tags?: string[];
+  slug?: string;               // Polymarket event slug for exit link
 }
 
 /** Parse fields that Gamma API returns as JSON-encoded strings */

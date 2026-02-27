@@ -7,6 +7,7 @@ import { usePrivy, useWallets } from "@privy-io/react-auth";
 import BatchTimer from "@/components/BatchTimer";
 import CommitmentFeed from "@/components/CommitmentFeed";
 import OrderForm from "@/components/OrderForm";
+import PositionsPanel from "@/components/PositionsPanel";
 import PriceChart from "@/components/PriceChart";
 import WalletButton from "@/components/WalletButton";
 import { getMarket, MOCK_MARKETS, type Market } from "@/lib/polymarket";
@@ -115,6 +116,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   const [submitStep, setSubmitStep]   = useState<"approving" | "signing" | null>(null);
   const [faucetLoading, setFaucetLoading] = useState(false);
   const [chainError, setChainError]   = useState<string | null>(null);
+  const [activeTab, setActiveTab]     = useState<"order" | "positions">("order");
   const [position, setPosition]       = useState<{
     filledAmount: bigint;
     refundAmount: bigint;
@@ -478,6 +480,9 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         totalDeposited:  prev.totalDeposited + params.amount,
       }));
     }
+
+    // Auto-switch to "My Positions" tab so user can track their sealed order
+    setActiveTab("positions");
   };
 
   // ── USDC faucet (Amoy only) ──────────────────────────────────────────────────
@@ -505,8 +510,8 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     }
   };
 
-  // ── Claim position ───────────────────────────────────────────────────────────
-  const handleClaimPosition = async () => {
+  // ── Claim position (parameterized — works for current or historical batches) ──
+  const handleClaimPosition = async (batchId: bigint) => {
     setClaimLoading(true);
     setChainError(null);
     try {
@@ -516,13 +521,17 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         address: contracts.batchVault,
         abi: BATCH_VAULT_ABI,
         functionName: "claimPosition",
-        args: [batch.batchId],
+        args: [batchId],
         ...CHAIN_GAS,
       });
       await publicClient.waitForTransactionReceipt({ hash: tx });
-      setPosition((p) => p ? { ...p, claimed: true } : p);
+      // If claiming current batch, update current position state too
+      if (batchId === batch.batchId) {
+        setPosition((p) => p ? { ...p, claimed: true } : p);
+      }
     } catch (e: any) {
       if (e?.code !== 4001) setChainError(e.message ?? "Claim failed");
+      throw e; // re-throw so PositionsPanel can handle per-card error state
     } finally {
       setClaimLoading(false);
     }
@@ -716,13 +725,39 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
           </div>
         </div>
 
-        {/* Column 3: Order form / Claim panel */}
+        {/* Column 3: Order form / Positions */}
         <div className="flex flex-col">
-          <div className="border-b border-border px-4 py-3 flex items-center justify-between">
-            <span className="text-[11px] text-muted tracking-widest uppercase">
-              {batch.status === BatchStatus.SETTLED ? "Batch Result" : "Place Order"}
-            </span>
-            <div className="flex items-center gap-1.5">
+          {/* Column 3 header: tabs + batch status indicator */}
+          <div className="border-b border-border px-4 py-0 flex items-center">
+            {/* Tabs */}
+            <div className="flex items-center flex-1">
+              <button
+                type="button"
+                onClick={() => setActiveTab("order")}
+                className={clsx(
+                  "px-3 py-3 text-[10px] tracking-widest uppercase transition-colors border-b-2",
+                  activeTab === "order"
+                    ? "border-text/40 text-text"
+                    : "border-transparent text-muted hover:text-text"
+                )}
+              >
+                Order
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab("positions")}
+                className={clsx(
+                  "px-3 py-3 text-[10px] tracking-widest uppercase transition-colors border-b-2",
+                  activeTab === "positions"
+                    ? "border-text/40 text-text"
+                    : "border-transparent text-muted hover:text-text"
+                )}
+              >
+                My Positions
+              </button>
+            </div>
+            {/* Batch status dot */}
+            <div className="flex items-center gap-1.5 flex-shrink-0">
               <div className={clsx(
                 "w-1.5 h-1.5 rounded-full",
                 batch.status === BatchStatus.OPEN ? "bg-accent animate-pulse" : "bg-muted/40"
@@ -740,8 +775,31 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
             </div>
           </div>
 
-          {batch.status === BatchStatus.SETTLED ? (
-            /* Claim panel — shown after batch settles */
+          {activeTab === "positions" ? (
+            /* My Positions panel — multi-batch history + claim */
+            isConnected && walletAddress ? (
+              <PositionsPanel
+                walletAddress={walletAddress}
+                currentBatchId={batch.batchId}
+                currentBatchStatus={batch.status}
+                currentBatchCommitments={commitments
+                  .filter((c) => c.trader === walletAddress)
+                  .map((c) => ({ hash: c.hash, amount: c.amount }))}
+                onClaim={handleClaimPosition}
+              />
+            ) : (
+              <div className="flex-1 flex flex-col items-center justify-center gap-3 p-6">
+                <p className="text-muted text-xs text-center">Connect your wallet to view positions</p>
+                <button
+                  onClick={login}
+                  className="border border-border-bright text-text text-[11px] tracking-widest uppercase px-4 py-2 hover:border-text/30 transition-colors"
+                >
+                  Connect Wallet
+                </button>
+              </div>
+            )
+          ) : batch.status === BatchStatus.SETTLED ? (
+            /* Claim panel — shown on ORDER tab after batch settles */
             <div className="flex-1 p-5 flex flex-col gap-4">
               <div className="border border-border p-4 space-y-3">
                 <Row
@@ -788,7 +846,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
                 <p className="text-muted text-xs text-center">No position in this batch</p>
               ) : (
                 <button
-                  onClick={handleClaimPosition}
+                  onClick={() => handleClaimPosition(batch.batchId)}
                   disabled={claimLoading}
                   className="w-full border border-accent text-accent text-[11px] tracking-widest uppercase py-3 hover:bg-accent/5 transition-colors disabled:opacity-40"
                 >

@@ -2,9 +2,26 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { clsx } from "clsx";
-import { computeCommitment, generateSalt, formatUsdc } from "@/lib/commitmentHash";
+import { computeCommitment, generateSalt } from "@/lib/commitmentHash";
 import { getErrorMessage } from "@/lib/validation";
 import type { Market } from "@/lib/polymarket";
+
+type Direction = "buyYes" | "sellYes" | "buyNo" | "sellNo";
+
+// isBuy mapping: BUY YES / SELL NO → true (long YES); BUY NO / SELL YES → false (long NO)
+const DIRECTION_IS_BUY: Record<Direction, boolean> = {
+  buyYes:  true,
+  sellNo:  true,
+  buyNo:   false,
+  sellYes: false,
+};
+
+const DIRECTION_LABEL: Record<Direction, string> = {
+  buyYes:  "BUY YES",
+  sellYes: "SELL YES",
+  buyNo:   "BUY NO",
+  sellNo:  "SELL NO",
+};
 
 interface OrderFormProps {
   market: Market;
@@ -29,7 +46,6 @@ const PRICE_STEP = 10_000; // 0.01 in 6-decimal space = 1%
 // Sentinel limitPrices for market orders.
 // Market buy  = willing to pay any price → MAX_UINT256
 // Market sell = willing to accept any price → 0
-// Both always cross in the clearing algorithm; no refund possible.
 const MARKET_BUY_LIMIT  = 2n ** 256n - 1n;
 const MARKET_SELL_LIMIT = 0n;
 
@@ -43,7 +59,7 @@ export default function OrderForm({
   onConnect,
   submitStep,
 }: OrderFormProps) {
-  const [isBuy, setIsBuy]         = useState(true);
+  const [direction, setDirection] = useState<Direction>("buyYes");
   const [orderType, setOrderType] = useState<"market" | "limit">("market");
   const [amountDisplay, setAmountDisplay] = useState("100");
   const [limitPrice, setLimitPrice] = useState(
@@ -54,6 +70,9 @@ export default function OrderForm({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const isBuy = DIRECTION_IS_BUY[direction];
+  const isSell = direction === "sellYes" || direction === "sellNo";
 
   // Effective limit price: sentinel value for market orders, user input for limit orders.
   const effectiveLimitPrice =
@@ -119,6 +138,11 @@ export default function OrderForm({
   const polyPrice = parseFloat(market.outcomePrices[0]);
   const priceDiff = ((limitPrice / 1_000_000) - polyPrice) * 100;
 
+  // Polymarket exit link
+  const polymarketUrl = market.slug
+    ? `https://polymarket.com/event/${market.slug}`
+    : "https://polymarket.com";
+
   if (submitted) {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-4 p-6">
@@ -155,14 +179,16 @@ export default function OrderForm({
 
   return (
     <form onSubmit={handleSubmit} className="flex flex-col gap-0 h-full">
-      {/* Direction toggle */}
+
+      {/* Direction toggle — 2×2 grid */}
       <div className="grid grid-cols-2 border-b border-border">
+        {/* YES row */}
         <button
           type="button"
-          onClick={() => setIsBuy(true)}
+          onClick={() => setDirection("buyYes")}
           className={clsx(
-            "py-3 text-xs tracking-widest uppercase font-medium transition-all duration-150",
-            isBuy
+            "py-2.5 text-xs tracking-widest uppercase font-medium transition-all duration-150",
+            direction === "buyYes"
               ? "bg-accent/10 text-accent border-b-2 border-accent"
               : "text-muted hover:text-text",
           )}
@@ -171,17 +197,63 @@ export default function OrderForm({
         </button>
         <button
           type="button"
-          onClick={() => setIsBuy(false)}
+          onClick={() => setDirection("sellYes")}
           className={clsx(
-            "py-3 text-xs tracking-widest uppercase font-medium transition-all duration-150 border-l border-border",
-            !isBuy
+            "py-2.5 text-xs tracking-widest uppercase font-medium transition-all duration-150 border-l border-border",
+            direction === "sellYes"
+              ? "bg-danger/10 text-danger border-b-2 border-danger"
+              : "text-muted hover:text-text",
+          )}
+        >
+          SELL YES
+        </button>
+        {/* NO row */}
+        <button
+          type="button"
+          onClick={() => setDirection("buyNo")}
+          className={clsx(
+            "py-2.5 text-xs tracking-widest uppercase font-medium transition-all duration-150 border-t border-border",
+            direction === "buyNo"
               ? "bg-danger/10 text-danger border-b-2 border-danger"
               : "text-muted hover:text-text",
           )}
         >
           BUY NO
         </button>
+        <button
+          type="button"
+          onClick={() => setDirection("sellNo")}
+          className={clsx(
+            "py-2.5 text-xs tracking-widest uppercase font-medium transition-all duration-150 border-l border-t border-border",
+            direction === "sellNo"
+              ? "bg-accent/10 text-accent border-b-2 border-accent"
+              : "text-muted hover:text-text",
+          )}
+        >
+          SELL NO
+        </button>
       </div>
+
+      {/* Sell note — shown when direction is SELL YES or SELL NO */}
+      {isSell && (
+        <div className="border-b border-border bg-surface/40 px-3 py-2 flex items-start gap-2">
+          <span className="text-yellow-400/60 text-[10px] flex-shrink-0 mt-0.5">⚠</span>
+          <p className="text-[10px] text-muted-dim leading-relaxed">
+            {direction === "sellYes"
+              ? "SELL YES takes a short-YES position (deposits USDC, fills on NO side)."
+              : "SELL NO takes a short-NO position (deposits USDC, fills on YES side)."}{" "}
+            To liquidate existing tokens, exit on{" "}
+            <a
+              href={polymarketUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-blue/70 hover:text-blue underline"
+            >
+              Polymarket ↗
+            </a>
+          </p>
+        </div>
+      )}
 
       {/* Order type toggle */}
       <div className="grid grid-cols-2 border-b border-border">
@@ -375,7 +447,7 @@ export default function OrderForm({
                 {submitStep === "approving" ? "APPROVING USDC…" : "SIGNING ORDER…"}
               </span>
             ) : (
-              `SEAL ${orderType === "market" ? "MKT" : "LMT"} ${isBuy ? "BUY YES" : "BUY NO"} — $${amountDisplay || "0"}`
+              `SEAL ${orderType === "market" ? "MKT" : "LMT"} ${DIRECTION_LABEL[direction]} — $${amountDisplay || "0"}`
             )}
           </button>
         )}
