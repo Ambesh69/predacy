@@ -445,22 +445,14 @@ export class BatchProcessor {
     }
 
     // Final safety: contract rejects clearingPrice === 0.
-    // BUT: only apply the 65¢ fallback when there are actual buys or Polymarket routing.
-    // For sell-only batches with no crossing, the clearing algorithm returns 0 fills.
-    // Applying 65¢ there would incorrectly "fill" sell orders whose limitPrice ≤ 65¢,
-    // creating a USDC payout obligation with no buyer deposits to back it.
-    // In that case use price=1 (0.000001 USDC): the contract accepts it and no realistic
-    // sell limitPrice (e.g. 600_000) satisfies limitPrice ≤ 1, so all sells are refunded.
+    // Use 65¢ fallback for all batches (buy-only, sell-only, or empty) when there is no
+    // internal crossing and no Polymarket API configured.
+    // For sell-only batches: BatchVault._executeSellOnPolymarket calls MockCTF.mockSellYes,
+    // which burns YES tokens from the vault and mints the corresponding USDC to the vault —
+    // so no buyer deposits are needed to fund the seller payout.
     if (effectiveClearingPrice === 0n) {
-      const hasBuysOrRouting = orders.some((o) => o.isBuy); // any buy orders → need a real price
-      if (hasBuysOrRouting) {
-        effectiveClearingPrice = 650_000n; // 0.65 fallback when API not configured
-        console.log(`[BatchProcessor] No Polymarket API — using fallback clearing price: ${effectiveClearingPrice}`);
-      } else {
-        // Sell-only or empty batch with no crossing — use minimum valid price so all sells refund
-        effectiveClearingPrice = 1n;
-        console.log(`[BatchProcessor] Sell-only/empty batch with no crossing — using price=1 (all sells refunded)`);
-      }
+      effectiveClearingPrice = 650_000n; // 0.65 fallback when API not configured
+      console.log(`[BatchProcessor] No Polymarket API — using fallback clearing price: ${effectiveClearingPrice}`);
     }
 
     console.log(`[BatchProcessor] Effective clearing price: ${effectiveClearingPrice}`);
