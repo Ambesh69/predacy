@@ -39,11 +39,24 @@ const processor = missingVars.length === 0 ? new BatchProcessor(config) : null;
 // Always starts — healthcheck responds even when env vars are missing.
 let currentBatchId: bigint | null = null;
 
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin":  "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+};
+
 const server = createServer((req, res) => {
   const send = (status: number, body: object) => {
-    res.writeHead(status, { "Content-Type": "application/json" });
+    res.writeHead(status, { "Content-Type": "application/json", ...CORS_HEADERS });
     res.end(JSON.stringify(body));
   };
+
+  // OPTIONS preflight (browser sends this before every cross-origin POST)
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, CORS_HEADERS);
+    res.end();
+    return;
+  }
 
   // GET /health
   if (req.method === "GET" && req.url === "/health") {
