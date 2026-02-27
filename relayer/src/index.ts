@@ -92,13 +92,44 @@ const server = createServer((req, res) => {
     return;
   }
 
+  // POST /admin/force-advance
+  // Force-opens the next batch immediately, abandoning any stuck SETTLING batch.
+  // openBatch() only blocks for OPEN batches (contract check), so this works even
+  // when the current batch is at SETTLING. Useful when processBatch is failing
+  // permanently (UNRESOLVABLE) and you don't want to wait for the 3-attempt auto-skip.
+  if (req.method === "POST" && req.url === "/admin/force-advance") {
+    if (!processor) {
+      send(503, { error: "Relayer not configured" });
+      return;
+    }
+    (async () => {
+      try {
+        const prevBatchId = currentBatchId;
+        const newBatchId  = await processor!.openBatch(MARKET_ID);
+        currentBatchId    = newBatchId;
+        console.log(`[Relayer] /admin/force-advance: opened batch ${newBatchId} (prev: ${prevBatchId})`);
+        send(200, {
+          ok:          true,
+          prevBatchId: prevBatchId?.toString() ?? null,
+          newBatchId:  newBatchId.toString(),
+        });
+      } catch (e: any) {
+        // 409 = batch is still OPEN (can't force-advance a running batch)
+        const status = e.message?.includes("batch already open") ? 409 : 500;
+        send(status, { error: e.message });
+      }
+    })();
+    return;
+  }
+
   send(404, { error: "Not found" });
 });
 
 server.listen(PORT, () => {
   console.log(`[Relayer] HTTP server on :${PORT}`);
-  console.log(`[Relayer]   GET  /health — liveness check`);
-  console.log(`[Relayer]   POST /order  — submit off-chain order details`);
+  console.log(`[Relayer]   GET  /health        — liveness check`);
+  console.log(`[Relayer]   POST /order         — submit off-chain order details`);
+  console.log(`[Relayer]   POST /admin/force-advance — skip stuck SETTLING batch`);
 });
 
 // ── Startup log ───────────────────────────────────────────────────────────────
