@@ -179,17 +179,33 @@ if (processor) {
     }
   };
 
-  // Startup: set fromBlock, open first batch, then begin polling loop
+  // Startup: set fromBlock, open first batch (or recover existing), then begin polling loop
   (async () => {
     try {
       fromBlock      = await publicClient.getBlockNumber();
       currentBatchId = await processor.openBatch(MARKET_ID);
       console.log(`[Relayer] First batch ${currentBatchId} is open — accepting orders`);
     } catch (err: any) {
-      console.warn(`[Relayer] openBatch on startup failed: ${err.message}`);
-      console.warn("[Relayer] Continuing — will pick up existing batch from chain events");
-      // Still need a valid fromBlock even if openBatch failed
-      try { fromBlock = await publicClient.getBlockNumber(); } catch { fromBlock = 0n; }
+      if (err.message?.includes("batch already open")) {
+        // A batch was already open (e.g. relayer restarted mid-window) — read it from chain
+        try {
+          currentBatchId = await publicClient.readContract({
+            address: config.vaultAddress,
+            abi:     BATCH_VAULT_ABI,
+            functionName: "currentBatchId",
+          }) as bigint;
+          console.log(`[Relayer] Recovered existing batch ${currentBatchId} — accepting orders`);
+        } catch (e: any) {
+          console.warn(`[Relayer] Could not read currentBatchId: ${e.message}`);
+        }
+      } else {
+        console.warn(`[Relayer] openBatch on startup failed: ${err.message}`);
+        console.warn("[Relayer] Continuing — will pick up existing batch from chain events");
+      }
+      // Ensure fromBlock is set even when openBatch failed
+      if (fromBlock === 0n) {
+        try { fromBlock = await publicClient.getBlockNumber(); } catch { fromBlock = 0n; }
+      }
     }
     setInterval(poll, 5_000);
     console.log("[Relayer] Polling for BatchClosed / BatchSettled every 5 s");
