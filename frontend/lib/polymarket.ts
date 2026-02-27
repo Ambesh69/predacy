@@ -14,7 +14,7 @@ export interface Market {
   closed: boolean;
   endDate: string;
   tokens: Array<{ token_id: string; outcome: string; price: string }>;
-  clobTokenIds: string[];      // Large-int token IDs used by CLOB API for prices-history
+  clobTokenIds?: string[];     // Large-int token IDs used by CLOB API for prices-history
   image?: string;
   icon?: string;
   category?: string;
