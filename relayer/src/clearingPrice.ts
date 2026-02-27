@@ -141,8 +141,17 @@ export function computeFillsAtPrice(orders: Order[], price: bigint): {
   const filledSellUSDC = filledSellYes * price / PRICE_DECIMALS;
   const netBuyAmount  = filledBuyVolume > filledSellUSDC ? filledBuyVolume - filledSellUSDC : 0n;
   const netSellUSDC   = filledSellUSDC > filledBuyVolume ? filledSellUSDC - filledBuyVolume : 0n;
-  // Convert net sell USDC back to YES token count (rounding down is safe — minor dust stays in vault)
-  const netSellYes    = price > 0n ? netSellUSDC * PRICE_DECIMALS / price : 0n;
+
+  // Convert net-sell USDC back to YES tokens using ceiling division to avoid under-selling.
+  // Round-trip truncation (YES→USDC→YES) can understate netSellYes by 1, causing mockSellYes
+  // to mint 1 less USDC than claimPosition owes the seller → revert on transfer.
+  // Ceiling ensures vault always receives enough USDC to cover every filled sell order.
+  // Special case: when there are no buyers at all, netSellYes == filledSellYes exactly.
+  const netSellYes = filledBuyVolume === 0n
+    ? filledSellYes
+    : price > 0n
+      ? (netSellUSDC * PRICE_DECIMALS + price - 1n) / price  // ceiling division
+      : 0n;
 
   return { filledBuyVolume, filledSellYes, netBuyAmount, netSellYes };
 }
