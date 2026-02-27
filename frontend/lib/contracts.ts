@@ -9,11 +9,11 @@ export const CONTRACTS = {
     usdc: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174" as `0x${string}`,
     ctf:  "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045" as `0x${string}`,
   },
-  // Polygon Amoy testnet — redeployment needed after sell support changes
+  // Polygon Amoy testnet
   [polygonAmoy.id]: {
-    batchVault: "0x90AA21aD6c786FD673e5AeBd033247d63f810A9a" as `0x${string}`, // TODO: redeploy
-    usdc:       "0xEF6B42C6db7Fde49B8Ca85Ee457Ef85C739B9Cd9" as `0x${string}`, // MockUSDC
-    ctf:        "0xDfc28eA864e4F2781096B413Aa1043FB095d762c" as `0x${string}`, // MockCTF
+    batchVault: "0x0cc386CC9c132fEC0da3FCAE1D88E87914c433B0" as `0x${string}`,
+    usdc:       "0xB04a4B16E1960c18c5827805aAA5b0F982Ce541e" as `0x${string}`, // MockUSDC
+    ctf:        "0xa99cf8669E33F18E1eb301ceF0A4cA0CC787Fa1c" as `0x${string}`, // MockCTF
   },
 } as const;
 
