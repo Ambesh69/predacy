@@ -126,6 +126,41 @@ if (processor) {
   let openingBatch    = false;
   let closingBatch    = false;
 
+  // Track consecutive settlement failures per batch.
+  // After 3 failures (all UNRESOLVABLE — contract would always revert) we
+  // force-open the next batch so the lifecycle isn't blocked forever.
+  const settleFailures = new Map<string, number>();
+
+  const onSettleFail = async (batchId: bigint, err: unknown) => {
+    const key = batchId.toString();
+    const n   = (settleFailures.get(key) ?? 0) + 1;
+    settleFailures.set(key, n);
+    console.error(`[Relayer] processBatch ${batchId} failed (attempt ${n}/3):`, (err as any)?.message ?? err);
+
+    if (n >= 3) {
+      console.warn(`[Relayer] Batch ${batchId} UNRESOLVABLE after ${n} attempts — force-opening next batch`);
+      settleFailures.delete(key);
+      if (!openingBatch) {
+        openingBatch = true;
+        try {
+          currentBatchId = await processor!.openBatch(MARKET_ID);
+          console.log(`[Relayer] Force-opened batch ${currentBatchId} (skipped unresolvable ${batchId})`);
+        } catch (e: any) {
+          if (e.message?.includes("batch already open")) {
+            currentBatchId = await publicClient.readContract({
+              address: config.vaultAddress,
+              abi:     BATCH_VAULT_ABI,
+              functionName: "currentBatchId",
+            }) as bigint;
+            console.log(`[Relayer] Next batch already open: ${currentBatchId}`);
+          } else {
+            console.error("[Relayer] openBatch (force-skip) failed:", e);
+          }
+        } finally { openingBatch = false; }
+      }
+    }
+  };
+
   // Event ABI items for getLogs
   const BATCH_CLOSED_EVENT = parseAbiItem(
     "event BatchClosed(uint256 indexed batchId, uint256 commitmentCount)",
@@ -177,9 +212,12 @@ if (processor) {
             // and the case where processBatch() exited early on a previous run)
             processingBatch = true;
             console.log(`[Relayer] Batch ${currentBatchId} is SETTLING — processing`);
-            try   { await processor.processBatch(currentBatchId); }
-            catch (err) { console.error(`[Relayer] processBatch recovery failed:`, err); }
-            finally { processingBatch = false; }
+            try {
+              await processor.processBatch(currentBatchId);
+              settleFailures.delete(currentBatchId.toString()); // clear on success
+            } catch (err) {
+              await onSettleFail(currentBatchId, err);
+            } finally { processingBatch = false; }
           } else if (batchInfo.status === SETTLED && !openingBatch) {
             // Batch is fully settled but the BatchSettled event was missed because
             // fromBlock advanced past it while processBatch was awaiting the tx receipt
@@ -211,9 +249,12 @@ if (processor) {
         if (processingBatch) { console.log(`[Relayer] BatchClosed ${batchId} — already settling, skipping`); continue; }
         processingBatch = true;
         console.log(`[Relayer] BatchClosed ${batchId} (${log.args.commitmentCount} orders) — settling`);
-        try   { await processor.processBatch(batchId); }
-        catch (err) { console.error(`[Relayer] processBatch ${batchId} failed:`, err); }
-        finally { processingBatch = false; }
+        try {
+          await processor.processBatch(batchId);
+          settleFailures.delete(batchId.toString()); // clear on success
+        } catch (err) {
+          await onSettleFail(batchId, err);
+        } finally { processingBatch = false; }
       }
 
       // BatchSettled → open next batch

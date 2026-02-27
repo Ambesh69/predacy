@@ -274,17 +274,24 @@ export class BatchProcessor {
     const orders = await this._matchOrdersToCommitments(batchId, commitments, batchInfo.marketId);
     console.log(`[BatchProcessor] ${orders.length}/${commitments.length} orders matched`);
 
-    if (orders.length === 0) {
-      if (commitments.length === 0) {
-        // Empty batch — still call settleBatch so the contract moves to SETTLED
-        // and the relayer can open the next batch. Never skip settlement.
-        console.log(`[BatchProcessor] Empty batch — settling to advance lifecycle`);
-      } else {
-        // Commitments exist but no off-chain order details matched — settle with
-        // empty orders so the contract refunds all depositors in full.
-        console.log(`[BatchProcessor] No matched orders — settling empty (full refund to depositors)`);
-      }
-      // Fall through to settleBatch with empty orders array
+    // ── Completeness check ────────────────────────────────────────────────────
+    // The contract enforces orders.length == batch.commitmentCount at settlement.
+    // If any commitment is unmatched (order never sent to relayer, Redis data lost,
+    // or hash computed with wrong marketId), we CANNOT settle this batch — calling
+    // settleBatch would revert with CommitmentMismatch every time.
+    // Throw early to let the poll handler count failures and force-skip the batch.
+    if (orders.length !== commitments.length) {
+      const unmatched = commitments.length - orders.length;
+      throw new Error(
+        `UNRESOLVABLE: ${unmatched} of ${commitments.length} commitment(s) have no ` +
+        `matching off-chain order (order not received by relayer, Redis data lost, ` +
+        `or commitment hash uses wrong marketId). Cannot call settleBatch — contract ` +
+        `requires all ${commitments.length} commitment(s) to be revealed.`,
+      );
+    }
+
+    if (commitments.length === 0) {
+      console.log(`[BatchProcessor] Empty batch — settling to advance lifecycle`);
     }
 
     // 3. Compute batch clearing price
