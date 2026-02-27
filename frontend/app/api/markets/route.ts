@@ -1,5 +1,9 @@
 import { NextResponse } from "next/server";
 
+// Always run dynamically — query params (condition_id, limit) must never be
+// collapsed into a single cached response by Next.js or the Vercel CDN.
+export const dynamic = "force-dynamic";
+
 const GAMMA_API = "https://gamma-api.polymarket.com";
 
 /** Server-side proxy for Polymarket Gamma API — avoids CORS issues from the browser */
@@ -14,9 +18,10 @@ export async function GET(request: Request) {
     : `${GAMMA_API}/markets?active=true&closed=false&limit=${limit}&order=volumeNum&ascending=false`;
 
   try {
+    // No Next.js data cache — each condition_id must fetch fresh from Gamma
     const res = await fetch(url, {
       headers: { "Accept": "application/json" },
-      next: { revalidate: 30 }, // cache 30s
+      cache: "no-store",
     });
 
     if (!res.ok) {
