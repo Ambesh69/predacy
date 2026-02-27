@@ -64,6 +64,7 @@ export function computeClearingPrice(orders: Order[]): ClearingResult {
       filledSellVolume: 0n,
       filledSellYes: 0n,
       netBuyAmount: totalBuyAmount,
+      netSellYes: 0n,
       filledOrders: [...orders],
       unfilledOrders: [],
     };
@@ -106,9 +107,44 @@ export function computeClearingPrice(orders: Order[]): ClearingResult {
     filledSellVolume,
     filledSellYes,
     netBuyAmount,
+    netSellYes: 0n, // internal crossing is always net-buy; net-sell only arises from Polymarket-anchored price
     filledOrders,
     unfilledOrders,
   };
+}
+
+/**
+ * Given an externally-supplied clearing price (e.g. from Polymarket mid-price),
+ * compute fill volumes and net positions for settlement.
+ *
+ * Used when effectiveClearingPrice differs from the internal crossing price
+ * (e.g. sell-only or all-buy batches where price comes from Polymarket).
+ */
+export function computeFillsAtPrice(orders: Order[], price: bigint): {
+  filledBuyVolume: bigint;
+  filledSellYes: bigint;
+  netBuyAmount: bigint;
+  netSellYes: bigint;
+} {
+  const PRICE_DECIMALS = 1_000_000n;
+  let filledBuyVolume = 0n;
+  let filledSellYes = 0n;
+
+  for (const o of orders) {
+    if (o.isBuy && o.limitPrice >= price) {
+      filledBuyVolume += o.amount;
+    } else if (!o.isBuy && o.limitPrice <= price) {
+      filledSellYes += o.amount;
+    }
+  }
+
+  const filledSellUSDC = filledSellYes * price / PRICE_DECIMALS;
+  const netBuyAmount  = filledBuyVolume > filledSellUSDC ? filledBuyVolume - filledSellUSDC : 0n;
+  const netSellUSDC   = filledSellUSDC > filledBuyVolume ? filledSellUSDC - filledBuyVolume : 0n;
+  // Convert net sell USDC back to YES token count (rounding down is safe — minor dust stays in vault)
+  const netSellYes    = price > 0n ? netSellUSDC * PRICE_DECIMALS / price : 0n;
+
+  return { filledBuyVolume, filledSellYes, netBuyAmount, netSellYes };
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────

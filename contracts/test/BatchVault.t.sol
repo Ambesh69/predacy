@@ -69,6 +69,44 @@ contract MockCTF {
         balanceOf[to][yesTokenId] += amount;
     }
 
+    /// @dev Simulate buying YES at a given clearing price: pull USDC, mint price-correct YES.
+    ///      Called by BatchVault._executeOnPolymarket() instead of splitPosition().
+    function mockBuyYes(
+        address collateral,
+        bytes32 conditionId,
+        uint256 usdcAmount,
+        uint256 clearingPrice
+    ) external returns (uint256 yesAmount) {
+        // Pull USDC from vault (vault approved us before calling)
+        MockUSDC(collateral).transferFrom(msg.sender, address(this), usdcAmount);
+        // Mint price-correct YES tokens to vault
+        yesAmount = usdcAmount * 1_000_000 / clearingPrice;
+        uint256 yesId = _getYesId(collateral, conditionId);
+        balanceOf[msg.sender][yesId] += yesAmount;
+    }
+
+    /// @dev Simulate selling YES at a given clearing price: burn YES, mint USDC proceeds.
+    ///      Called by BatchVault._executeSellOnPolymarket().
+    function mockSellYes(
+        address collateral,
+        bytes32 conditionId,
+        uint256 yesAmount,
+        uint256 clearingPrice
+    ) external returns (uint256 usdcAmount) {
+        uint256 yesId = _getYesId(collateral, conditionId);
+        require(balanceOf[msg.sender][yesId] >= yesAmount, "MockCTF: insufficient YES balance");
+        balanceOf[msg.sender][yesId] -= yesAmount;
+        usdcAmount = yesAmount * clearingPrice / 1_000_000;
+        // Mint USDC directly to vault (simulates Polymarket CLOB fill)
+        MockUSDC(collateral).mint(msg.sender, usdcAmount);
+    }
+
+    /// @dev Compute YES token ID — mirrors getCollectionId(bytes32(0), conditionId, 2) + getPositionId
+    function _getYesId(address collateral, bytes32 conditionId) internal pure returns (uint256) {
+        bytes32 collectionId = keccak256(abi.encode(conditionId, uint256(2)));
+        return uint256(keccak256(abi.encode(collateral, collectionId)));
+    }
+
     function safeTransferFrom(address from, address to, uint256 id, uint256 amount, bytes calldata) external {
         require(from == msg.sender || isApprovedForAll[from][msg.sender], "MockCTF: not approved");
         balanceOf[from][id] -= amount;
@@ -185,7 +223,8 @@ contract BatchVaultTest is Test {
         returns (
             uint256 totalBuyVol,
             uint256 totalSellVol,
-            uint256 netBuyAmount
+            uint256 netBuyAmount,
+            uint256 netSellYes
         )
     {
         uint256 filledSellYes = 0;
@@ -206,6 +245,9 @@ contract BatchVaultTest is Test {
         // netBuyAmount: USDC to route to Polymarket (buy vol minus USDC-equiv of sell vol)
         uint256 filledSellUSDC = filledSellYes * clearingPrice / PRICE_DECIMALS;
         netBuyAmount = totalBuyVol > filledSellUSDC ? totalBuyVol - filledSellUSDC : 0;
+        // netSellYes: YES tokens to sell on Polymarket (sell-heavy batches)
+        uint256 netSellUSDC = filledSellUSDC > totalBuyVol ? filledSellUSDC - totalBuyVol : 0;
+        netSellYes = clearingPrice > 0 ? netSellUSDC * PRICE_DECIMALS / clearingPrice : 0;
     }
 
     // ─── Tests: batch lifecycle ────────────────────────────────────────────
@@ -391,10 +433,10 @@ contract BatchVaultTest is Test {
         orders[1] = BatchVault.RevealedOrder(bob,   true,  amtBob,   limitBob,   saltBob);
         orders[2] = BatchVault.RevealedOrder(carol, false, amtCarol, limitCarol, saltCarol);
 
-        (uint256 buyVol, uint256 sellVol, uint256 netBuy) = _buildSettleParams(orders, clearingPrice);
+        (uint256 buyVol, uint256 sellVol, uint256 netBuy, uint256 netSell) = _buildSettleParams(orders, clearingPrice);
 
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, clearingPrice, buyVol, sellVol, netBuy, "");
+        vault.settleBatch(batchId, orders, clearingPrice, buyVol, sellVol, netBuy, netSell, "");
 
         BatchVault.Batch memory b = vault.getBatch(batchId);
         assertEq(uint256(b.status), uint256(BatchVault.BatchStatus.SETTLED));
@@ -420,7 +462,7 @@ contract BatchVaultTest is Test {
 
         vm.expectRevert(BatchVault.CommitmentMismatch.selector);
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, 650000, 100e6, 0, 100e6, "");
+        vault.settleBatch(batchId, orders, 650000, 100e6, 0, 100e6, 0, "");
     }
 
     function test_settleBatch_invalidClearingPrice_reverts() public {
@@ -437,7 +479,7 @@ contract BatchVaultTest is Test {
 
         vm.expectRevert(BatchVault.InvalidClearingPrice.selector);
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, 0, 100e6, 0, 100e6, "");
+        vault.settleBatch(batchId, orders, 0, 100e6, 0, 100e6, 0, "");
     }
 
     // ─── Tests: claim position — buy orders ───────────────────────────────
@@ -459,7 +501,7 @@ contract BatchVaultTest is Test {
         orders[0] = BatchVault.RevealedOrder(alice, true, amount, limitAlice, salt);
 
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, 650000, 0, 0, 0, "");
+        vault.settleBatch(batchId, orders, 650000, 0, 0, 0, 0, "");
 
         uint256 balanceBefore = usdc.balanceOf(alice);
 
@@ -482,7 +524,7 @@ contract BatchVaultTest is Test {
         BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
         orders[0] = BatchVault.RevealedOrder(alice, true, 100e6, 400000, salt);
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, 650000, 0, 0, 0, "");
+        vault.settleBatch(batchId, orders, 650000, 0, 0, 0, 0, "");
 
         vm.prank(alice);
         vault.claimPosition(batchId);
@@ -522,9 +564,9 @@ contract BatchVaultTest is Test {
         orders[0] = BatchVault.RevealedOrder(alice, true,  amtAlice, 700000, saltAlice);
         orders[1] = BatchVault.RevealedOrder(carol, false, yesCarol, 600000, saltCarol);
 
-        (uint256 buyVol, uint256 sellVol, uint256 netBuy) = _buildSettleParams(orders, clearingPrice);
+        (uint256 buyVol, uint256 sellVol, uint256 netBuy, uint256 netSell) = _buildSettleParams(orders, clearingPrice);
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, clearingPrice, buyVol, sellVol, netBuy, "");
+        vault.settleBatch(batchId, orders, clearingPrice, buyVol, sellVol, netBuy, netSell, "");
 
         // Carol's position: filledAmount = 80 * 0.65 = 52 USDC
         BatchVault.Position memory pos = vault.getPosition(batchId, carol);
@@ -561,7 +603,7 @@ contract BatchVaultTest is Test {
 
         // Settlement with no buy orders — just need clearing price for the verify
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, 650000, 0, 0, 0, "");
+        vault.settleBatch(batchId, orders, 650000, 0, 0, 0, 0, "");
 
         // Carol's position: no fill, full refund of YES tokens
         BatchVault.Position memory pos = vault.getPosition(batchId, carol);
@@ -606,22 +648,22 @@ contract BatchVaultTest is Test {
         orders[0] = BatchVault.RevealedOrder(alice, true,  amtAlice, 700000, bytes32(uint256(1)));
         orders[1] = BatchVault.RevealedOrder(carol, false, yesCarol, 600000, bytes32(uint256(2)));
 
-        (uint256 buyVol, uint256 sellVol, uint256 netBuy) = _buildSettleParams(orders, clearingPrice);
+        (uint256 buyVol, uint256 sellVol, uint256 netBuy, uint256 netSell) = _buildSettleParams(orders, clearingPrice);
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, clearingPrice, buyVol, sellVol, netBuy, "");
+        vault.settleBatch(batchId, orders, clearingPrice, buyVol, sellVol, netBuy, netSell, "");
 
         BatchVault.Batch memory b = vault.getBatch(batchId);
-        // netBuyAmount = 130 - 80*0.65 = 130 - 52 = 78
+        // netBuyAmount = 130 - 80*0.65 = 130 - 52 = 78 USDC
         assertEq(b.netBuyAmount, 78e6);
-        // yesTokensReceived from Polymarket split = 78e6 (prototype: 1 USDC = 1 YES)
-        assertEq(b.yesTokensReceived, 78e6);
+        // yesTokensReceived via mockBuyYes: 78e6 * 1e6 / 650000 = 120_000_000 (price-correct)
+        assertEq(b.yesTokensReceived, 78e6 * 1_000_000 / 650_000);
         assertEq(b.filledSellYes, yesCarol);
         assertEq(b.totalFilledBuyVol, amtAlice);
 
-        // Alice claims: (130/130) * (78 + 80) = 158 YES tokens
+        // Alice claims: (130/130) * (120 + 80) = 200 YES tokens
         BatchVault.Position memory alicePos = vault.getPosition(batchId, alice);
         uint256 expectedYes = (alicePos.filledAmount * (b.yesTokensReceived + b.filledSellYes)) / b.totalFilledBuyVol;
-        assertEq(expectedYes, 158e6);
+        assertEq(expectedYes, 200e6);
 
         uint256 aliceYesBefore = ctf.balanceOf(alice, _yesTokenId());
         vm.prank(alice);
@@ -816,12 +858,61 @@ contract BatchVaultTest is Test {
         orders[0] = BatchVault.RevealedOrder(dave, true, amount, limitPrice, salt);
 
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, 650000, amount, 0, amount, "");
+        vault.settleBatch(batchId, orders, 650000, amount, 0, amount, 0, "");
 
         assertEq(uint256(vault.getBatch(batchId).status), uint256(BatchVault.BatchStatus.SETTLED));
 
         BatchVault.Position memory pos = vault.getPosition(batchId, dave);
         assertEq(pos.filledAmount, amount);
+    }
+
+    // ─── Tests: sell-only batch via Polymarket ─────────────────────────────
+
+    function test_sellOnly_fillsViaPolymarket() public {
+        uint256 batchId = _openBatch();
+
+        // Carol sells 50 YES tokens at min $0.60; no buyers in this batch
+        uint256 yesCarol = 50e6;
+        bytes32 saltCarol = bytes32(uint256(1));
+        bytes32 cCarol = _makeCommitment(MARKET_ID, false, yesCarol, 600000, saltCarol, carol);
+
+        _mintYes(carol, yesCarol);
+        _approveVaultCTF(carol);
+        vm.prank(carol);
+        vault.commitSellOrder(cCarol, yesCarol);
+
+        _closeBatch(batchId);
+
+        // Relayer uses Polymarket mid price (0.65) — all sells route to Polymarket
+        uint256 clearingPrice = 650_000;
+        BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
+        orders[0] = BatchVault.RevealedOrder(carol, false, yesCarol, 600_000, saltCarol);
+
+        // netBuyAmount = 0, netSellYes = 50 YES tokens
+        uint256 netSellYes = yesCarol;
+
+        vm.prank(relayer);
+        vault.settleBatch(batchId, orders, clearingPrice, 0, yesCarol, 0, netSellYes, "");
+
+        // mockSellYes burned 50 YES from vault, minted 50 * 0.65 = 32.5 USDC to vault
+        // Carol's filledAmount = 50e6 * 0.65 = 32_500_000 USDC
+        uint256 expectedUSDC = yesCarol * clearingPrice / 1e6; // 32_500_000
+
+        BatchVault.Position memory pos = vault.getPosition(batchId, carol);
+        assertEq(pos.filledAmount, expectedUSDC);
+        assertEq(pos.refundAmount, 0);
+        assertFalse(pos.isBuy);
+
+        // Vault should have exactly expectedUSDC (minted by mockSellYes)
+        assertEq(usdc.balanceOf(address(vault)), expectedUSDC);
+
+        // Carol claims: receives USDC from vault
+        uint256 carolUSDCBefore = usdc.balanceOf(carol);
+        vm.prank(carol);
+        vault.claimPosition(batchId);
+
+        assertEq(usdc.balanceOf(carol), carolUSDCBefore + expectedUSDC);
+        assertEq(usdc.balanceOf(address(vault)), 0);
     }
 
     // ─── Tests: relayer access control ────────────────────────────────────
@@ -839,6 +930,6 @@ contract BatchVaultTest is Test {
 
         vm.expectRevert(BatchVault.OnlyRelayer.selector);
         vm.prank(alice);
-        vault.settleBatch(batchId, orders, 650000, 100e6, 0, 100e6, "");
+        vault.settleBatch(batchId, orders, 650000, 100e6, 0, 100e6, 0, "");
     }
 }

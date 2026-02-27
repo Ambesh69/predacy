@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "../interfaces/IConditionalTokens.sol";
+import { IMintable } from "../interfaces/IConditionalTokens.sol";
 
 /// @title MockCTF
 /// @notice Minimal mock of Polymarket's Gnosis Conditional Token Framework
@@ -140,7 +141,48 @@ contract MockCTF is IConditionalTokens {
         return 0;
     }
 
+    // ── Testnet mock exchange ─────────────────────────────────────────────────
+
+    /// @notice Simulate buying YES tokens at a known clearing price.
+    ///         Pulls usdcAmount USDC from caller; mints usdcAmount*1e6/clearingPrice YES tokens.
+    ///         This replaces the 1:1 splitPosition approximation with price-correct economics.
+    function mockBuyYes(
+        address collateral,
+        bytes32 conditionId,
+        uint256 usdcAmount,
+        uint256 clearingPrice
+    ) external override returns (uint256 yesAmount) {
+        _pullERC20(collateral, msg.sender, usdcAmount);
+        yesAmount = usdcAmount * 1_000_000 / clearingPrice;
+        uint256 yesId = _getYesId(collateral, conditionId);
+        _balances[msg.sender][yesId] += yesAmount;
+        emit TransferSingle(msg.sender, address(0), msg.sender, yesId, yesAmount);
+    }
+
+    /// @notice Simulate selling YES tokens at a known clearing price.
+    ///         Burns yesAmount YES from caller; mints yesAmount*clearingPrice/1e6 USDC to caller.
+    function mockSellYes(
+        address collateral,
+        bytes32 conditionId,
+        uint256 yesAmount,
+        uint256 clearingPrice
+    ) external override returns (uint256 usdcAmount) {
+        uint256 yesId = _getYesId(collateral, conditionId);
+        require(_balances[msg.sender][yesId] >= yesAmount, "MockCTF: insufficient YES balance");
+        _balances[msg.sender][yesId] -= yesAmount;
+        emit TransferSingle(msg.sender, msg.sender, address(0), yesId, yesAmount);
+        usdcAmount = yesAmount * clearingPrice / 1_000_000;
+        IMintable(collateral).mint(msg.sender, usdcAmount);
+    }
+
     // ── Internal ─────────────────────────────────────────────────────────────
+
+    /// @notice Compute the YES token ID for a given collateral and conditionId.
+    ///         YES = index set 2 (binary: 10). Matches BatchVault._getYesTokenId().
+    function _getYesId(address collateral, bytes32 conditionId) internal pure returns (uint256) {
+        bytes32 collectionId = keccak256(abi.encodePacked(bytes32(0), conditionId, uint256(2)));
+        return uint256(keccak256(abi.encodePacked(collateral, collectionId)));
+    }
 
     function _pullERC20(address token, address from, uint256 amount) internal {
         (bool ok, bytes memory data) = token.call(

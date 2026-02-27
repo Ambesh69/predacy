@@ -402,6 +402,7 @@ contract BatchVault {
     /// @param totalBuyVol    Total USDC from filled buy orders
     /// @param totalSellVol   Total YES tokens from filled sell orders
     /// @param netBuyAmount   Net USDC to spend buying YES tokens on Polymarket
+    /// @param netSellYes     Net YES tokens to sell on Polymarket (sell-heavy batches)
     /// @param proof          ZK proof bytes from Noir prover
     function settleBatch(
         uint256 batchId,
@@ -410,6 +411,7 @@ contract BatchVault {
         uint256 totalBuyVol,
         uint256 totalSellVol,
         uint256 netBuyAmount,
+        uint256 netSellYes,
         bytes calldata proof
     ) external {
         if (msg.sender != relayer) revert OnlyRelayer();
@@ -424,31 +426,40 @@ contract BatchVault {
 
         // 2. Build public inputs for ZK verifier
         bytes32 commitmentRoot = _computeCommitmentRoot(batchId, orders.length);
-        bytes32[] memory publicInputs = new bytes32[](5);
+        bytes32[] memory publicInputs = new bytes32[](6);
         publicInputs[0] = commitmentRoot;
         publicInputs[1] = bytes32(clearingPrice);
         publicInputs[2] = bytes32(totalBuyVol);
         publicInputs[3] = bytes32(totalSellVol);
         publicInputs[4] = bytes32(netBuyAmount);
+        publicInputs[5] = bytes32(netSellYes);
 
         // 3. Verify ZK proof
         if (!verifier.verify(proof, publicInputs)) revert ZKProofInvalid();
 
-        // 4. Execute net position on Polymarket's CTF (if there's a net buy)
+        // 4a. Execute net buy on Polymarket (buy-heavy or all-buy batches)
         uint256 yesTokensReceived = 0;
         if (netBuyAmount > 0) {
             yesTokensReceived = _executeOnPolymarket(batch.marketId, netBuyAmount, clearingPrice);
+        }
+
+        // 4b. Execute net sell on Polymarket (sell-heavy or all-sell batches)
+        if (netSellYes > 0) {
+            _executeSellOnPolymarket(batch.marketId, netSellYes, clearingPrice);
         }
 
         // 5. Compute per-trader positions and store them
         (uint256 filledBuyVol, uint256 filledSellYes) = _assignPositions(batchId, orders, clearingPrice);
 
         // 6. Finalize batch state
+        // filledSellYes held in vault = total filled - amount sold to Polymarket
+        uint256 yesForBuyers = filledSellYes >= netSellYes ? filledSellYes - netSellYes : 0;
+
         batch.status = BatchStatus.SETTLED;
         batch.clearingPrice = clearingPrice;
         batch.netBuyAmount = netBuyAmount;
         batch.yesTokensReceived = yesTokensReceived;
-        batch.filledSellYes = filledSellYes;
+        batch.filledSellYes = yesForBuyers;
         batch.totalFilledBuyVol = filledBuyVol;
         batch.commitmentRoot = commitmentRoot;
 
@@ -574,28 +585,19 @@ contract BatchVault {
         }
     }
 
-    /// @notice Execute net buy position on Polymarket's CTF by splitting USDC into YES tokens
-    function _executeOnPolymarket(bytes32 conditionId, uint256 usdcAmount, uint256 /*clearingPrice*/) internal returns (uint256 yesTokens) {
-        // Approve CTF to spend USDC
+    /// @notice Execute net buy on Polymarket: pull USDC, receive price-correct YES tokens.
+    ///         Uses mockBuyYes on testnet (price-aware); replace with CTF Exchange on mainnet.
+    function _executeOnPolymarket(bytes32 conditionId, uint256 usdcAmount, uint256 clearingPrice) internal returns (uint256 yesTokens) {
         IERC20(usdc).approve(ctf, usdcAmount);
+        // mockBuyYes mints usdcAmount * 1e6 / clearingPrice YES tokens — correct at any price
+        yesTokens = IConditionalTokens(ctf).mockBuyYes(usdc, conditionId, usdcAmount, clearingPrice);
+    }
 
-        // Split USDC into YES (index 1) and NO (index 0) tokens
-        // partition [1, 2] = index sets for NO=0b01=1 and YES=0b10=2
-        uint256[] memory partition = new uint256[](2);
-        partition[0] = 1; // NO
-        partition[1] = 2; // YES
-
-        IConditionalTokens(ctf).splitPosition(
-            usdc,
-            bytes32(0), // parentCollectionId (root)
-            conditionId,
-            partition,
-            usdcAmount
-        );
-
-        // After splitting, vault holds equal YES and NO tokens
-        // For a net buy: vault keeps YES tokens for distribution
-        yesTokens = usdcAmount; // 1 USDC splits into 1 YES + 1 NO (prototype approximation)
+    /// @notice Execute net sell on Polymarket: burn YES tokens, receive USDC proceeds.
+    ///         Uses mockSellYes on testnet; replace with CTF Exchange on mainnet.
+    function _executeSellOnPolymarket(bytes32 conditionId, uint256 yesAmount, uint256 clearingPrice) internal {
+        // mockSellYes burns YES tokens from vault and mints yesAmount*clearingPrice/1e6 USDC back
+        IConditionalTokens(ctf).mockSellYes(usdc, conditionId, yesAmount, clearingPrice);
     }
 
     /// @notice Get the ERC-1155 token ID for YES shares on a given Polymarket condition

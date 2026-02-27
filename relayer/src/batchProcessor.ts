@@ -1,7 +1,7 @@
 import { createPublicClient, createWalletClient, http, encodeAbiParameters, keccak256 } from "viem";
 import { polygon, polygonAmoy } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
-import { computeClearingPrice } from "./clearingPrice.js";
+import { computeClearingPrice, computeFillsAtPrice } from "./clearingPrice.js";
 import { ZKProver } from "./zkProver.js";
 import { PolymarketClient } from "./polymarketClient.js";
 import { createOrderStore, type OrderStore } from "./orderStore.js";
@@ -84,6 +84,7 @@ export const BATCH_VAULT_ABI = [
       { name: "totalBuyVol",   type: "uint256" },
       { name: "totalSellVol",  type: "uint256" },
       { name: "netBuyAmount",  type: "uint256" },
+      { name: "netSellYes",    type: "uint256" },
       { name: "proof",         type: "bytes"   },
     ],
     outputs: [],
@@ -353,12 +354,13 @@ export class BatchProcessor {
     console.log(`[BatchProcessor] Processing batch ${batchId}`);
 
     // 1. Fetch on-chain batch info + commitments
-    const batchInfo = await this.publicClient.readContract({
+    const batchRaw = await this.publicClient.readContract({
       address: this.config.vaultAddress,
       abi: BATCH_VAULT_ABI,
       functionName: "getBatch",
       args: [batchId],
-    }) as BatchInfo;
+    });
+    const batchInfo: BatchInfo = { ...(batchRaw as unknown as Omit<BatchInfo, "batchId">), batchId };
 
     const commitments = await this._fetchCommitments(batchId, Number(batchInfo.commitmentCount));
     console.log(`[BatchProcessor] ${commitments.length} on-chain commitments`);
@@ -387,10 +389,10 @@ export class BatchProcessor {
       console.log(`[BatchProcessor] Empty batch — settling to advance lifecycle`);
     }
 
-    // 3. Compute batch clearing price
+    // 3. Compute internal batch clearing price (finds optimal crossing price if buys+sells cross)
     const clearing = computeClearingPrice(orders);
     console.log(
-      `[BatchProcessor] Clearing: internalPrice=${clearing.clearingPrice}, ` +
+      `[BatchProcessor] Internal clearing: price=${clearing.clearingPrice}, ` +
       `buyVol=${clearing.filledBuyVolume}, sellVol=${clearing.filledSellVolume}, ` +
       `netBuy=${clearing.netBuyAmount}`,
     );
@@ -450,7 +452,7 @@ export class BatchProcessor {
     // In that case use price=1 (0.000001 USDC): the contract accepts it and no realistic
     // sell limitPrice (e.g. 600_000) satisfies limitPrice ≤ 1, so all sells are refunded.
     if (effectiveClearingPrice === 0n) {
-      const hasBuysOrRouting = clearing.filledBuyVolume > 0n || clearing.netBuyAmount > 0n;
+      const hasBuysOrRouting = orders.some((o) => o.isBuy); // any buy orders → need a real price
       if (hasBuysOrRouting) {
         effectiveClearingPrice = 650_000n; // 0.65 fallback when API not configured
         console.log(`[BatchProcessor] No Polymarket API — using fallback clearing price: ${effectiveClearingPrice}`);
@@ -463,18 +465,28 @@ export class BatchProcessor {
 
     console.log(`[BatchProcessor] Effective clearing price: ${effectiveClearingPrice}`);
 
-    // 5. Generate ZK proof (mock in prototype mode)
+    // 5. Re-compute fills at the effective clearing price.
+    //    The internal clearing algorithm may have returned price=0 (no crossing) or a price that
+    //    differs from effectiveClearingPrice (Polymarket mid). computeFillsAtPrice gives the
+    //    correct filled volumes and net positions for the actual price used at settlement.
+    const fills = computeFillsAtPrice(orders, effectiveClearingPrice);
+    const { filledBuyVolume, filledSellYes, netBuyAmount, netSellYes } = fills;
+    console.log(
+      `[BatchProcessor] Fills at effective price: buyVol=${filledBuyVolume}, ` +
+      `sellYes=${filledSellYes}, netBuy=${netBuyAmount}, netSellYes=${netSellYes}`,
+    );
+
+    // 6. Generate ZK proof (mock in prototype mode)
     const { proof } = await this.zkProver.generateProof({
       orders,
       commitments: commitments.map((c) => c.hash),
       clearingPrice: effectiveClearingPrice,
-      netBuyAmount: clearing.netBuyAmount,
-      filledBuyVolume: clearing.filledBuyVolume,
-      filledSellVolume: clearing.filledSellVolume,
+      netBuyAmount,
+      filledBuyVolume,
+      filledSellVolume: filledSellYes,
     });
 
-    // 6. Settle on-chain
-    // totalSellVol = filledSellYes (raw YES token count from filled sell orders)
+    // 7. Settle on-chain
     const settleHash = await this._write({
       address: this.config.vaultAddress,
       abi: BATCH_VAULT_ABI,
@@ -489,9 +501,10 @@ export class BatchProcessor {
           salt:       o.salt,
         })),
         effectiveClearingPrice,
-        clearing.filledBuyVolume,
-        clearing.filledSellYes,   // YES token count (not USDC-equivalent)
-        clearing.netBuyAmount,
+        filledBuyVolume,
+        filledSellYes,
+        netBuyAmount,
+        netSellYes,
         proof as `0x${string}`,
       ],
       ...AMOY_GAS,

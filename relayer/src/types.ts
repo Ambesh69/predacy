@@ -39,6 +39,7 @@ export interface ClearingResult {
   filledSellVolume: bigint;  // YES token count from filled sell orders
   filledSellYes: bigint;     // same as filledSellVolume — explicit alias for clarity
   netBuyAmount: bigint;
+  netSellYes: bigint;        // YES tokens to sell on Polymarket (sell-heavy batches)
   filledOrders: Order[];
   unfilledOrders: Order[];
 }

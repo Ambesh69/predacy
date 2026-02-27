@@ -60,4 +60,31 @@ interface IConditionalTokens {
 
     /// @notice ERC-1155 approval
     function setApprovalForAll(address operator, bool approved) external;
+
+    // ── Testnet mock exchange functions ───────────────────────────────────────
+    // These simulate Polymarket's CLOB order execution at a known clearing price.
+    // On mainnet these would be replaced by real CTF Exchange fillOrder calls.
+
+    /// @notice Simulate a market-buy: pull usdcAmount USDC from caller,
+    ///         mint usdcAmount * 1e6 / clearingPrice YES tokens to caller.
+    function mockBuyYes(
+        address collateral,
+        bytes32 conditionId,
+        uint256 usdcAmount,
+        uint256 clearingPrice
+    ) external returns (uint256 yesAmount);
+
+    /// @notice Simulate a market-sell: burn yesAmount YES tokens from caller's balance,
+    ///         mint yesAmount * clearingPrice / 1e6 USDC to caller.
+    function mockSellYes(
+        address collateral,
+        bytes32 conditionId,
+        uint256 yesAmount,
+        uint256 clearingPrice
+    ) external returns (uint256 usdcAmount);
+}
+
+/// @notice Minimal mintable ERC-20 interface used by MockCTF to issue USDC proceeds.
+interface IMintable {
+    function mint(address to, uint256 amount) external;
 }
