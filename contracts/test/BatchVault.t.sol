@@ -422,6 +422,193 @@ contract BatchVaultTest is Test {
         // But isBuy, limitPrice, and salt are NOT stored — they only exist in the hash
     }
 
+    // ─── Tests: commitOrderFor (EIP-712 meta-transactions) ────────────────
+
+    /// @dev Sign a CommitOrder EIP-712 payload with a known private key.
+    function _signCommitOrder(
+        uint256 signerKey,
+        bytes32 commitment,
+        uint256 amount,
+        uint256 batchId,
+        uint256 nonce,
+        uint256 deadline
+    ) internal view returns (bytes memory signature) {
+        bytes32 structHash = keccak256(abi.encode(
+            vault.COMMITMENT_TYPEHASH(),
+            commitment,
+            amount,
+            batchId,
+            nonce,
+            deadline
+        ));
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", vault.DOMAIN_SEPARATOR(), structHash));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerKey, digest);
+        return abi.encodePacked(r, s, v); // 65 bytes: r(32) || s(32) || v(1)
+    }
+
+    function test_commitOrderFor_basic() public {
+        uint256 batchId = _openBatch();
+
+        // Dave has a known private key — his address never appears as msg.sender
+        uint256 daveKey = 0xDA7E;
+        address dave = vm.addr(daveKey);
+        usdc.mint(dave, 1000e6);
+        vm.prank(dave);
+        usdc.approve(address(vault), type(uint256).max);
+
+        uint256 amount = 100e6;
+        uint256 limitPrice = 650000;
+        bytes32 salt = bytes32(uint256(99));
+        uint256 deadline = block.timestamp + 1 hours;
+
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, amount, limitPrice, salt, dave);
+        bytes memory sig = _signCommitOrder(daveKey, commitment, amount, batchId, 0, deadline);
+
+        // Relayer submits on Dave's behalf — Dave's address is stored as trader
+        vm.prank(relayer);
+        vault.commitOrderFor(commitment, amount, dave, 0, deadline, sig);
+
+        // USDC pulled from Dave, not relayer
+        assertEq(usdc.balanceOf(dave), 900e6);
+        assertEq(usdc.balanceOf(address(vault)), amount);
+
+        // Commitment stored with Dave as trader (not relayer)
+        BatchVault.Commitment memory c = vault.getCommitment(batchId, 0);
+        assertEq(c.trader, dave);
+        assertEq(c.amount, amount);
+
+        // Nonce incremented
+        assertEq(vault.nonces(dave), 1);
+    }
+
+    function test_commitOrderFor_emitsEventWithSigner() public {
+        uint256 batchId = _openBatch();
+        uint256 daveKey = 0xDA7E;
+        address dave = vm.addr(daveKey);
+        usdc.mint(dave, 500e6);
+        vm.prank(dave);
+        usdc.approve(address(vault), type(uint256).max);
+
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, 50e6, 600000, bytes32(uint256(7)), dave);
+        bytes memory sig = _signCommitOrder(daveKey, commitment, 50e6, batchId, 0, block.timestamp + 1 hours);
+
+        // OrderCommitted should emit dave as trader, not relayer
+        vm.expectEmit(true, true, false, true);
+        emit BatchVault.OrderCommitted(batchId, dave, commitment, 50e6);
+
+        vm.prank(relayer);
+        vault.commitOrderFor(commitment, 50e6, dave, 0, block.timestamp + 1 hours, sig);
+    }
+
+    function test_commitOrderFor_invalidSignature_reverts() public {
+        _openBatch();
+        uint256 daveKey  = 0xDA7E;
+        uint256 eveKey   = 0xEE7E; // different key
+        address dave = vm.addr(daveKey);
+        usdc.mint(dave, 500e6);
+        vm.prank(dave);
+        usdc.approve(address(vault), type(uint256).max);
+
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, 50e6, 600000, bytes32(uint256(1)), dave);
+        // Sign with Eve's key but claim signer is Dave
+        bytes memory badSig = _signCommitOrder(eveKey, commitment, 50e6, 1, 0, block.timestamp + 1 hours);
+
+        vm.expectRevert(BatchVault.InvalidSignature.selector);
+        vm.prank(relayer);
+        vault.commitOrderFor(commitment, 50e6, dave, 0, block.timestamp + 1 hours, badSig);
+    }
+
+    function test_commitOrderFor_expiredDeadline_reverts() public {
+        _openBatch();
+        uint256 daveKey = 0xDA7E;
+        address dave = vm.addr(daveKey);
+        usdc.mint(dave, 500e6);
+        vm.prank(dave);
+        usdc.approve(address(vault), type(uint256).max);
+
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, 50e6, 600000, bytes32(uint256(1)), dave);
+        uint256 deadline = block.timestamp - 1; // already expired
+        bytes memory sig = _signCommitOrder(daveKey, commitment, 50e6, 1, 0, deadline);
+
+        vm.expectRevert(BatchVault.SignatureExpired.selector);
+        vm.prank(relayer);
+        vault.commitOrderFor(commitment, 50e6, dave, 0, deadline, sig);
+    }
+
+    function test_commitOrderFor_wrongNonce_reverts() public {
+        _openBatch();
+        uint256 daveKey = 0xDA7E;
+        address dave = vm.addr(daveKey);
+        usdc.mint(dave, 500e6);
+        vm.prank(dave);
+        usdc.approve(address(vault), type(uint256).max);
+
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, 50e6, 600000, bytes32(uint256(1)), dave);
+        // Sign with nonce=1, but actual nonce is 0
+        bytes memory sig = _signCommitOrder(daveKey, commitment, 50e6, 1, 1, block.timestamp + 1 hours);
+
+        vm.expectRevert(BatchVault.InvalidSignature.selector);
+        vm.prank(relayer);
+        vault.commitOrderFor(commitment, 50e6, dave, 1, block.timestamp + 1 hours, sig);
+    }
+
+    function test_commitOrderFor_replayReverts() public {
+        uint256 batchId = _openBatch();
+        uint256 daveKey = 0xDA7E;
+        address dave = vm.addr(daveKey);
+        usdc.mint(dave, 1000e6);
+        vm.prank(dave);
+        usdc.approve(address(vault), type(uint256).max);
+
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, 50e6, 600000, bytes32(uint256(1)), dave);
+        bytes memory sig = _signCommitOrder(daveKey, commitment, 50e6, batchId, 0, block.timestamp + 1 hours);
+
+        // First use — succeeds
+        vm.prank(relayer);
+        vault.commitOrderFor(commitment, 50e6, dave, 0, block.timestamp + 1 hours, sig);
+
+        // Second use with same sig — nonce is now 1, so sig (nonce=0) is invalid
+        vm.expectRevert(BatchVault.InvalidSignature.selector);
+        vm.prank(relayer);
+        vault.commitOrderFor(commitment, 50e6, dave, 0, block.timestamp + 1 hours, sig);
+    }
+
+    function test_commitOrderFor_settlesCorrectly() public {
+        uint256 batchId = _openBatch();
+
+        // Dave commits via meta-tx (privacy path)
+        uint256 daveKey = 0xDA7E;
+        address dave = vm.addr(daveKey);
+        usdc.mint(dave, 500e6);
+        vm.prank(dave);
+        usdc.approve(address(vault), type(uint256).max);
+
+        uint256 amount = 100e6;
+        uint256 limitPrice = 650000;
+        bytes32 salt = bytes32(uint256(55));
+
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, amount, limitPrice, salt, dave);
+        bytes memory sig = _signCommitOrder(daveKey, commitment, amount, batchId, 0, block.timestamp + 1 hours);
+
+        vm.prank(relayer);
+        vault.commitOrderFor(commitment, amount, dave, 0, block.timestamp + 1 hours, sig);
+
+        _closeBatch(batchId);
+
+        // Settlement: dave's order revealed — trader=dave in RevealedOrder
+        BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
+        orders[0] = BatchVault.RevealedOrder(dave, true, amount, limitPrice, salt);
+
+        vm.prank(relayer);
+        vault.settleBatch(batchId, orders, 650000, amount, 0, amount, "");
+
+        assertEq(uint256(vault.getBatch(batchId).status), uint256(BatchVault.BatchStatus.SETTLED));
+
+        // Dave can claim his position
+        BatchVault.Position memory pos = vault.getPosition(batchId, dave);
+        assertEq(pos.filledAmount, amount);
+    }
+
     // ─── Tests: relayer access control ────────────────────────────────────
 
     function test_settleByNonRelayer_reverts() public {

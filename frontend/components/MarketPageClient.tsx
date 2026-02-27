@@ -112,7 +112,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   const [batch, setBatch]             = useState(MOCK_BATCH);
   const [commitments, setCommitments] = useState(MOCK_COMMITMENTS);
   const [loading, setLoading]         = useState(true);
-  const [submitStep, setSubmitStep]   = useState<"approving" | "committing" | null>(null);
+  const [submitStep, setSubmitStep]   = useState<"approving" | "signing" | null>(null);
   const [faucetLoading, setFaucetLoading] = useState(false);
   const [chainError, setChainError]   = useState<string | null>(null);
   const [position, setPosition]       = useState<{
@@ -357,6 +357,15 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   };
 
   // ── Submit order ─────────────────────────────────────────────────────────────
+  //
+  // Privacy flow (EIP-712 meta-transaction):
+  //   1. Approve USDC to BatchVault if insufficient (1 tx — only gas the user pays)
+  //   2. Read current nonce from nonces[walletAddress] on-chain
+  //   3. Sign CommitOrder off-chain via signTypedData (no tx, no gas)
+  //   4. POST { signer, commitment, signature, nonce, deadline, ... } to relayer
+  //   5. Relayer calls commitOrderFor() — only relayer address appears on-chain
+  //
+  // The user's wallet address never appears in any on-chain event.
   const handleOrderSubmit = async (params: {
     commitment: `0x${string}`;
     amount: bigint;
@@ -365,13 +374,14 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     limitPrice: bigint;
   }) => {
     setChainError(null);
+    const contracts = getContracts(ACTIVE_CHAIN.id);
 
     // ensureAmoy() switches to Amoy if needed, then gives us a ready walletClient
     setSubmitStep("approving");
     const walletClient = await ensureAmoy();
-    const contracts = getContracts(ACTIVE_CHAIN.id);
 
     // Step 1 — approve USDC if allowance is insufficient
+    // Still required: commitOrderFor() calls transferFrom(signer → vault)
     const allowance = await publicClient.readContract({
       address: contracts.usdc,
       abi: ERC20_ABI,
@@ -390,44 +400,73 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       await publicClient.waitForTransactionReceipt({ hash: approveTx });
     }
 
-    // Step 2 — submit sealed commitment
-    setSubmitStep("committing");
-    const commitTx = await walletClient.writeContract({
+    // Step 2 — read current EIP-712 nonce for this signer
+    const nonce = await publicClient.readContract({
       address: contracts.batchVault,
       abi: BATCH_VAULT_ABI,
-      functionName: "commitOrder",
-      args: [params.commitment, params.amount],
-      ...CHAIN_GAS,
-    });
-    await publicClient.waitForTransactionReceipt({ hash: commitTx });
+      functionName: "nonces",
+      args: [walletAddress!],
+    }) as bigint;
 
-    // Send off-chain order details to relayer so it can settle at batch close.
-    // The on-chain commitment only contains the hash + USDC amount — the relayer
-    // needs the full plaintext (isBuy, limitPrice, salt) to verify + settle.
-    // Non-fatal: commitment is already sealed on-chain regardless.
+    // Step 3 — sign CommitOrder off-chain (no tx, no gas — MetaMask "Sign" popup)
+    setSubmitStep("signing");
+    const deadline = BigInt(Math.floor(Date.now() / 1000) + 600); // 10 min from now
+
+    const signature = await walletClient.signTypedData({
+      account: walletAddress!,
+      domain: {
+        name: "BatchVault",
+        version: "1",
+        chainId: BigInt(ACTIVE_CHAIN.id),
+        verifyingContract: contracts.batchVault,
+      },
+      types: {
+        CommitOrder: [
+          { name: "commitment", type: "bytes32" },
+          { name: "amount",     type: "uint256" },
+          { name: "batchId",    type: "uint256" },
+          { name: "nonce",      type: "uint256" },
+          { name: "deadline",   type: "uint256" },
+        ],
+      },
+      primaryType: "CommitOrder",
+      message: {
+        commitment: params.commitment,
+        amount:     params.amount,
+        batchId:    batch.batchId,
+        nonce,
+        deadline,
+      },
+    });
+
+    // Step 4 — POST to relayer (privacy path: relayer submits commitOrderFor on-chain)
+    // The relayer pays the commitment gas. Only relayer address visible on-chain.
     const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
-    if (relayerUrl && walletAddress) {
-      try {
-        await fetch(`${relayerUrl}/order`, {
-          method:  "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            batchId:    batch.batchId.toString(),
-            trader:     walletAddress,
-            isBuy:      params.isBuy,
-            amount:     params.amount.toString(),
-            limitPrice: params.limitPrice.toString(),
-            salt:       params.salt,
-          }),
-        });
-      } catch {
-        // Relayer unreachable — commitment is already on-chain, order may still
-        // be recoverable if the relayer is back before the batch closes.
-        console.warn("[Predacy] Could not reach relayer at", relayerUrl);
-      }
+    if (!relayerUrl) throw new Error("NEXT_PUBLIC_RELAYER_URL is not set");
+
+    const resp = await fetch(`${relayerUrl}/order`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        batchId:    batch.batchId.toString(),
+        signer:     walletAddress,
+        isBuy:      params.isBuy,
+        amount:     params.amount.toString(),
+        limitPrice: params.limitPrice.toString(),
+        salt:       params.salt,
+        commitment: params.commitment,
+        signature,
+        nonce:      nonce.toString(),
+        deadline:   deadline.toString(),
+      }),
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ error: "Relayer error" }));
+      throw new Error(err.error ?? `Relayer returned ${resp.status}`);
     }
 
-    // Update local state optimistically
+    // Update local state optimistically (relayer will also emit OrderCommitted soon)
     if (walletAddress) {
       setCommitments((prev) => [
         ...prev,
@@ -640,6 +679,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
             <p className="text-[10px] text-muted-dim tracking-widest uppercase">What's hidden</p>
             <div className="space-y-1.5">
               {[
+                { item: "Your wallet address",       hidden: true },
                 { item: "Your direction (buy/sell)", hidden: true },
                 { item: "Your order type & price",   hidden: true },
                 { item: "Your trade amount",         hidden: true },

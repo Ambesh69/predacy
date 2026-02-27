@@ -30,6 +30,27 @@ export const BATCH_VAULT_ABI = [
     stateMutability: "nonpayable",
   },
   {
+    name: "commitOrderFor",
+    type: "function",
+    inputs: [
+      { name: "commitment", type: "bytes32" },
+      { name: "amount",     type: "uint256" },
+      { name: "signer",     type: "address" },
+      { name: "nonce",      type: "uint256" },
+      { name: "deadline",   type: "uint256" },
+      { name: "signature",  type: "bytes"   },
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+  {
+    name: "nonces",
+    type: "function",
+    inputs: [{ name: "owner", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+    stateMutability: "view",
+  },
+  {
     name: "settleBatch",
     type: "function",
     inputs: [
@@ -106,37 +127,9 @@ export const BATCH_VAULT_ABI = [
     outputs: [{ name: "", type: "uint256" }],
     stateMutability: "view",
   },
-  // Events
-  {
-    name: "OrderCommitted",
-    type: "event",
-    inputs: [
-      { name: "batchId",    type: "uint256", indexed: true  },
-      { name: "trader",     type: "address", indexed: true  },
-      { name: "commitment", type: "bytes32", indexed: false },
-      { name: "amount",     type: "uint256", indexed: false },
-    ],
-  },
-  {
-    name: "BatchClosed",
-    type: "event",
-    inputs: [
-      { name: "batchId",         type: "uint256", indexed: true  },
-      { name: "commitmentCount", type: "uint256", indexed: false },
-    ],
-  },
-  {
-    name: "BatchSettled",
-    type: "event",
-    inputs: [
-      { name: "batchId",           type: "uint256", indexed: true  },
-      { name: "clearingPrice",     type: "uint256", indexed: false },
-      { name: "totalBuyVolume",    type: "uint256", indexed: false },
-      { name: "totalSellVolume",   type: "uint256", indexed: false },
-      { name: "netBuyAmount",      type: "uint256", indexed: false },
-      { name: "yesTokensReceived", type: "uint256", indexed: false },
-    ],
-  },
+  // Note: events are not listed here — index.ts uses parseAbiItem() for getLogs
+  // which avoids inflating the ABI union type (viem TypeScript inference degrades
+  // beyond ~10 entries, causing spurious "chain missing" errors on writeContract).
 ] as const;
 
 export interface RelayerConfig {
@@ -172,6 +165,16 @@ export class BatchProcessor {
   private polymarket: PolymarketClient;
   private store: OrderStore;
 
+  /**
+   * viem's writeContract TypeScript overload resolution breaks when the ABI
+   * union is large (>~8 entries). Work around by calling through a typed helper
+   * that casts to `any` internally. Runtime behaviour is unchanged.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private _write(params: Record<string, unknown>): Promise<`0x${string}`> {
+    return (this.walletClient.writeContract as (p: any) => Promise<`0x${string}`>)(params);
+  }
+
   constructor(config: RelayerConfig) {
     this.config = config;
     const account = privateKeyToAccount(config.relayerPrivateKey);
@@ -200,8 +203,48 @@ export class BatchProcessor {
   // ─── Order intake (called from HTTP /order endpoint) ──────────────────────
 
   /**
-   * Store off-chain order details from a trader.
-   * The trader must have already submitted the commitment on-chain first.
+   * Privacy path: the trader signed an EIP-712 CommitOrder off-chain.
+   * The relayer calls commitOrderFor() on-chain (only relayer address visible),
+   * then stores the order details for settlement.
+   *
+   * @param batchId    Current batch ID
+   * @param order      Full plaintext order (stored off-chain for settlement)
+   * @param commitment The keccak256 commitment hash (already computed by frontend)
+   * @param signer     Trader's wallet address (appears in OrderCommitted as trader)
+   * @param nonce      EIP-712 nonce from nonces[signer] at signing time
+   * @param deadline   Signature expiry (unix seconds)
+   * @param signature  65-byte EIP-712 signature
+   */
+  async submitCommitmentFor(
+    batchId: bigint,
+    order: Order,
+    commitment: `0x${string}`,
+    signer: `0x${string}`,
+    nonce: bigint,
+    deadline: bigint,
+    signature: `0x${string}`,
+  ): Promise<void> {
+    console.log(`[BatchProcessor] Submitting commitOrderFor on behalf of ${signer}`);
+
+    const hash = await this._write({
+      address: this.config.vaultAddress,
+      abi: BATCH_VAULT_ABI,
+      functionName: "commitOrderFor",
+      args: [commitment, order.amount, signer, nonce, deadline, signature],
+      ...AMOY_GAS,
+    });
+
+    await this.publicClient.waitForTransactionReceipt({ hash });
+    console.log(`[BatchProcessor] commitOrderFor tx: ${hash} (trader=${signer} hidden, relayer on-chain)`);
+
+    // Store order details keyed by signer address for settlement matching
+    await this.store.save(batchId.toString(), signer.toLowerCase(), { ...order, trader: signer });
+    console.log(`[BatchProcessor] Stored private order from ${signer} for batch ${batchId}`);
+  }
+
+  /**
+   * Legacy path: trader already called commitOrder() directly (address visible on-chain).
+   * Just store the off-chain order details for settlement.
    */
   async receiveOrder(batchId: bigint, order: Order): Promise<void> {
     await this.store.save(batchId.toString(), order.trader.toLowerCase(), order);
@@ -219,7 +262,7 @@ export class BatchProcessor {
   async openBatch(marketId: `0x${string}`): Promise<bigint> {
     console.log(`[BatchProcessor] Opening batch for market ${marketId}`);
 
-    const hash = await this.walletClient.writeContract({
+    const hash = await this._write({
       address: this.config.vaultAddress,
       abi: BATCH_VAULT_ABI,
       functionName: "openBatch",
@@ -241,7 +284,7 @@ export class BatchProcessor {
 
   /** Close the current batch (anyone can call after BATCH_WINDOW expires) */
   async closeBatch(): Promise<void> {
-    const hash = await this.walletClient.writeContract({
+    const hash = await this._write({
       address: this.config.vaultAddress,
       abi: BATCH_VAULT_ABI,
       functionName: "closeBatch",
@@ -368,7 +411,7 @@ export class BatchProcessor {
     });
 
     // 6. Settle on-chain
-    const settleHash = await this.walletClient.writeContract({
+    const settleHash = await this._write({
       address: this.config.vaultAddress,
       abi: BATCH_VAULT_ABI,
       functionName: "settleBatch",

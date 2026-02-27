@@ -47,7 +47,7 @@ contract DeployMainnet is Script {
         //    Replace with: cd circuits/batch_clearing && nargo build && bb contract
         MockBatchVerifier verifier = new MockBatchVerifier();
         console.log("MockBatchVerifier:  ", address(verifier));
-        console.log("  (interim — swap for real Noir verifier after circuit compilation)");
+        console.log("  (interim - swap for real Noir verifier after circuit compilation)");
 
         // 2. BatchVault — points to real USDC + Polymarket CTF
         //    Deployer wallet is the trusted relayer

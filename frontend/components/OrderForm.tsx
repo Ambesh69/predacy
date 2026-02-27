@@ -21,7 +21,7 @@ interface OrderFormProps {
   isConnected: boolean;
   onConnect: () => void;
   /** Current tx step driven by parent — controls submit button label */
-  submitStep?: "approving" | "committing" | null;
+  submitStep?: "approving" | "signing" | null;
 }
 
 const PRICE_STEP = 10_000; // 0.01 in 6-decimal space = 1%
@@ -372,7 +372,7 @@ export default function OrderForm({
             {isSubmitting ? (
               <span className="flex items-center justify-center gap-2">
                 <span className="w-3 h-3 border border-current border-t-transparent rounded-full animate-spin" />
-                {submitStep === "approving" ? "APPROVING USDC…" : "SEALING ORDER…"}
+                {submitStep === "approving" ? "APPROVING USDC…" : "SIGNING ORDER…"}
               </span>
             ) : (
               `SEAL ${orderType === "market" ? "MKT" : "LMT"} ${isBuy ? "BUY YES" : "BUY NO"} — $${amountDisplay || "0"}`
@@ -382,7 +382,7 @@ export default function OrderForm({
 
         {isConnected && batchOpen && (
           <p className="text-center text-[10px] text-muted-dim mt-2">
-            Approves USDC + commits hash in one transaction
+            1 tx (USDC approve) + 1 signature — no commitment gas
           </p>
         )}
       </div>

@@ -84,10 +84,22 @@ contract BatchVault {
     uint256 public constant PRICE_DECIMALS = 1e6;   // 6-decimal prices (matches USDC)
     uint256 public constant MAX_BATCH_ORDERS = 500; // gas safety limit
 
+    /// @dev EIP-712 type hashes for commitOrderFor() meta-transactions
+    bytes32 private constant EIP712_DOMAIN_TYPEHASH = keccak256(
+        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+    );
+    /// @notice Traders sign this struct to delegate commitment submission to the relayer
+    bytes32 public constant COMMITMENT_TYPEHASH = keccak256(
+        "CommitOrder(bytes32 commitment,uint256 amount,uint256 batchId,uint256 nonce,uint256 deadline)"
+    );
+
     address public immutable usdc;
     address public immutable ctf;          // ConditionalTokens
     address public immutable relayer;      // Trusted batch processor address
     IBatchVerifier public verifier;
+
+    /// @notice EIP-712 domain separator — computed once at construction
+    bytes32 public immutable DOMAIN_SEPARATOR;
 
     uint256 public currentBatchId;
 
@@ -103,6 +115,9 @@ contract BatchVault {
     // batchId => trader => commitment index (for O(1) lookup)
     mapping(uint256 => mapping(address => uint256)) public traderCommitmentIndex;
     mapping(uint256 => mapping(address => bool)) public hasCommitted;
+
+    /// @notice EIP-712 per-signer nonces — incremented on each commitOrderFor call
+    mapping(address => uint256) public nonces;
 
     // ═══════════════════════════════════════════════════════════════════════
     // Events
@@ -143,6 +158,8 @@ contract BatchVault {
     error AlreadyClaimed();
     error NothingToClaim();
     error InvalidClearingPrice();
+    error InvalidSignature();
+    error SignatureExpired();
 
     // ═══════════════════════════════════════════════════════════════════════
     // Constructor
@@ -153,6 +170,13 @@ contract BatchVault {
         ctf = _ctf;
         relayer = _relayer;
         verifier = IBatchVerifier(_verifier);
+        DOMAIN_SEPARATOR = keccak256(abi.encode(
+            EIP712_DOMAIN_TYPEHASH,
+            keccak256("BatchVault"),
+            keccak256("1"),
+            block.chainid,
+            address(this)
+        ));
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -205,34 +229,82 @@ contract BatchVault {
     // User: submit order commitment
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// @notice Submit a sealed-bid order commitment
+    /// @notice Submit a sealed-bid order commitment directly (trader = msg.sender).
+    ///         The trader's address is visible on-chain in the OrderCommitted event.
     /// @param commitment Hash of (marketId, isBuy, amount, limitPrice, salt, msg.sender)
-    ///                   Compute off-chain: keccak256(abi.encode(...))
     /// @param amount     USDC amount to lock (6 decimals)
     function commitOrder(bytes32 commitment, uint256 amount) external {
         if (amount == 0) revert ZeroAmount();
+        _executeCommit(commitment, amount, msg.sender);
+    }
 
+    /// @notice Privacy-preserving commitment via EIP-712 meta-transaction.
+    ///         The relayer submits this on the trader's behalf — only the relayer
+    ///         address appears on-chain, not the trader's wallet.
+    ///
+    ///         The trader signs off-chain:
+    ///           CommitOrder(commitment, amount, batchId, nonce, deadline)
+    ///         and sends the signature to the relayer via POST /order.
+    ///         The relayer calls this function, pays gas, and the USDC is pulled
+    ///         from the signer's wallet (not the relayer's).
+    ///
+    /// @param commitment Hash of (marketId, isBuy, amount, limitPrice, salt, signer)
+    /// @param amount     USDC to lock (6 decimals) — pulled from signer via transferFrom
+    /// @param signer     The trader's wallet — must have approved BatchVault to spend USDC
+    /// @param nonce      Must match nonces[signer] — prevents replay
+    /// @param deadline   Unix timestamp — signature expires after this
+    /// @param signature  65-byte EIP-712 signature from signer
+    function commitOrderFor(
+        bytes32 commitment,
+        uint256 amount,
+        address signer,
+        uint256 nonce,
+        uint256 deadline,
+        bytes calldata signature
+    ) external {
+        if (amount == 0) revert ZeroAmount();
+        if (block.timestamp > deadline) revert SignatureExpired();
+        if (nonce != nonces[signer]) revert InvalidSignature();
+
+        // Verify EIP-712 signature
+        bytes32 structHash = keccak256(abi.encode(
+            COMMITMENT_TYPEHASH,
+            commitment,
+            amount,
+            currentBatchId,
+            nonce,
+            deadline
+        ));
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
+        address recovered = _recoverSigner(digest, signature);
+        if (recovered == address(0) || recovered != signer) revert InvalidSignature();
+
+        nonces[signer]++;
+        _executeCommit(commitment, amount, signer);
+    }
+
+    /// @dev Shared logic for commitOrder and commitOrderFor
+    function _executeCommit(bytes32 commitment, uint256 amount, address trader) internal {
         Batch storage batch = batches[currentBatchId];
         if (batch.status != BatchStatus.OPEN) revert BatchNotOpen();
-        if (hasCommitted[currentBatchId][msg.sender]) revert AlreadyCommitted();
+        if (hasCommitted[currentBatchId][trader]) revert AlreadyCommitted();
         if (batch.commitmentCount >= MAX_BATCH_ORDERS) revert MaxOrdersExceeded();
 
-        // Pull USDC from trader
-        IERC20(usdc).transferFrom(msg.sender, address(this), amount);
+        IERC20(usdc).transferFrom(trader, address(this), amount);
 
         uint256 idx = batch.commitmentCount++;
         commitments[currentBatchId][idx] = Commitment({
             hash: commitment,
             amount: amount,
-            trader: msg.sender,
+            trader: trader,
             claimed: false
         });
 
-        hasCommitted[currentBatchId][msg.sender] = true;
-        traderCommitmentIndex[currentBatchId][msg.sender] = idx;
+        hasCommitted[currentBatchId][trader] = true;
+        traderCommitmentIndex[currentBatchId][trader] = idx;
         batch.totalDeposited += amount;
 
-        emit OrderCommitted(currentBatchId, msg.sender, commitment, amount);
+        emit OrderCommitted(currentBatchId, trader, commitment, amount);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -430,6 +502,23 @@ contract BatchVault {
     // ═══════════════════════════════════════════════════════════════════════
     // Admin
     // ═══════════════════════════════════════════════════════════════════════
+
+    /// @dev Recover the signer of an EIP-712 digest from a 65-byte signature.
+    ///      Returns address(0) on malformed input so callers can revert cleanly.
+    function _recoverSigner(bytes32 digest, bytes calldata sig) internal pure returns (address) {
+        if (sig.length != 65) return address(0);
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        assembly {
+            r := calldataload(sig.offset)
+            s := calldataload(add(sig.offset, 32))
+            v := byte(0, calldataload(add(sig.offset, 64)))
+        }
+        if (v < 27) v += 27;
+        if (v != 27 && v != 28) return address(0);
+        return ecrecover(digest, v, r, s);
+    }
 
     /// @notice Update the ZK verifier contract (e.g., swap mock for real Noir verifier)
     function setVerifier(address newVerifier) external {

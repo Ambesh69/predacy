@@ -57,17 +57,26 @@ const server = createServer((req, res) => {
     return;
   }
 
-  // POST /order — { batchId, trader, isBuy, amount, limitPrice, salt }
+  // POST /order
+  //
+  // Privacy path (recommended) — include `signature`, `commitment`, `nonce`, `deadline`:
+  //   { batchId, signer, isBuy, amount, limitPrice, salt,
+  //     commitment, signature, nonce, deadline }
+  //   → relayer calls commitOrderFor() on-chain; only relayer address visible
+  //
+  // Legacy path — omit `signature`:
+  //   { batchId, trader, isBuy, amount, limitPrice, salt }
+  //   → trader already committed on-chain; relayer just stores order details
   if (req.method === "POST" && req.url === "/order") {
     let body = "";
     req.on("data", (chunk) => (body += chunk));
     req.on("end", async () => {
       try {
         const data = JSON.parse(body);
-        const { batchId, trader, isBuy, amount, limitPrice, salt } = data;
+        const { batchId, isBuy, amount, limitPrice, salt } = data;
 
-        if (batchId === undefined || !trader || isBuy === undefined || !amount || !limitPrice || !salt) {
-          send(400, { error: "Missing fields: batchId, trader, isBuy, amount, limitPrice, salt" });
+        if (batchId === undefined || isBuy === undefined || !amount || !limitPrice || !salt) {
+          send(400, { error: "Missing fields: batchId, isBuy, amount, limitPrice, salt" });
           return;
         }
         if (!processor) {
@@ -75,13 +84,38 @@ const server = createServer((req, res) => {
           return;
         }
 
-        await processor.receiveOrder(BigInt(batchId), {
-          trader:     trader     as `0x${string}`,
+        const order = {
+          trader:     (data.signer ?? data.trader) as `0x${string}`,
           isBuy:      Boolean(isBuy),
           amount:     BigInt(amount),
           limitPrice: BigInt(limitPrice),
-          salt:       salt       as `0x${string}`,
-        });
+          salt:       salt as `0x${string}`,
+        };
+
+        if (data.signature) {
+          // ── Privacy path: relay commitment on-chain ────────────────────
+          const { signer, commitment, nonce, deadline } = data;
+          if (!signer || !commitment || nonce === undefined || !deadline) {
+            send(400, { error: "Privacy path requires: signer, commitment, nonce, deadline, signature" });
+            return;
+          }
+          await processor.submitCommitmentFor(
+            BigInt(batchId),
+            order,
+            commitment        as `0x${string}`,
+            signer            as `0x${string}`,
+            BigInt(nonce),
+            BigInt(deadline),
+            data.signature    as `0x${string}`,
+          );
+        } else {
+          // ── Legacy path: trader already committed on-chain ─────────────
+          if (!data.trader) {
+            send(400, { error: "Legacy path requires: trader" });
+            return;
+          }
+          await processor.receiveOrder(BigInt(batchId), order);
+        }
 
         const orders = await processor.orderCount(BigInt(batchId));
         send(200, { ok: true, batchId: batchId.toString(), orders });
