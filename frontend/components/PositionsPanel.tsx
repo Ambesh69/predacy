@@ -150,11 +150,20 @@ export default function PositionsPanel({
     setClaimErrors((prev) => { const n = { ...prev }; delete n[key]; return n; });
     try {
       await onClaim(batchId);
-      // Refresh history and current position after claim
-      scanHistory();
+      // Optimistically mark as claimed immediately so the UI updates right away
       if (batchId === currentBatchId) {
         setCurrentPosition((p) => p ? { ...p, claimed: true } : p);
+      } else {
+        setHistoricalPositions((prev) =>
+          prev.map((hp) =>
+            hp.batchId === batchId
+              ? { ...hp, position: { ...hp.position, claimed: true } }
+              : hp
+          )
+        );
       }
+      // Re-fetch in background to confirm on-chain state
+      scanHistory();
     } catch (e: any) {
       if (e?.code !== 4001) {
         setClaimErrors((prev) => ({ ...prev, [key]: e.message ?? "Claim failed" }));
