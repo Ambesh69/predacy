@@ -9,9 +9,9 @@ export const CONTRACTS = {
     usdc: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174" as `0x${string}`,
     ctf:  "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045" as `0x${string}`,
   },
-  // Polygon Amoy testnet — deployed 2026-02-27 (EIP-712 commitOrderFor)
+  // Polygon Amoy testnet — redeployment needed after sell support changes
   [polygonAmoy.id]: {
-    batchVault: "0x90AA21aD6c786FD673e5AeBd033247d63f810A9a" as `0x${string}`,
+    batchVault: "0x90AA21aD6c786FD673e5AeBd033247d63f810A9a" as `0x${string}`, // TODO: redeploy
     usdc:       "0xEF6B42C6db7Fde49B8Ca85Ee457Ef85C739B9Cd9" as `0x${string}`, // MockUSDC
     ctf:        "0xDfc28eA864e4F2781096B413Aa1043FB095d762c" as `0x${string}`, // MockCTF
   },
@@ -24,6 +24,62 @@ export function getContracts(chainId: number) {
   return c;
 }
 
+// ── CTF (ERC-1155 ConditionalTokens) ABI — subset needed by frontend ─────────
+
+export const CTF_ABI = [
+  {
+    name: "balanceOf",
+    type: "function",
+    inputs: [
+      { name: "account", type: "address" },
+      { name: "id",      type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "uint256" }],
+    stateMutability: "view",
+  },
+  {
+    name: "isApprovedForAll",
+    type: "function",
+    inputs: [
+      { name: "account",  type: "address" },
+      { name: "operator", type: "address" },
+    ],
+    outputs: [{ name: "", type: "bool" }],
+    stateMutability: "view",
+  },
+  {
+    name: "setApprovalForAll",
+    type: "function",
+    inputs: [
+      { name: "operator", type: "address" },
+      { name: "approved", type: "bool"    },
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+  {
+    name: "getCollectionId",
+    type: "function",
+    inputs: [
+      { name: "parentCollectionId", type: "bytes32" },
+      { name: "conditionId",        type: "bytes32" },
+      { name: "indexSet",           type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "bytes32" }],
+    stateMutability: "view",
+  },
+  {
+    name: "getPositionId",
+    type: "function",
+    inputs: [
+      { name: "collateralToken", type: "address" },
+      { name: "collectionId",   type: "bytes32"  },
+    ],
+    outputs: [{ name: "", type: "uint256" }],
+    stateMutability: "view",
+  },
+] as const;
+
 // ── BatchVault ABI (subset needed by frontend) ────────────────────────────────
 
 export const BATCH_VAULT_ABI = [
@@ -33,6 +89,20 @@ export const BATCH_VAULT_ABI = [
     inputs: [
       { name: "commitment", type: "bytes32" },
       { name: "amount",     type: "uint256" },
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+  {
+    name: "commitSellOrderFor",
+    type: "function",
+    inputs: [
+      { name: "commitment", type: "bytes32" },
+      { name: "yesAmount",  type: "uint256" },
+      { name: "signer",     type: "address" },
+      { name: "nonce",      type: "uint256" },
+      { name: "deadline",   type: "uint256" },
+      { name: "signature",  type: "bytes"   },
     ],
     outputs: [],
     stateMutability: "nonpayable",
@@ -53,16 +123,19 @@ export const BATCH_VAULT_ABI = [
         name: "",
         type: "tuple",
         components: [
-          { name: "marketId",         type: "bytes32" },
-          { name: "openedAt",         type: "uint256" },
-          { name: "closedAt",         type: "uint256" },
-          { name: "status",           type: "uint8"   },
-          { name: "totalDeposited",   type: "uint256" },
-          { name: "clearingPrice",    type: "uint256" },
-          { name: "netBuyAmount",     type: "uint256" },
-          { name: "yesTokensReceived",type: "uint256" },
-          { name: "commitmentCount",  type: "uint256" },
-          { name: "commitmentRoot",   type: "bytes32" },
+          { name: "marketId",          type: "bytes32" },
+          { name: "openedAt",          type: "uint256" },
+          { name: "closedAt",          type: "uint256" },
+          { name: "status",            type: "uint8"   },
+          { name: "totalDeposited",    type: "uint256" },
+          { name: "totalSellYes",      type: "uint256" },
+          { name: "clearingPrice",     type: "uint256" },
+          { name: "netBuyAmount",      type: "uint256" },
+          { name: "yesTokensReceived", type: "uint256" },
+          { name: "filledSellYes",     type: "uint256" },
+          { name: "totalFilledBuyVol", type: "uint256" },
+          { name: "commitmentCount",   type: "uint256" },
+          { name: "commitmentRoot",    type: "bytes32" },
         ],
       },
     ],

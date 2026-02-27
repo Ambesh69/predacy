@@ -112,15 +112,29 @@ const server = createServer((req, res) => {
             send(400, { error: "Privacy path requires: signer, commitment, nonce, deadline, signature" });
             return;
           }
-          await processor.submitCommitmentFor(
-            BigInt(batchId),
-            order,
-            commitment        as `0x${string}`,
-            signer            as `0x${string}`,
-            BigInt(nonce),
-            BigInt(deadline),
-            data.signature    as `0x${string}`,
-          );
+          if (data.isSell) {
+            // Sell order: YES token deposit — calls commitSellOrderFor
+            await processor.submitSellCommitmentFor(
+              BigInt(batchId),
+              order,
+              commitment        as `0x${string}`,
+              signer            as `0x${string}`,
+              BigInt(nonce),
+              BigInt(deadline),
+              data.signature    as `0x${string}`,
+            );
+          } else {
+            // Buy order: USDC deposit — calls commitOrderFor
+            await processor.submitCommitmentFor(
+              BigInt(batchId),
+              order,
+              commitment        as `0x${string}`,
+              signer            as `0x${string}`,
+              BigInt(nonce),
+              BigInt(deadline),
+              data.signature    as `0x${string}`,
+            );
+          }
         } else {
           // ── Legacy path: trader already committed on-chain ─────────────
           if (!data.trader) {

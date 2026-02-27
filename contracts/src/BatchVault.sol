@@ -15,13 +15,17 @@ interface IERC20 {
 /// @notice Core contract for Predacy's private prediction market layer.
 ///
 /// Mechanism:
-///   1. Traders submit sealed-bid commitments (hashed order details) + USDC
+///   1. Traders submit sealed-bid commitments (hashed order details) + USDC (buy) or YES tokens (sell)
 ///   2. After BATCH_WINDOW seconds, the relayer closes the batch
 ///   3. The relayer reveals all orders, computes clearing price off-chain,
 ///      generates a ZK proof of correctness, and calls settleBatch()
 ///   4. BatchVault verifies the ZK proof, then executes the net position
 ///      on Polymarket's CTF Exchange via the ConditionalTokens contract
-///   5. Users call claimPosition() to receive their YES/NO shares
+///   5. Users call claimPosition() to receive their YES tokens (buyers) or USDC (sellers)
+///
+/// Order types:
+///   - isBuy=true  → buy YES:  deposit USDC, receive YES tokens at clearing price
+///   - isBuy=false → sell YES: deposit YES ERC-1155 tokens, receive USDC at clearing price
 ///
 /// Privacy guarantee:
 ///   - Only keccak256 commitments are stored on-chain during the batch window
@@ -43,18 +47,21 @@ contract BatchVault {
         uint256 openedAt;           // Block timestamp when batch opened
         uint256 closedAt;           // Block timestamp when batch closed
         BatchStatus status;
-        uint256 totalDeposited;     // Total USDC locked (all orders)
+        uint256 totalDeposited;     // Total USDC locked (buy orders only)
+        uint256 totalSellYes;       // Total YES tokens deposited by sellers
         uint256 clearingPrice;      // 6-decimal fixed point (e.g. 650000 = $0.65)
         uint256 netBuyAmount;       // USDC sent to Polymarket (positive = net buy)
         uint256 yesTokensReceived;  // YES shares received from Polymarket
+        uint256 filledSellYes;      // YES tokens from filled sell orders (distributed to buyers)
+        uint256 totalFilledBuyVol;  // USDC from filled buy orders (denominator for YES share calc)
         uint256 commitmentCount;
-        bytes32 commitmentRoot;     // Merkle root of all commitments (set at settlement)
+        bytes32 commitmentRoot;     // Sequential hash of all commitments (set at settlement)
     }
 
     /// @notice An order commitment: the hash of (marketId, isBuy, amount, limitPrice, salt, trader)
     struct Commitment {
         bytes32 hash;       // keccak256 of order params
-        uint256 amount;     // USDC deposited (locked until settlement)
+        uint256 amount;     // USDC deposited (buy orders) or YES tokens deposited (sell orders)
         address trader;
         bool claimed;
     }
@@ -62,16 +69,16 @@ contract BatchVault {
     /// @notice Revealed order (submitted by relayer at settlement)
     struct RevealedOrder {
         address trader;
-        bool isBuy;           // true = buy YES, false = sell YES (buy NO)
-        uint256 amount;       // USDC (6 decimals)
+        bool isBuy;           // true = buy YES (USDC in), false = sell YES (YES tokens in)
+        uint256 amount;       // USDC (buy) or YES tokens (sell), 6 decimals
         uint256 limitPrice;   // 6-decimal fixed point
         bytes32 salt;         // Matches the original commitment
     }
 
     /// @notice Per-user position after settlement
     struct Position {
-        uint256 filledAmount;     // USDC worth of order that was filled
-        uint256 refundAmount;     // USDC refunded (unfilled portion)
+        uint256 filledAmount;     // Buy: USDC filled. Sell: USDC received.
+        uint256 refundAmount;     // Buy: USDC refund. Sell: YES tokens returned (unfilled).
         bool isBuy;
         bool claimed;
     }
@@ -88,7 +95,8 @@ contract BatchVault {
     bytes32 private constant EIP712_DOMAIN_TYPEHASH = keccak256(
         "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
     );
-    /// @notice Traders sign this struct to delegate commitment submission to the relayer
+    /// @notice Traders sign this struct to delegate commitment submission to the relayer.
+    ///         Used for BOTH buy orders (commitOrderFor) and sell orders (commitSellOrderFor).
     bytes32 public constant COMMITMENT_TYPEHASH = keccak256(
         "CommitOrder(bytes32 commitment,uint256 amount,uint256 batchId,uint256 nonce,uint256 deadline)"
     );
@@ -116,7 +124,7 @@ contract BatchVault {
     mapping(uint256 => mapping(address => uint256)) public traderCommitmentIndex;
     mapping(uint256 => mapping(address => bool)) public hasCommitted;
 
-    /// @notice EIP-712 per-signer nonces — incremented on each commitOrderFor call
+    /// @notice EIP-712 per-signer nonces — incremented on each commitOrderFor / commitSellOrderFor call
     mapping(address => uint256) public nonces;
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -202,9 +210,12 @@ contract BatchVault {
             closedAt: 0,
             status: BatchStatus.OPEN,
             totalDeposited: 0,
+            totalSellYes: 0,
             clearingPrice: 0,
             netBuyAmount: 0,
             yesTokensReceived: 0,
+            filledSellYes: 0,
+            totalFilledBuyVol: 0,
             commitmentCount: 0,
             commitmentRoot: bytes32(0)
         });
@@ -226,34 +237,20 @@ contract BatchVault {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // User: submit order commitment
+    // User: submit buy order commitment (USDC collateral)
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// @notice Submit a sealed-bid order commitment directly (trader = msg.sender).
-    ///         The trader's address is visible on-chain in the OrderCommitted event.
-    /// @param commitment Hash of (marketId, isBuy, amount, limitPrice, salt, msg.sender)
+    /// @notice Submit a sealed-bid BUY order directly (trader = msg.sender).
+    ///         Deposits USDC; trader receives YES tokens at clearing price.
+    /// @param commitment Hash of (marketId, isBuy=true, amount, limitPrice, salt, msg.sender)
     /// @param amount     USDC amount to lock (6 decimals)
     function commitOrder(bytes32 commitment, uint256 amount) external {
         if (amount == 0) revert ZeroAmount();
         _executeCommit(commitment, amount, msg.sender);
     }
 
-    /// @notice Privacy-preserving commitment via EIP-712 meta-transaction.
-    ///         The relayer submits this on the trader's behalf — only the relayer
-    ///         address appears on-chain, not the trader's wallet.
-    ///
-    ///         The trader signs off-chain:
-    ///           CommitOrder(commitment, amount, batchId, nonce, deadline)
-    ///         and sends the signature to the relayer via POST /order.
-    ///         The relayer calls this function, pays gas, and the USDC is pulled
-    ///         from the signer's wallet (not the relayer's).
-    ///
-    /// @param commitment Hash of (marketId, isBuy, amount, limitPrice, salt, signer)
-    /// @param amount     USDC to lock (6 decimals) — pulled from signer via transferFrom
-    /// @param signer     The trader's wallet — must have approved BatchVault to spend USDC
-    /// @param nonce      Must match nonces[signer] — prevents replay
-    /// @param deadline   Unix timestamp — signature expires after this
-    /// @param signature  65-byte EIP-712 signature from signer
+    /// @notice Privacy-preserving BUY commitment via EIP-712 meta-transaction.
+    ///         The relayer submits on the trader's behalf — only relayer address visible on-chain.
     function commitOrderFor(
         bytes32 commitment,
         uint256 amount,
@@ -266,7 +263,6 @@ contract BatchVault {
         if (block.timestamp > deadline) revert SignatureExpired();
         if (nonce != nonces[signer]) revert InvalidSignature();
 
-        // Verify EIP-712 signature
         bytes32 structHash = keccak256(abi.encode(
             COMMITMENT_TYPEHASH,
             commitment,
@@ -283,7 +279,7 @@ contract BatchVault {
         _executeCommit(commitment, amount, signer);
     }
 
-    /// @dev Shared logic for commitOrder and commitOrderFor
+    /// @dev Shared logic for commitOrder and commitOrderFor (USDC deposits)
     function _executeCommit(bytes32 commitment, uint256 amount, address trader) internal {
         Batch storage batch = batches[currentBatchId];
         if (batch.status != BatchStatus.OPEN) revert BatchNotOpen();
@@ -308,6 +304,94 @@ contract BatchVault {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    // User: submit sell order commitment (YES ERC-1155 token collateral)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// @notice Submit a sealed-bid SELL order directly (trader = msg.sender).
+    ///         Deposits YES ERC-1155 tokens; trader receives USDC at clearing price.
+    ///         Requires trader to have called ctf.setApprovalForAll(vault, true) first.
+    /// @param commitment Hash of (marketId, isBuy=false, yesAmount, limitPrice, salt, msg.sender)
+    /// @param yesAmount  YES token amount to lock (6 decimals, same scale as USDC)
+    function commitSellOrder(bytes32 commitment, uint256 yesAmount) external {
+        if (yesAmount == 0) revert ZeroAmount();
+        _executeCommitSell(commitment, yesAmount, msg.sender);
+    }
+
+    /// @notice Privacy-preserving SELL commitment via EIP-712 meta-transaction.
+    ///         The relayer submits on the trader's behalf — only relayer address visible on-chain.
+    ///         Uses the same COMMITMENT_TYPEHASH as commitOrderFor; the commitment hash itself
+    ///         encodes isBuy=false which distinguishes it from a buy commitment.
+    function commitSellOrderFor(
+        bytes32 commitment,
+        uint256 yesAmount,
+        address signer,
+        uint256 nonce,
+        uint256 deadline,
+        bytes calldata signature
+    ) external {
+        if (yesAmount == 0) revert ZeroAmount();
+        if (block.timestamp > deadline) revert SignatureExpired();
+        if (nonce != nonces[signer]) revert InvalidSignature();
+
+        bytes32 structHash = keccak256(abi.encode(
+            COMMITMENT_TYPEHASH,
+            commitment,
+            yesAmount,
+            currentBatchId,
+            nonce,
+            deadline
+        ));
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
+        address recovered = _recoverSigner(digest, signature);
+        if (recovered == address(0) || recovered != signer) revert InvalidSignature();
+
+        nonces[signer]++;
+        _executeCommitSell(commitment, yesAmount, signer);
+    }
+
+    /// @dev Shared logic for commitSellOrder and commitSellOrderFor (YES token deposits)
+    function _executeCommitSell(bytes32 commitment, uint256 yesAmount, address trader) internal {
+        Batch storage batch = batches[currentBatchId];
+        if (batch.status != BatchStatus.OPEN) revert BatchNotOpen();
+        if (hasCommitted[currentBatchId][trader]) revert AlreadyCommitted();
+        if (batch.commitmentCount >= MAX_BATCH_ORDERS) revert MaxOrdersExceeded();
+
+        // Transfer YES tokens from trader to vault (requires setApprovalForAll on CTF)
+        uint256 yesTokenId = _getYesTokenId(batch.marketId);
+        IConditionalTokens(ctf).safeTransferFrom(trader, address(this), yesTokenId, yesAmount, "");
+
+        uint256 idx = batch.commitmentCount++;
+        commitments[currentBatchId][idx] = Commitment({
+            hash: commitment,
+            amount: yesAmount,
+            trader: trader,
+            claimed: false
+        });
+
+        hasCommitted[currentBatchId][trader] = true;
+        traderCommitmentIndex[currentBatchId][trader] = idx;
+        batch.totalSellYes += yesAmount;
+
+        emit OrderCommitted(currentBatchId, trader, commitment, yesAmount);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ERC-1155 receiver (required to accept YES token deposits)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    function onERC1155Received(address, address, uint256, uint256, bytes calldata)
+        external pure returns (bytes4)
+    {
+        return 0xf23a6e61; // IERC1155Receiver.onERC1155Received.selector
+    }
+
+    function onERC1155BatchReceived(address, address, uint256[] calldata, uint256[] calldata, bytes calldata)
+        external pure returns (bytes4)
+    {
+        return 0xbc197c81; // IERC1155Receiver.onERC1155BatchReceived.selector
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     // Relayer: settle batch with ZK proof
     // ═══════════════════════════════════════════════════════════════════════
 
@@ -315,10 +399,9 @@ contract BatchVault {
     /// @param batchId        The batch to settle
     /// @param orders         Revealed orders (must match on-chain commitments)
     /// @param clearingPrice  Computed clearing price (6-decimal fixed point)
-    /// @param totalBuyVol    Total USDC from buy orders filled
-    /// @param totalSellVol   Total USDC from sell orders filled
+    /// @param totalBuyVol    Total USDC from filled buy orders
+    /// @param totalSellVol   Total YES tokens from filled sell orders
     /// @param netBuyAmount   Net USDC to spend buying YES tokens on Polymarket
-    ///                       (negative net = net sell, represented as 0 with netSellAmount)
     /// @param proof          ZK proof bytes from Noir prover
     function settleBatch(
         uint256 batchId,
@@ -351,20 +434,22 @@ contract BatchVault {
         // 3. Verify ZK proof
         if (!verifier.verify(proof, publicInputs)) revert ZKProofInvalid();
 
-        // 4. Execute net position on Polymarket's CTF (if there's a net position)
+        // 4. Execute net position on Polymarket's CTF (if there's a net buy)
         uint256 yesTokensReceived = 0;
         if (netBuyAmount > 0) {
             yesTokensReceived = _executeOnPolymarket(batch.marketId, netBuyAmount, clearingPrice);
         }
 
         // 5. Compute per-trader positions and store them
-        _assignPositions(batchId, orders, clearingPrice);
+        (uint256 filledBuyVol, uint256 filledSellYes) = _assignPositions(batchId, orders, clearingPrice);
 
         // 6. Finalize batch state
         batch.status = BatchStatus.SETTLED;
         batch.clearingPrice = clearingPrice;
         batch.netBuyAmount = netBuyAmount;
         batch.yesTokensReceived = yesTokensReceived;
+        batch.filledSellYes = filledSellYes;
+        batch.totalFilledBuyVol = filledBuyVol;
         batch.commitmentRoot = commitmentRoot;
 
         emit BatchSettled(batchId, clearingPrice, totalBuyVol, totalSellVol, netBuyAmount, yesTokensReceived);
@@ -374,7 +459,9 @@ contract BatchVault {
     // User: claim position after settlement
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// @notice Claim YES/NO shares and any USDC refund after batch settlement
+    /// @notice Claim position after batch settlement.
+    ///         Buy orders: receive YES tokens (proportional share) + USDC refund if unfilled.
+    ///         Sell orders: receive USDC (from filled YES tokens) + YES token refund if unfilled.
     function claimPosition(uint256 batchId) external {
         Batch storage batch = batches[batchId];
         if (batch.status != BatchStatus.SETTLED) revert BatchNotSettled();
@@ -387,23 +474,34 @@ contract BatchVault {
 
         uint256 yesShares = 0;
 
-        if (pos.filledAmount > 0 && pos.isBuy) {
-            // Calculate proportional YES shares from the pool
-            // yesShares = (filledAmount / netBuyAmount) * yesTokensReceived
-            if (batch.netBuyAmount > 0) {
-                yesShares = (pos.filledAmount * batch.yesTokensReceived) / batch.netBuyAmount;
-            }
-
-            // Transfer YES shares to trader
-            if (yesShares > 0) {
-                uint256 yesTokenId = _getYesTokenId(batch.marketId);
-                IConditionalTokens(ctf).safeTransferFrom(address(this), msg.sender, yesTokenId, yesShares, "");
+        if (pos.filledAmount > 0) {
+            if (pos.isBuy) {
+                // Buy order filled: distribute proportional YES tokens
+                // YES pool = tokens from Polymarket + tokens from matched sell orders
+                uint256 totalYes = batch.yesTokensReceived + batch.filledSellYes;
+                if (batch.totalFilledBuyVol > 0 && totalYes > 0) {
+                    yesShares = (pos.filledAmount * totalYes) / batch.totalFilledBuyVol;
+                }
+                if (yesShares > 0) {
+                    uint256 yesTokenId = _getYesTokenId(batch.marketId);
+                    IConditionalTokens(ctf).safeTransferFrom(address(this), msg.sender, yesTokenId, yesShares, "");
+                }
+            } else {
+                // Sell order filled: pay USDC to seller
+                IERC20(usdc).transfer(msg.sender, pos.filledAmount);
             }
         }
 
         // Refund unfilled portion
         if (pos.refundAmount > 0) {
-            IERC20(usdc).transfer(msg.sender, pos.refundAmount);
+            if (pos.isBuy) {
+                // Buy order unfilled: refund USDC
+                IERC20(usdc).transfer(msg.sender, pos.refundAmount);
+            } else {
+                // Sell order unfilled: refund YES tokens
+                uint256 yesTokenId = _getYesTokenId(batch.marketId);
+                IConditionalTokens(ctf).safeTransferFrom(address(this), msg.sender, yesTokenId, pos.refundAmount, "");
+            }
         }
 
         emit PositionClaimed(batchId, msg.sender, yesShares, pos.refundAmount);
@@ -427,7 +525,7 @@ contract BatchVault {
         }
     }
 
-    /// @notice Compute a simple sequential Merkle root from commitments
+    /// @notice Compute a simple sequential commitment root
     function _computeCommitmentRoot(uint256 batchId, uint256 count) internal view returns (bytes32 root) {
         root = bytes32(0);
         for (uint256 i = 0; i < count; i++) {
@@ -435,8 +533,14 @@ contract BatchVault {
         }
     }
 
-    /// @notice Assign per-trader filled/refund amounts based on clearing price
-    function _assignPositions(uint256 batchId, RevealedOrder[] calldata orders, uint256 clearingPrice) internal {
+    /// @notice Assign per-trader filled/refund amounts based on clearing price.
+    /// @return filledBuyVol  USDC filled by buy orders (denominator for YES share calc)
+    /// @return filledSellYes YES tokens from filled sell orders (goes to YES pool for buyers)
+    function _assignPositions(
+        uint256 batchId,
+        RevealedOrder[] calldata orders,
+        uint256 clearingPrice
+    ) internal returns (uint256 filledBuyVol, uint256 filledSellYes) {
         for (uint256 i = 0; i < orders.length; i++) {
             RevealedOrder calldata o = orders[i];
             uint256 filledAmount = 0;
@@ -447,8 +551,17 @@ contract BatchVault {
                 : o.limitPrice <= clearingPrice;  // sell fills if limit <= clearing
 
             if (orderFills) {
-                filledAmount = o.amount;
+                if (o.isBuy) {
+                    // Buy: full USDC amount is filled
+                    filledAmount = o.amount;
+                    filledBuyVol += o.amount;
+                } else {
+                    // Sell: YES tokens converted to USDC at clearing price
+                    filledAmount = o.amount * clearingPrice / PRICE_DECIMALS;
+                    filledSellYes += o.amount;
+                }
             } else {
+                // Unfilled: full collateral refunded (USDC for buys, YES tokens for sells)
                 refundAmount = o.amount;
             }
 
@@ -462,8 +575,6 @@ contract BatchVault {
     }
 
     /// @notice Execute net buy position on Polymarket's CTF by splitting USDC into YES tokens
-    /// @dev Calls CTF.splitPosition() to mint YES/NO shares, then the vault holds YES shares
-    ///      Real implementation would also handle selling (net sell path uses mergePositions)
     function _executeOnPolymarket(bytes32 conditionId, uint256 usdcAmount, uint256 /*clearingPrice*/) internal returns (uint256 yesTokens) {
         // Approve CTF to spend USDC
         IERC20(usdc).approve(ctf, usdcAmount);
@@ -483,9 +594,8 @@ contract BatchVault {
         );
 
         // After splitting, vault holds equal YES and NO tokens
-        // For a net buy: vault keeps YES tokens for distribution, burns/sells NO tokens
-        // In prototype: vault holds both; NO tokens are left for future merging
-        yesTokens = usdcAmount; // 1 USDC splits into 1 YES + 1 NO (before fees)
+        // For a net buy: vault keeps YES tokens for distribution
+        yesTokens = usdcAmount; // 1 USDC splits into 1 YES + 1 NO (prototype approximation)
     }
 
     /// @notice Get the ERC-1155 token ID for YES shares on a given Polymarket condition
@@ -504,7 +614,6 @@ contract BatchVault {
     // ═══════════════════════════════════════════════════════════════════════
 
     /// @dev Recover the signer of an EIP-712 digest from a 65-byte signature.
-    ///      Returns address(0) on malformed input so callers can revert cleanly.
     function _recoverSigner(bytes32 digest, bytes calldata sig) internal pure returns (address) {
         if (sig.length != 65) return address(0);
         bytes32 r;

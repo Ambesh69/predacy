@@ -44,6 +44,20 @@ export const BATCH_VAULT_ABI = [
     stateMutability: "nonpayable",
   },
   {
+    name: "commitSellOrderFor",
+    type: "function",
+    inputs: [
+      { name: "commitment", type: "bytes32" },
+      { name: "yesAmount",  type: "uint256" },
+      { name: "signer",     type: "address" },
+      { name: "nonce",      type: "uint256" },
+      { name: "deadline",   type: "uint256" },
+      { name: "signature",  type: "bytes"   },
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+  {
     name: "nonces",
     type: "function",
     inputs: [{ name: "owner", type: "address" }],
@@ -243,6 +257,39 @@ export class BatchProcessor {
   }
 
   /**
+   * Privacy path for SELL orders: trader signed an EIP-712 CommitOrder off-chain.
+   * The relayer calls commitSellOrderFor() on-chain — YES tokens pulled from signer via
+   * safeTransferFrom (requires signer to have called ctf.setApprovalForAll(vault, true)).
+   *
+   * @param yesAmount  Number of YES tokens (6 decimals) to sell
+   */
+  async submitSellCommitmentFor(
+    batchId: bigint,
+    order: Order,
+    commitment: `0x${string}`,
+    signer: `0x${string}`,
+    nonce: bigint,
+    deadline: bigint,
+    signature: `0x${string}`,
+  ): Promise<void> {
+    console.log(`[BatchProcessor] Submitting commitSellOrderFor on behalf of ${signer}`);
+
+    const hash = await this._write({
+      address: this.config.vaultAddress,
+      abi: BATCH_VAULT_ABI,
+      functionName: "commitSellOrderFor",
+      args: [commitment, order.amount, signer, nonce, deadline, signature],
+      ...AMOY_GAS,
+    });
+
+    await this.publicClient.waitForTransactionReceipt({ hash });
+    console.log(`[BatchProcessor] commitSellOrderFor tx: ${hash} (seller=${signer} hidden)`);
+
+    await this.store.save(batchId.toString(), signer.toLowerCase(), { ...order, trader: signer });
+    console.log(`[BatchProcessor] Stored private sell order from ${signer} for batch ${batchId}`);
+  }
+
+  /**
    * Legacy path: trader already called commitOrder() directly (address visible on-chain).
    * Just store the off-chain order details for settlement.
    */
@@ -411,6 +458,7 @@ export class BatchProcessor {
     });
 
     // 6. Settle on-chain
+    // totalSellVol = filledSellYes (raw YES token count from filled sell orders)
     const settleHash = await this._write({
       address: this.config.vaultAddress,
       abi: BATCH_VAULT_ABI,
@@ -426,7 +474,7 @@ export class BatchProcessor {
         })),
         effectiveClearingPrice,
         clearing.filledBuyVolume,
-        clearing.filledSellVolume,
+        clearing.filledSellYes,   // YES token count (not USDC-equivalent)
         clearing.netBuyAmount,
         proof as `0x${string}`,
       ],

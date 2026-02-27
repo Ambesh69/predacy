@@ -13,6 +13,7 @@ import WalletButton from "@/components/WalletButton";
 import { getMarket, MOCK_MARKETS, type Market } from "@/lib/polymarket";
 import {
   BATCH_VAULT_ABI,
+  CTF_ABI,
   ERC20_ABI,
   MOCK_USDC_ABI,
   BatchStatus,
@@ -382,24 +383,46 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     setSubmitStep("approving");
     const walletClient = await ensureAmoy();
 
-    // Step 1 — approve USDC if allowance is insufficient
-    // Still required: commitOrderFor() calls transferFrom(signer → vault)
-    const allowance = await publicClient.readContract({
-      address: contracts.usdc,
-      abi: ERC20_ABI,
-      functionName: "allowance",
-      args: [walletAddress!, contracts.batchVault],
-    }) as bigint;
-
-    if (allowance < params.amount) {
-      const approveTx = await walletClient.writeContract({
+    // Step 1 — ensure collateral is approved:
+    //   Buy orders  → approve USDC (commitOrderFor calls transferFrom)
+    //   Sell orders → approve CTF setApprovalForAll (commitSellOrderFor calls safeTransferFrom)
+    if (params.isBuy) {
+      const allowance = await publicClient.readContract({
         address: contracts.usdc,
         abi: ERC20_ABI,
-        functionName: "approve",
-        args: [contracts.batchVault, params.amount],
-        ...CHAIN_GAS,
-      });
-      await publicClient.waitForTransactionReceipt({ hash: approveTx });
+        functionName: "allowance",
+        args: [walletAddress!, contracts.batchVault],
+      }) as bigint;
+
+      if (allowance < params.amount) {
+        const approveTx = await walletClient.writeContract({
+          address: contracts.usdc,
+          abi: ERC20_ABI,
+          functionName: "approve",
+          args: [contracts.batchVault, params.amount],
+          ...CHAIN_GAS,
+        });
+        await publicClient.waitForTransactionReceipt({ hash: approveTx });
+      }
+    } else {
+      // Sell order: need CTF operator approval so vault can safeTransferFrom YES tokens
+      const isApproved = await publicClient.readContract({
+        address: contracts.ctf,
+        abi: CTF_ABI,
+        functionName: "isApprovedForAll",
+        args: [walletAddress!, contracts.batchVault],
+      }) as boolean;
+
+      if (!isApproved) {
+        const approveTx = await walletClient.writeContract({
+          address: contracts.ctf,
+          abi: CTF_ABI,
+          functionName: "setApprovalForAll",
+          args: [contracts.batchVault, true],
+          ...CHAIN_GAS,
+        });
+        await publicClient.waitForTransactionReceipt({ hash: approveTx });
+      }
     }
 
     // Step 2 — read current EIP-712 nonce for this signer
@@ -453,6 +476,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         batchId:    batch.batchId.toString(),
         signer:     walletAddress,
         isBuy:      params.isBuy,
+        isSell:     !params.isBuy,  // sell orders (YES token deposits) use commitSellOrderFor
         amount:     params.amount.toString(),
         limitPrice: params.limitPrice.toString(),
         salt:       params.salt,
@@ -477,7 +501,8 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       setBatch((prev) => ({
         ...prev,
         commitmentCount: prev.commitmentCount + 1,
-        totalDeposited:  prev.totalDeposited + params.amount,
+        // Only USDC buy orders contribute to totalDeposited; sell orders deposit YES tokens
+        totalDeposited: params.isBuy ? prev.totalDeposited + params.amount : prev.totalDeposited,
       }));
     }
 

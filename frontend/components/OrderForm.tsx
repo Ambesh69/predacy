@@ -1,10 +1,19 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import { createPublicClient, http, encodeAbiParameters, keccak256 } from "viem";
 import { clsx } from "clsx";
 import { computeCommitment, generateSalt } from "@/lib/commitmentHash";
 import { getErrorMessage } from "@/lib/validation";
+import { getContracts, CTF_ABI } from "@/lib/contracts";
+import { ACTIVE_CHAIN } from "@/lib/chain";
 import type { Market } from "@/lib/polymarket";
+
+// Module-level read-only client (same pattern as MarketPageClient)
+const publicClient = createPublicClient({
+  chain: ACTIVE_CHAIN,
+  transport: http(),
+});
 
 interface OrderFormProps {
   market: Market;
@@ -26,6 +35,23 @@ interface OrderFormProps {
 const PRICE_STEP = 10_000;
 const MARKET_BUY_LIMIT  = 2n ** 256n - 1n;
 const MARKET_SELL_LIMIT = 0n;
+
+/** Compute the YES token ID for a given market (mirrors BatchVault._getYesTokenId) */
+function computeYesTokenId(usdcAddress: `0x${string}`, conditionId: `0x${string}`): bigint {
+  const collectionId = keccak256(
+    encodeAbiParameters(
+      [{ type: "bytes32" }, { type: "uint256" }],
+      [conditionId, 2n]
+    )
+  );
+  const positionId = keccak256(
+    encodeAbiParameters(
+      [{ type: "address" }, { type: "bytes32" }],
+      [usdcAddress, collectionId]
+    )
+  );
+  return BigInt(positionId);
+}
 
 export default function OrderForm({
   market,
@@ -51,24 +77,58 @@ export default function OrderForm({
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const effectiveLimitPrice =
-    orderType === "market"
-      ? (isBuy ? MARKET_BUY_LIMIT : MARKET_SELL_LIMIT)
-      : BigInt(limitPrice);
+  // YES balance for sell mode
+  const [yesBalance, setYesBalance] = useState<bigint | null>(null);
+  const [yesBalanceLoading, setYesBalanceLoading] = useState(false);
+
+  const effectiveLimitPrice = mode === "sell"
+    ? (orderType === "market" ? MARKET_SELL_LIMIT : BigInt(limitPrice))
+    : (orderType === "market" ? (isBuy ? MARKET_BUY_LIMIT : MARKET_SELL_LIMIT) : BigInt(limitPrice));
 
   const updateCommitment = useCallback(() => {
-    if (!walletAddress || mode === "sell") return;
+    if (!walletAddress) return;
     try {
       const amountParsed = BigInt(Math.round(parseFloat(amountDisplay || "0") * 1_000_000));
       if (amountParsed === 0n) return;
-      const effLP = orderType === "market"
-        ? (isBuy ? MARKET_BUY_LIMIT : MARKET_SELL_LIMIT)
-        : BigInt(limitPrice);
-      setCommitment(computeCommitment({ marketId, isBuy, amount: amountParsed, limitPrice: effLP, salt, trader: walletAddress }));
+      const effLP = mode === "sell"
+        ? (orderType === "market" ? MARKET_SELL_LIMIT : BigInt(limitPrice))
+        : (orderType === "market"
+          ? (isBuy ? MARKET_BUY_LIMIT : MARKET_SELL_LIMIT)
+          : BigInt(limitPrice));
+      const isOrderBuy = mode === "buy" ? isBuy : false; // sell mode always isBuy=false
+      setCommitment(computeCommitment({ marketId, isBuy: isOrderBuy, amount: amountParsed, limitPrice: effLP, salt, trader: walletAddress }));
     } catch { /* ignore parse errors while typing */ }
   }, [walletAddress, amountDisplay, isBuy, limitPrice, orderType, marketId, salt, mode]);
 
   useEffect(() => { updateCommitment(); }, [updateCommitment]);
+
+  // Fetch YES balance when switching to sell mode
+  useEffect(() => {
+    if (mode !== "sell" || !walletAddress || !sellYes) {
+      if (!sellYes) setYesBalance(null);
+      return;
+    }
+    setYesBalanceLoading(true);
+    let cancelled = false;
+    (async () => {
+      try {
+        const contracts = getContracts(ACTIVE_CHAIN.id);
+        const yesTokenId = computeYesTokenId(contracts.usdc, marketId);
+        const bal = await publicClient.readContract({
+          address: contracts.ctf,
+          abi: CTF_ABI,
+          functionName: "balanceOf",
+          args: [walletAddress, yesTokenId],
+        }) as bigint;
+        if (!cancelled) setYesBalance(bal);
+      } catch {
+        if (!cancelled) setYesBalance(0n);
+      } finally {
+        if (!cancelled) setYesBalanceLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [mode, walletAddress, marketId, sellYes]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -77,7 +137,8 @@ export default function OrderForm({
     setError(null);
     try {
       const amount = BigInt(Math.round(parseFloat(amountDisplay) * 1_000_000));
-      await onSubmit({ commitment, amount, salt, isBuy, limitPrice: effectiveLimitPrice });
+      const isOrderBuy = mode === "buy" ? isBuy : false;
+      await onSubmit({ commitment, amount, salt, isBuy: isOrderBuy, limitPrice: effectiveLimitPrice });
       setSubmitted(true);
     } catch (err: unknown) {
       setError(getErrorMessage(err));
@@ -91,12 +152,13 @@ export default function OrderForm({
   const pricePercent = (limitPrice / 10_000).toFixed(1);
   const priceDiff    = ((limitPrice / 1_000_000) - yesPrice) * 100;
 
-  const polymarketUrl = market.slug
-    ? `https://polymarket.com/event/${market.slug}`
-    : "https://polymarket.com";
+  const yesBalanceDisplay = yesBalance !== null
+    ? (Number(yesBalance) / 1_000_000).toFixed(2)
+    : null;
 
   // ── Sealed state ────────────────────────────────────────────────────────────
   if (submitted) {
+    const isSellOrder = mode === "sell";
     return (
       <div className="flex flex-col items-center justify-center h-full gap-4 p-6">
         <div className="relative">
@@ -111,7 +173,9 @@ export default function OrderForm({
           <p className="text-accent text-sm tracking-wide">ORDER SEALED</p>
           <p className="text-muted text-xs">Your commitment is locked in the batch.</p>
           <p className="text-muted text-xs">
-            {orderType === "market"
+            {isSellOrder
+              ? "Sell order — YES tokens locked. USDC paid out at clearing price."
+              : orderType === "market"
               ? "Market order — fills at the batch clearing price."
               : "Limit order — fills only if clearing price meets your limit."}
           </p>
@@ -187,6 +251,7 @@ export default function OrderForm({
           </button>
         </div>
       ) : (
+        // Sell mode: only YES is supported in V1 (NO token selling is V2)
         <div className="grid grid-cols-2 gap-2 p-3 border-b border-border">
           <button
             type="button"
@@ -194,7 +259,7 @@ export default function OrderForm({
             className={clsx(
               "py-2.5 px-3 text-xs font-medium tracking-wide transition-all duration-150 rounded-sm",
               sellYes
-                ? "bg-accent/20 border border-accent/40 text-accent"
+                ? "bg-danger/20 border border-danger/40 text-danger"
                 : "bg-surface/60 border border-border text-muted hover:border-border-bright hover:text-text"
             )}
           >
@@ -202,45 +267,191 @@ export default function OrderForm({
           </button>
           <button
             type="button"
-            onClick={() => setSellYes(false)}
-            className={clsx(
-              "py-2.5 px-3 text-xs font-medium tracking-wide transition-all duration-150 rounded-sm",
-              !sellYes
-                ? "bg-danger/20 border border-danger/40 text-danger"
-                : "bg-surface/60 border border-border text-muted hover:border-border-bright hover:text-text"
-            )}
+            disabled
+            className="py-2.5 px-3 text-xs font-medium tracking-wide rounded-sm bg-surface/30 border border-border/40 text-muted/40 cursor-not-allowed"
           >
-            No <span className="tabular-nums opacity-80">{(noPrice * 100).toFixed(1)}¢</span>
+            No <span className="text-[10px] opacity-60">V2</span>
           </button>
         </div>
       )}
 
-      {/* ── SELL MODE: exit CTA ───────────────────────────────────────────── */}
+      {/* ── SELL MODE: native sell form ───────────────────────────────────── */}
       {mode === "sell" && (
-        <div className="flex-1 flex flex-col items-center justify-center gap-5 p-6">
-          <div className="text-center space-y-1.5">
-            <p className="text-text text-sm font-medium">
-              Selling {sellYes ? "YES" : "NO"} tokens
-            </p>
-            <p className="text-muted-dim text-[11px] leading-relaxed max-w-[220px] mx-auto">
-              The batch vault doesn't accept token deposits yet.
-              Exit your {sellYes ? "YES" : "NO"} position directly on Polymarket.
-            </p>
+        <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
+
+          {/* Order type toggle */}
+          <div className="grid grid-cols-2 border-b border-border">
+            <button type="button" onClick={() => setOrderType("market")}
+              className={clsx("py-1.5 text-[10px] tracking-widest uppercase transition-colors",
+                orderType === "market" ? "text-text bg-surface/60" : "text-muted-dim hover:text-muted")} >
+              Market
+            </button>
+            <button type="button" onClick={() => setOrderType("limit")}
+              className={clsx("py-1.5 text-[10px] tracking-widest uppercase transition-colors border-l border-border",
+                orderType === "limit" ? "text-text bg-surface/60" : "text-muted-dim hover:text-muted")} >
+              Limit
+            </button>
           </div>
 
-          <a
-            href={polymarketUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="w-full py-3 border border-danger text-danger text-[11px] tracking-widest uppercase text-center hover:bg-danger/10 transition-colors block"
-          >
-            SELL {sellYes ? "YES" : "NO"} ON POLYMARKET ↗
-          </a>
+          <div className="flex-1 overflow-y-auto p-4 space-y-5">
+            {/* YES Token Amount */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-[11px] text-muted tracking-widest uppercase">YES Tokens to Sell</label>
+                {isConnected && (
+                  <span className="text-[10px] text-muted-dim tabular-nums">
+                    {yesBalanceLoading
+                      ? "loading…"
+                      : yesBalanceDisplay !== null
+                      ? `Balance: ${yesBalanceDisplay}`
+                      : "Balance: —"}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center border border-border bg-surface focus-within:border-border-bright transition-colors">
+                <input
+                  type="number"
+                  value={amountDisplay}
+                  onChange={(e) => setAmountDisplay(e.target.value)}
+                  className="flex-1 bg-transparent px-3 py-3 text-text text-sm tabular-nums focus:outline-none"
+                  placeholder="0.00"
+                  min="0.000001"
+                  step="0.01"
+                />
+                <span className="pr-3 text-muted text-[11px]">YES</span>
+              </div>
+              {/* Quick-fill from balance */}
+              {yesBalance !== null && yesBalance > 0n && (
+                <div className="flex gap-1">
+                  {[25, 50, 75, 100].map((pct) => (
+                    <button
+                      key={pct}
+                      type="button"
+                      onClick={() => {
+                        const amt = Number(yesBalance) * pct / 100 / 1_000_000;
+                        setAmountDisplay(amt.toFixed(6).replace(/\.?0+$/, ""));
+                      }}
+                      className="flex-1 py-1 text-[10px] border border-border text-muted hover:border-border-bright hover:text-muted transition-colors"
+                    >
+                      {pct}%
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
 
-          <p className="text-[10px] text-muted-dim text-center">
-            Polymarket uses instant order books. Your tokens will sell at the current market price.
-          </p>
-        </div>
+            {/* Limit price (sell mode) */}
+            {orderType === "limit" ? (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-[11px] text-muted tracking-widest uppercase">Min Sell Price</label>
+                  <span className={clsx("text-[11px] tabular-nums",
+                    priceDiff >= 0 ? "text-accent" : "text-danger")}>
+                    {priceDiff > 0 ? "+" : ""}{priceDiff.toFixed(1)}% vs Polymarket
+                  </span>
+                </div>
+                <div className="flex items-center border border-border bg-surface px-3 py-3">
+                  <span className="text-2xl font-black tabular-nums tracking-tight text-danger"
+                    style={{ fontFamily: "var(--font-display)" }}>
+                    {pricePercent}¢
+                  </span>
+                  <div className="ml-auto text-right">
+                    <p className="text-[10px] text-muted">Polymarket</p>
+                    <p className="text-xs text-text tabular-nums">{(yesPrice * 100).toFixed(1)}¢</p>
+                  </div>
+                </div>
+                <input
+                  type="range" min={1_000} max={990_000} step={PRICE_STEP}
+                  value={limitPrice}
+                  onChange={(e) => setLimitPrice(parseInt(e.target.value))}
+                  className="w-full danger"
+                />
+                <div className="flex justify-between text-[10px] text-muted-dim">
+                  <span>1¢</span><span>50¢</span><span>99¢</span>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center justify-between border border-border bg-surface/40 px-3 py-2.5">
+                <div>
+                  <p className="text-[10px] text-muted tracking-widest uppercase">Fill price</p>
+                  <p className="text-[11px] text-muted-dim mt-0.5">At batch clearing price</p>
+                </div>
+                <div className="text-right">
+                  <p className="text-[10px] text-muted">Polymarket now</p>
+                  <p className="text-lg font-black tabular-nums text-danger"
+                    style={{ fontFamily: "var(--font-display)" }}>
+                    {(yesPrice * 100).toFixed(1)}¢
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Commitment hash */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-[11px] text-muted tracking-widest uppercase">Sealed Commitment</label>
+                <span className="text-[10px] text-muted-dim">keccak256</span>
+              </div>
+              <div className="p-2 border border-border bg-surface/50 relative overflow-hidden">
+                <div className="absolute inset-y-0 left-0 w-1 bg-danger/30" />
+                <p className="hash-text text-[11px] break-all pl-2">
+                  {walletAddress ? commitment : "0x" + "?".repeat(64)}
+                </p>
+              </div>
+              <p className="text-[10px] text-muted-dim">
+                This hash — not your YES token amount — is what gets recorded on-chain.
+              </p>
+            </div>
+
+            {error && (
+              <div className="p-2 border border-danger/30 bg-danger/5">
+                <p className="text-danger text-xs">{error}</p>
+              </div>
+            )}
+          </div>
+
+          {/* Submit */}
+          <div className="p-4 border-t border-border">
+            {!isConnected ? (
+              <button type="button" onClick={onConnect}
+                className="w-full py-3 border border-border-bright text-text text-xs tracking-widest uppercase hover:border-text/30 transition-colors">
+                Connect Wallet
+              </button>
+            ) : !batchOpen ? (
+              <button type="button" disabled
+                className="w-full py-3 border border-border text-muted text-xs tracking-widest uppercase cursor-not-allowed">
+                Batch Closed
+              </button>
+            ) : (
+              <button
+                type="submit"
+                disabled={isSubmitting || !amountDisplay}
+                className={clsx(
+                  "w-full py-3 text-xs tracking-widest uppercase font-medium transition-all duration-150",
+                  "border border-danger text-danger hover:bg-danger/10 disabled:opacity-40",
+                  isSubmitting && "opacity-60 cursor-wait",
+                )}
+                style={{ boxShadow: isSubmitting ? "none" : "0 0 16px rgba(255, 51, 85, 0.15)" }}
+              >
+                {isSubmitting ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <span className="w-3 h-3 border border-current border-t-transparent rounded-full animate-spin" />
+                    {submitStep === "approving" ? "APPROVING CTF…" : "SIGNING ORDER…"}
+                  </span>
+                ) : (
+                  `SEAL ${orderType === "market" ? "MKT" : "LMT"} SELL YES — ${amountDisplay || "0"} tokens`
+                )}
+              </button>
+            )}
+            {isConnected && batchOpen && (
+              <p className="text-center text-[10px] text-muted-dim mt-2">
+                {yesBalance === 0n
+                  ? "No YES tokens in wallet — buy YES first."
+                  : "1 tx (CTF approve, if needed) + 1 signature — no commitment gas"}
+              </p>
+            )}
+          </div>
+        </form>
       )}
 
       {/* ── BUY MODE: order form ──────────────────────────────────────────── */}
@@ -401,7 +612,7 @@ export default function OrderForm({
                 {isSubmitting ? (
                   <span className="flex items-center justify-center gap-2">
                     <span className="w-3 h-3 border border-current border-t-transparent rounded-full animate-spin" />
-                    {submitStep === "approving" ? "APPROVING USDC…" : "SIGNING ORDER…"}
+                    {submitStep === "approving" ? "APPROVING…" : "SIGNING ORDER…"}
                   </span>
                 ) : (
                   `SEAL ${orderType === "market" ? "MKT" : "LMT"} ${isBuy ? "BUY YES" : "BUY NO"} — $${amountDisplay || "0"}`

@@ -36,7 +36,8 @@ export enum BatchStatus {
 export interface ClearingResult {
   clearingPrice: bigint;
   filledBuyVolume: bigint;
-  filledSellVolume: bigint;
+  filledSellVolume: bigint;  // YES token count from filled sell orders
+  filledSellYes: bigint;     // same as filledSellVolume — explicit alias for clarity
   netBuyAmount: bigint;
   filledOrders: Order[];
   unfilledOrders: Order[];
