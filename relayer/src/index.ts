@@ -159,7 +159,7 @@ if (processor) {
             args:    [currentBatchId],
           }) as { status: number; openedAt: bigint };
 
-          const OPEN = 0, CLOSED = 1;
+          const OPEN = 0, SETTLING = 1, SETTLED = 2;
 
           if (batchInfo.status === OPEN) {
             // Auto-close once the window has elapsed
@@ -172,14 +172,35 @@ if (processor) {
               catch (err) { console.error("[Relayer] closeBatch failed:", err); }
               finally { closingBatch = false; }
             }
-          } else if (batchInfo.status === CLOSED) {
+          } else if (batchInfo.status === SETTLING) {
             // Batch closed but not yet settled — process it (handles relayer restarts
             // and the case where processBatch() exited early on a previous run)
             processingBatch = true;
-            console.log(`[Relayer] Batch ${currentBatchId} is CLOSED — settling`);
+            console.log(`[Relayer] Batch ${currentBatchId} is SETTLING — processing`);
             try   { await processor.processBatch(currentBatchId); }
             catch (err) { console.error(`[Relayer] processBatch recovery failed:`, err); }
             finally { processingBatch = false; }
+          } else if (batchInfo.status === SETTLED && !openingBatch) {
+            // Batch is fully settled but the BatchSettled event was missed because
+            // fromBlock advanced past it while processBatch was awaiting the tx receipt
+            // (setInterval fires concurrent poll ticks during the ~20-30s wait).
+            // Directly open the next batch here instead of relying on the event.
+            openingBatch = true;
+            console.log(`[Relayer] Batch ${currentBatchId} SETTLED (event missed) — opening next batch`);
+            try {
+              currentBatchId = await processor.openBatch(MARKET_ID);
+            } catch (err: any) {
+              if (err.message?.includes("batch already open")) {
+                currentBatchId = await publicClient.readContract({
+                  address: config.vaultAddress,
+                  abi:     BATCH_VAULT_ABI,
+                  functionName: "currentBatchId",
+                }) as bigint;
+                console.log(`[Relayer] Next batch already open: ${currentBatchId}`);
+              } else {
+                console.error("[Relayer] openBatch (post-settle recovery) failed:", err);
+              }
+            } finally { openingBatch = false; }
           }
         } catch { /* RPC hiccup — retry next poll */ }
       }
