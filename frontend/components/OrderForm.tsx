@@ -320,8 +320,8 @@ export default function OrderForm({
                   onChange={(e) => setAmountDisplay(e.target.value)}
                   className="flex-1 bg-transparent px-3 py-3 text-text text-sm tabular-nums focus:outline-none"
                   placeholder="0.00"
-                  min="0.000001"
-                  step="0.01"
+                  min="0"
+                  step="any"
                 />
                 <span className="pr-3 text-muted text-[11px]">YES</span>
               </div>
