@@ -801,8 +801,8 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
             <div className="flex-1">
               <OrderForm
                 market={market}
-                marketId={id as `0x${string}`}
-                batchOpen={batch.status === BatchStatus.OPEN}
+                marketId={batch.batchMarketId}
+                batchOpen={batch.status === BatchStatus.OPEN && batch.batchMarketId !== ("0x" + "0".repeat(64))}
                 onSubmit={handleOrderSubmit}
                 walletAddress={walletAddress}
                 isConnected={isConnected}
