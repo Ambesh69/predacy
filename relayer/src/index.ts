@@ -223,17 +223,19 @@ if (processor) {
             abi:     BATCH_VAULT_ABI,
             functionName: "getBatch",
             args:    [currentBatchId],
-          }) as { status: number; openedAt: bigint };
+          }) as { status: number; openedAt: bigint; commitmentCount: bigint };
 
           const OPEN = 0, SETTLING = 1, SETTLED = 2;
 
           if (batchInfo.status === OPEN) {
-            // Auto-close once the window has elapsed
+            // Auto-close once the window has elapsed AND there's at least one order.
+            // Empty batches are left OPEN indefinitely — saves ~0.004 MATIC per idle
+            // cycle and keeps the timer live until a real order arrives.
             const nowSec    = Math.floor(Date.now() / 1000);
             const windowSec = config.batchWindowMs / 1000;
-            if (nowSec >= Number(batchInfo.openedAt) + windowSec) {
+            if (nowSec >= Number(batchInfo.openedAt) + windowSec && batchInfo.commitmentCount > 0n) {
               closingBatch = true;
-              console.log(`[Relayer] Batch ${currentBatchId} window expired — closing`);
+              console.log(`[Relayer] Batch ${currentBatchId} window expired (${batchInfo.commitmentCount} orders) — closing`);
               try   { await processor.closeBatch(); }
               catch (err) { console.error("[Relayer] closeBatch failed:", err); }
               finally { closingBatch = false; }
