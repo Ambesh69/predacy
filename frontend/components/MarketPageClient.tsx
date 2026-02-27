@@ -555,6 +555,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         functionName: "claimPosition",
         args: [batchId],
         ...CHAIN_GAS,
+        gas: 400_000n,  // skip eth_estimateGas — Amoy RPC returns junk values for this call
       });
       await publicClient.waitForTransactionReceipt({ hash: tx });
       // If claiming current batch, update current position state too
