@@ -399,48 +399,33 @@ export class BatchProcessor {
 
     // 4. Fetch Polymarket data + execute net position (only when API keys are set)
     //
-    // When the batch has an internal clearing price (orders crossed), use it.
-    // When there's no crossing (e.g. all-buy batch or no overlapping limits),
-    // fetch the live Polymarket mid price instead so settlement is anchored to
-    // real market data rather than an arbitrary fallback constant.
+    // Split into two phases:
+    //   Phase A (price discovery) — runs before computeFillsAtPrice so the correct price
+    //     is used when computing fills. Fetches the YES token ID and, if no internal
+    //     crossing occurred, anchors effectiveClearingPrice to the live Polymarket mid.
+    //   Phase B (order routing) — runs after computeFillsAtPrice, using the correct
+    //     net positions (netBuyAmount / netSellYes) at the effective price.
     let effectiveClearingPrice = clearing.clearingPrice;
+    let cachedYesToken: string | undefined;
 
+    // ─── 4a. Price discovery ──────────────────────────────────────────────────
     if (this.config.polymarket.apiKey) {
       try {
-        // Single market fetch shared by both the price-discovery and routing steps
-        const market   = await this.polymarket.getMarket(batchInfo.marketId.slice(2));
-        const yesToken = market.tokens.find((t) => t.outcome === "Yes")?.token_id;
-
-        if (!yesToken) throw new Error("YES token not found for market");
+        const market = await this.polymarket.getMarket(batchInfo.marketId.slice(2));
+        cachedYesToken = market.tokens.find((t) => t.outcome === "Yes")?.token_id;
+        if (!cachedYesToken) throw new Error("YES token not found for market");
 
         // When no internal crossing occurred, anchor clearing price to Polymarket mid
         if (effectiveClearingPrice === 0n) {
-          const mid = await this.polymarket.getMidPrice(yesToken);
+          const mid = await this.polymarket.getMidPrice(cachedYesToken);
           effectiveClearingPrice = BigInt(Math.round(mid * 1_000_000));
           console.log(
             `[BatchProcessor] No internal crossing — anchoring to Polymarket mid: ` +
             `${mid} → ${effectiveClearingPrice}`,
           );
         }
-
-        // Route net buy position to Polymarket
-        if (clearing.netBuyAmount > 0n) {
-          const usdcStr = (Number(clearing.netBuyAmount) / 1e6).toFixed(2);
-          console.log(`[BatchProcessor] → Routing net BUY YES: $${usdcStr} USDC to Polymarket`);
-          const { orderId, limitPrice } = await this.polymarket.placeMarketBuy(yesToken, clearing.netBuyAmount);
-          console.log(`[BatchProcessor] → Polymarket order ${orderId} placed (limit ${limitPrice})`);
-
-          // If clearing was settled by Polymarket (no internal cross), use the
-          // actual limit price used on Polymarket so settlement reflects reality.
-          if (clearing.clearingPrice === 0n) {
-            effectiveClearingPrice = BigInt(Math.round(limitPrice * 1_000_000));
-          }
-        } else {
-          console.log(`[BatchProcessor] → No net position to route (fully matched internally or zero buys)`);
-        }
       } catch (err) {
-        // Non-fatal: settlement proceeds on-chain with best-effort clearing price
-        console.warn(`[BatchProcessor] Polymarket step failed (non-fatal):`, err);
+        console.warn(`[BatchProcessor] Polymarket price-discovery step failed (non-fatal):`, err);
       }
     }
 
@@ -461,21 +446,58 @@ export class BatchProcessor {
     //    The internal clearing algorithm may have returned price=0 (no crossing) or a price that
     //    differs from effectiveClearingPrice (Polymarket mid). computeFillsAtPrice gives the
     //    correct filled volumes and net positions for the actual price used at settlement.
-    const fills = computeFillsAtPrice(orders, effectiveClearingPrice);
-    const { filledBuyVolume, filledSellYes, netBuyAmount, netSellYes } = fills;
+    let fills = computeFillsAtPrice(orders, effectiveClearingPrice);
     console.log(
-      `[BatchProcessor] Fills at effective price: buyVol=${filledBuyVolume}, ` +
-      `sellYes=${filledSellYes}, netBuy=${netBuyAmount}, netSellYes=${netSellYes}`,
+      `[BatchProcessor] Fills at effective price: buyVol=${fills.filledBuyVolume}, ` +
+      `sellYes=${fills.filledSellYes}, netBuy=${fills.netBuyAmount}, netSellYes=${fills.netSellYes}`,
     );
+
+    // ─── 4b. Order routing (buy or sell to Polymarket CLOB) ──────────────────
+    if (this.config.polymarket.apiKey && cachedYesToken) {
+      try {
+        if (fills.netBuyAmount > 0n) {
+          // Route net buy: spend USDC to acquire YES tokens for buyers
+          const usdcStr = (Number(fills.netBuyAmount) / 1e6).toFixed(2);
+          console.log(`[BatchProcessor] → Routing net BUY YES: $${usdcStr} USDC to Polymarket`);
+          const { orderId, limitPrice } = await this.polymarket.placeMarketBuy(
+            cachedYesToken,
+            fills.netBuyAmount,
+          );
+          console.log(`[BatchProcessor] → Polymarket BUY order ${orderId} placed (limit ${limitPrice})`);
+
+          // If price came from Polymarket mid (no internal cross), refine effectiveClearingPrice
+          // to the actual limit price used, then re-compute fills for accurate settlement params.
+          if (clearing.clearingPrice === 0n) {
+            effectiveClearingPrice = BigInt(Math.round(limitPrice * 1_000_000));
+            fills = computeFillsAtPrice(orders, effectiveClearingPrice);
+            console.log(`[BatchProcessor] → Refined clearing price to ${effectiveClearingPrice}`);
+          }
+        } else if (fills.netSellYes > 0n) {
+          // Route net sell: sell excess YES tokens on Polymarket for USDC
+          const yesStr = (Number(fills.netSellYes) / 1e6).toFixed(4);
+          console.log(`[BatchProcessor] → Routing net SELL YES: ${yesStr} tokens to Polymarket`);
+          const { orderId, limitPrice } = await this.polymarket.placeMarketSell(
+            cachedYesToken,
+            fills.netSellYes,
+          );
+          console.log(`[BatchProcessor] → Polymarket SELL order ${orderId} placed (limit ${limitPrice})`);
+        } else {
+          console.log(`[BatchProcessor] → No net position to route (fully matched internally or zero orders)`);
+        }
+      } catch (err) {
+        // Non-fatal: settlement proceeds on-chain with best-effort clearing price
+        console.warn(`[BatchProcessor] Polymarket routing step failed (non-fatal):`, err);
+      }
+    }
 
     // 6. Generate ZK proof (mock in prototype mode)
     const { proof } = await this.zkProver.generateProof({
       orders,
       commitments: commitments.map((c) => c.hash),
       clearingPrice: effectiveClearingPrice,
-      netBuyAmount,
-      filledBuyVolume,
-      filledSellVolume: filledSellYes,
+      netBuyAmount:      fills.netBuyAmount,
+      filledBuyVolume:   fills.filledBuyVolume,
+      filledSellVolume:  fills.filledSellYes,
     });
 
     // 7. Settle on-chain
@@ -493,10 +515,10 @@ export class BatchProcessor {
           salt:       o.salt,
         })),
         effectiveClearingPrice,
-        filledBuyVolume,
-        filledSellYes,
-        netBuyAmount,
-        netSellYes,
+        fills.filledBuyVolume,
+        fills.filledSellYes,
+        fills.netBuyAmount,
+        fills.netSellYes,
         proof as `0x${string}`,
       ],
       ...AMOY_GAS,

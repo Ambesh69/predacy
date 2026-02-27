@@ -118,6 +118,44 @@ export class PolymarketClient {
   }
 
   /**
+   * Place a market-like sell order for YES tokens on Polymarket's CLOB.
+   * Uses a FOK (fill-or-kill) order at mid - 1% slippage so it fills immediately.
+   *
+   * @param tokenId   YES token ID from market.tokens[].token_id
+   * @param yesAmount Number of YES tokens to sell (bigint, 6 decimals — e.g. 1_000_000n = 1 token)
+   * @returns orderId and the limit price used (as a float in [0, 1])
+   */
+  async placeMarketSell(
+    tokenId: string,
+    yesAmount: bigint,
+  ): Promise<{ orderId: string; limitPrice: number }> {
+    // Fetch current mid to set a realistic limit — sell slightly below mid to ensure fill
+    const mid = await this.getMidPrice(tokenId);
+
+    // Accept up to 1% below mid — ensures fill without excess slippage
+    const limitPrice = parseFloat(Math.max(0.001, mid * 0.99).toFixed(4));
+
+    // Polymarket size = number of tokens to sell (on-chain uses 6 decimals, API uses float)
+    const tokenSize = parseFloat((Number(yesAmount) / 1e6).toFixed(2));
+
+    const body = JSON.stringify({
+      order: {
+        tokenID:   tokenId,
+        side:      "SELL",
+        price:     limitPrice,
+        size:      tokenSize,
+        orderType: "FOK",
+      },
+    });
+
+    const res = await axios.post(`${CLOB_API}/order`, body, {
+      headers: this._authHeaders("POST", "/order", body),
+    });
+
+    return { orderId: res.data.orderId as string, limitPrice };
+  }
+
+  /**
    * Place a limit buy order on Polymarket's CLOB.
    *
    * @param tokenId    YES token ID
