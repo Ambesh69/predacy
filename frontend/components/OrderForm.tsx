@@ -157,6 +157,18 @@ export default function OrderForm({
   const pricePercent = (limitPrice / 10_000).toFixed(1);
   const priceDiff    = ((limitPrice / 1_000_000) - yesPrice) * 100;
 
+  // ── Order summary derived values ────────────────────────────────────────────
+  const amountNum = parseFloat(amountDisplay || "0") || 0;
+  // Effective fill price for display (limit = slider, market = Polymarket mid)
+  const fillPrice = orderType === "limit"
+    ? limitPrice / 1_000_000
+    : (mode === "sell" ? yesPrice : (isBuy ? yesPrice : noPrice));
+  // Buy: how many YES/NO shares the USDC buys; Sell: USDC proceeds
+  const sharesOut    = fillPrice > 0 && amountNum > 0 ? amountNum / fillPrice : 0;
+  const toWin        = sharesOut;          // $1 per share at resolution
+  const potentialPct = fillPrice > 0 ? (1 / fillPrice - 1) * 100 : 0;
+  const receiveUSDC  = amountNum * fillPrice;
+
   const yesBalanceDisplay = yesBalance !== null
     ? (Number(yesBalance) / 1_000_000).toFixed(2)
     : null;
@@ -345,6 +357,20 @@ export default function OrderForm({
               )}
             </div>
 
+            {/* ── Sell order summary ── */}
+            {amountNum > 0 && (
+              <div className="border border-border divide-y divide-border/60 text-[11px]">
+                <div className="flex items-center justify-between px-3 py-2">
+                  <span className="text-muted uppercase tracking-wider text-[10px]">Avg price</span>
+                  <span className="tabular-nums text-text">{(fillPrice * 100).toFixed(2)}¢</span>
+                </div>
+                <div className="flex items-center justify-between px-3 py-2">
+                  <span className="text-muted uppercase tracking-wider text-[10px]">You&apos;ll receive</span>
+                  <span className="tabular-nums font-medium text-danger">${receiveUSDC.toFixed(2)}</span>
+                </div>
+              </div>
+            )}
+
             {/* Limit price (sell mode) */}
             {orderType === "limit" ? (
               <div className="space-y-2">
@@ -512,6 +538,27 @@ export default function OrderForm({
                 ))}
               </div>
             </div>
+
+            {/* ── Buy order summary ── */}
+            {amountNum > 0 && (
+              <div className="border border-border divide-y divide-border/60 text-[11px]">
+                <div className="flex items-center justify-between px-3 py-2">
+                  <span className="text-muted uppercase tracking-wider text-[10px]">Avg price</span>
+                  <span className="tabular-nums text-text">{(fillPrice * 100).toFixed(2)}¢</span>
+                </div>
+                <div className="flex items-center justify-between px-3 py-2">
+                  <span className="text-muted uppercase tracking-wider text-[10px]">Shares</span>
+                  <span className="tabular-nums text-text">{sharesOut.toFixed(2)}</span>
+                </div>
+                <div className="flex items-center justify-between px-3 py-2">
+                  <span className="text-muted uppercase tracking-wider text-[10px]">Potential return</span>
+                  <span className={clsx("tabular-nums font-medium", isBuy ? "text-accent" : "text-danger")}>
+                    ${toWin.toFixed(2)}{" "}
+                    <span className="text-muted font-normal">(+{potentialPct.toFixed(0)}%)</span>
+                  </span>
+                </div>
+              </div>
+            )}
 
             {/* Limit price */}
             {orderType === "limit" ? (
