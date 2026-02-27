@@ -505,7 +505,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     if (walletAddress) {
       setCommitments((prev) => [
         ...prev,
-        { hash: params.commitment, amount: params.amount, trader: walletAddress, timestamp: Date.now() },
+        { hash: params.commitment, amount: params.amount, trader: walletAddress, timestamp: Date.now(), isBuy: params.isBuy },
       ]);
       setBatch((prev) => ({
         ...prev,

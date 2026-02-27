@@ -8,6 +8,7 @@ interface CommitmentEntry {
   amount: bigint;
   trader: `0x${string}`;
   timestamp: number;
+  isBuy?: boolean; // undefined = unknown (on-chain fetch without side info)
 }
 
 interface CommitmentFeedProps {
@@ -98,7 +99,9 @@ function HashEntry({ entry, isMe }: { entry: CommitmentEntry; isMe: boolean }) {
       <div className="text-right flex-shrink-0">
         {isMe ? (
           <span className="text-xs text-accent/80 tabular-nums">
-            ${(Number(entry.amount) / 1_000_000).toFixed(0)}
+            {entry.isBuy === false
+              ? `${(Number(entry.amount) / 1_000_000).toFixed(2)} YES`
+              : `$${(Number(entry.amount) / 1_000_000).toFixed(0)}`}
           </span>
         ) : (
           <span className="text-xs text-muted-dim">
