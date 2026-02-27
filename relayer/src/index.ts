@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { createServer } from "node:http";
-import { createPublicClient, http } from "viem";
+import { createPublicClient, http, parseAbiItem } from "viem";
 import { polygon, polygonAmoy } from "viem/chains";
 import { BatchProcessor, BATCH_VAULT_ABI } from "./batchProcessor.js";
 
@@ -111,43 +111,56 @@ if (missingVars.length > 0) {
   console.error(`[Relayer] ⚠ Missing env vars: ${missingVars.join(", ")} — add them in Railway Variables tab`);
 }
 
-// ── Event watching + batch lifecycle (only when fully configured) ─────────────
+// ── Event polling + batch lifecycle (only when fully configured) ──────────────
+// Uses getLogs polling instead of watchContractEvent — the public Amoy RPC is
+// load-balanced, so eth_newFilter / eth_getFilterChanges fails with "filter not
+// found" when requests hit different backend servers. getLogs is stateless and
+// works with any RPC.
 if (processor) {
   const publicClient = createPublicClient({
     chain,
     transport: http(config.rpcUrl, { retryCount: 3 }),
-    pollingInterval: 4_000,
   });
 
   let processingBatch = false;
   let openingBatch    = false;
 
-  // BatchClosed → settle
-  publicClient.watchContractEvent({
-    address:   config.vaultAddress,
-    abi:       BATCH_VAULT_ABI,
-    eventName: "BatchClosed",
-    onLogs: async (logs) => {
-      for (const log of logs) {
+  // Event ABI items for getLogs
+  const BATCH_CLOSED_EVENT = parseAbiItem(
+    "event BatchClosed(uint256 indexed batchId, uint256 commitmentCount)",
+  );
+  const BATCH_SETTLED_EVENT = parseAbiItem(
+    "event BatchSettled(uint256 indexed batchId, uint256 clearingPrice, uint256 totalBuyVolume, uint256 totalSellVolume, uint256 netBuyAmount, uint256 yesTokensReceived)",
+  );
+
+  // fromBlock advances each poll — initialised to current head before polling starts
+  let fromBlock = 0n;
+
+  const poll = async () => {
+    try {
+      const toBlock = await publicClient.getBlockNumber();
+      if (toBlock < fromBlock) return; // no new blocks since last poll
+
+      const [closedLogs, settledLogs] = await Promise.all([
+        publicClient.getLogs({ address: config.vaultAddress, event: BATCH_CLOSED_EVENT,  fromBlock, toBlock }),
+        publicClient.getLogs({ address: config.vaultAddress, event: BATCH_SETTLED_EVENT, fromBlock, toBlock }),
+      ]);
+
+      fromBlock = toBlock + 1n; // advance cursor past the range we just scanned
+
+      // BatchClosed → settle
+      for (const log of closedLogs) {
         const batchId = log.args.batchId as bigint;
-        if (processingBatch) { console.log(`[Relayer] BatchClosed ${batchId} — already settling`); continue; }
+        if (processingBatch) { console.log(`[Relayer] BatchClosed ${batchId} — already settling, skipping`); continue; }
         processingBatch = true;
         console.log(`[Relayer] BatchClosed ${batchId} (${log.args.commitmentCount} orders) — settling`);
         try   { await processor.processBatch(batchId); }
         catch (err) { console.error(`[Relayer] processBatch ${batchId} failed:`, err); }
         finally { processingBatch = false; }
       }
-    },
-    onError: (err) => console.error("[Relayer] BatchClosed watch error:", err),
-  });
 
-  // BatchSettled → open next batch
-  publicClient.watchContractEvent({
-    address:   config.vaultAddress,
-    abi:       BATCH_VAULT_ABI,
-    eventName: "BatchSettled",
-    onLogs: async (logs) => {
-      for (const log of logs) {
+      // BatchSettled → open next batch
+      for (const log of settledLogs) {
         console.log(`[Relayer] BatchSettled ${log.args.batchId} — opening next batch`);
         if (openingBatch) continue;
         openingBatch = true;
@@ -160,18 +173,25 @@ if (processor) {
           catch (e) { console.error("[Relayer] openBatch retry failed:", e); }
         } finally { openingBatch = false; }
       }
-    },
-    onError: (err) => console.error("[Relayer] BatchSettled watch error:", err),
-  });
+    } catch (err) {
+      console.error("[Relayer] poll error:", err);
+      // Don't advance fromBlock on error — retry the same range next tick
+    }
+  };
 
-  // Open first batch on startup
+  // Startup: set fromBlock, open first batch, then begin polling loop
   (async () => {
     try {
+      fromBlock      = await publicClient.getBlockNumber();
       currentBatchId = await processor.openBatch(MARKET_ID);
       console.log(`[Relayer] First batch ${currentBatchId} is open — accepting orders`);
     } catch (err: any) {
       console.warn(`[Relayer] openBatch on startup failed: ${err.message}`);
       console.warn("[Relayer] Continuing — will pick up existing batch from chain events");
+      // Still need a valid fromBlock even if openBatch failed
+      try { fromBlock = await publicClient.getBlockNumber(); } catch { fromBlock = 0n; }
     }
+    setInterval(poll, 5_000);
+    console.log("[Relayer] Polling for BatchClosed / BatchSettled every 5 s");
   })();
 }
