@@ -274,9 +274,15 @@ export class BatchProcessor {
     const orders = await this._matchOrdersToCommitments(batchId, commitments, batchInfo.marketId);
     console.log(`[BatchProcessor] ${orders.length}/${commitments.length} orders matched`);
 
-    if (orders.length === 0) {
-      console.log(`[BatchProcessor] No matched orders — skipping settlement`);
+    if (orders.length === 0 && commitments.length === 0) {
+      console.log(`[BatchProcessor] Empty batch (no commitments) — skipping settlement`);
       return;
+    }
+    if (orders.length === 0) {
+      // Commitments exist but no off-chain order details reached us (e.g. relayer was
+      // down or RELAYER_URL wasn't set). Settle with empty orders so the contract
+      // refunds all depositors their full USDC — don't leave the batch stuck in CLOSED.
+      console.log(`[BatchProcessor] No matched orders — settling empty batch (full refund to depositors)`);
     }
 
     // 3. Compute batch clearing price

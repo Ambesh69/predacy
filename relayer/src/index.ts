@@ -149,7 +149,7 @@ if (processor) {
 
       fromBlock = toBlock + 1n; // advance cursor past the range we just scanned
 
-      // Auto-close: if the current batch window has elapsed and nobody has closed it yet, do it now
+      // Batch lifecycle management: read current batch status once per poll tick
       if (currentBatchId !== null && !closingBatch && !processingBatch) {
         try {
           const batchInfo = await publicClient.readContract({
@@ -159,8 +159,10 @@ if (processor) {
             args:    [currentBatchId],
           }) as { status: number; openedAt: bigint };
 
-          const OPEN = 0;
+          const OPEN = 0, CLOSED = 1;
+
           if (batchInfo.status === OPEN) {
+            // Auto-close once the window has elapsed
             const nowSec    = Math.floor(Date.now() / 1000);
             const windowSec = config.batchWindowMs / 1000;
             if (nowSec >= Number(batchInfo.openedAt) + windowSec) {
@@ -170,6 +172,14 @@ if (processor) {
               catch (err) { console.error("[Relayer] closeBatch failed:", err); }
               finally { closingBatch = false; }
             }
+          } else if (batchInfo.status === CLOSED) {
+            // Batch closed but not yet settled — process it (handles relayer restarts
+            // and the case where processBatch() exited early on a previous run)
+            processingBatch = true;
+            console.log(`[Relayer] Batch ${currentBatchId} is CLOSED — settling`);
+            try   { await processor.processBatch(currentBatchId); }
+            catch (err) { console.error(`[Relayer] processBatch recovery failed:`, err); }
+            finally { processingBatch = false; }
           }
         } catch { /* RPC hiccup — retry next poll */ }
       }
