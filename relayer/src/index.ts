@@ -124,6 +124,7 @@ if (processor) {
 
   let processingBatch = false;
   let openingBatch    = false;
+  let closingBatch    = false;
 
   // Event ABI items for getLogs
   const BATCH_CLOSED_EVENT = parseAbiItem(
@@ -147,6 +148,31 @@ if (processor) {
       ]);
 
       fromBlock = toBlock + 1n; // advance cursor past the range we just scanned
+
+      // Auto-close: if the current batch window has elapsed and nobody has closed it yet, do it now
+      if (currentBatchId !== null && !closingBatch && !processingBatch) {
+        try {
+          const batchInfo = await publicClient.readContract({
+            address: config.vaultAddress,
+            abi:     BATCH_VAULT_ABI,
+            functionName: "getBatch",
+            args:    [currentBatchId],
+          }) as { status: number; openedAt: bigint };
+
+          const OPEN = 0;
+          if (batchInfo.status === OPEN) {
+            const nowSec    = Math.floor(Date.now() / 1000);
+            const windowSec = config.batchWindowMs / 1000;
+            if (nowSec >= Number(batchInfo.openedAt) + windowSec) {
+              closingBatch = true;
+              console.log(`[Relayer] Batch ${currentBatchId} window expired — closing`);
+              try   { await processor.closeBatch(); }
+              catch (err) { console.error("[Relayer] closeBatch failed:", err); }
+              finally { closingBatch = false; }
+            }
+          }
+        } catch { /* RPC hiccup — retry next poll */ }
+      }
 
       // BatchClosed → settle
       for (const log of closedLogs) {
