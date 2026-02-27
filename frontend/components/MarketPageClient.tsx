@@ -406,12 +406,19 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       }
     } else {
       // Sell order: need CTF operator approval so vault can safeTransferFrom YES tokens
-      const isApproved = await publicClient.readContract({
-        address: contracts.ctf,
-        abi: CTF_ABI,
-        functionName: "isApprovedForAll",
-        args: [walletAddress!, contracts.batchVault],
-      }) as boolean;
+      // MockCTF doesn't expose isApprovedForAll — fall back to assuming not approved;
+      // setApprovalForAll is idempotent so calling it twice is safe.
+      let isApproved = false;
+      try {
+        isApproved = await publicClient.readContract({
+          address: contracts.ctf,
+          abi: CTF_ABI,
+          functionName: "isApprovedForAll",
+          args: [walletAddress!, contracts.batchVault],
+        }) as boolean;
+      } catch {
+        isApproved = false;
+      }
 
       if (!isApproved) {
         const approveTx = await walletClient.writeContract({

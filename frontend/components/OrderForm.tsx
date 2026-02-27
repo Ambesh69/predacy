@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { createPublicClient, http, encodeAbiParameters, keccak256 } from "viem";
+import { createPublicClient, http, encodePacked, keccak256 } from "viem";
 import { clsx } from "clsx";
 import { computeCommitment, generateSalt } from "@/lib/commitmentHash";
 import { getErrorMessage } from "@/lib/validation";
@@ -36,17 +36,22 @@ const PRICE_STEP = 10_000;
 const MARKET_BUY_LIMIT  = 2n ** 256n - 1n;
 const MARKET_SELL_LIMIT = 0n;
 
-/** Compute the YES token ID for a given market (mirrors BatchVault._getYesTokenId) */
+/** Compute the YES token ID for a given market (mirrors BatchVault._getYesTokenId).
+ *  Must use encodePacked to match Solidity abi.encodePacked — address stays 20 bytes,
+ *  not padded to 32 like standard ABI encoding would do. */
 function computeYesTokenId(usdcAddress: `0x${string}`, conditionId: `0x${string}`): bigint {
+  // mirrors MockCTF.getCollectionId(bytes32(0), conditionId, 2)
+  const parentCollectionId = ("0x" + "00".repeat(32)) as `0x${string}`;
   const collectionId = keccak256(
-    encodeAbiParameters(
-      [{ type: "bytes32" }, { type: "uint256" }],
-      [conditionId, 2n]
+    encodePacked(
+      ["bytes32", "bytes32", "uint256"],
+      [parentCollectionId, conditionId, 2n]
     )
   );
+  // mirrors MockCTF.getPositionId(usdc, collectionId) — address is 20 bytes packed
   const positionId = keccak256(
-    encodeAbiParameters(
-      [{ type: "address" }, { type: "bytes32" }],
+    encodePacked(
+      ["address", "bytes32"],
       [usdcAddress, collectionId]
     )
   );
