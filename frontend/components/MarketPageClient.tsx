@@ -885,7 +885,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
               <OrderForm
                 market={market}
                 marketId={batch.batchMarketId}
-                batchOpen={batch.status === BatchStatus.OPEN && batch.batchMarketId !== ("0x" + "0".repeat(64))}
+                batchOpen={batch.status === BatchStatus.OPEN}
                 onSubmit={handleOrderSubmit}
                 walletAddress={walletAddress}
                 isConnected={isConnected}
