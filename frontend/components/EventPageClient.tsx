@@ -152,7 +152,7 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
   const [loading, setLoading] = useState(true);
 
   const top4 = [...markets]
-    .sort((a, b) => parseFloat(b.outcomePrices?.[0] ?? "0") - parseFloat(a.outcomePrices?.[0] ?? "0"))
+    .sort((a, b) => (b.volumeNum ?? parseFloat(b.volume ?? "0")) - (a.volumeNum ?? parseFloat(a.volume ?? "0")))
     .filter((m) => !!getTokenId(m))
     .slice(0, 4);
 
@@ -573,7 +573,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   }
 
   const sorted  = [...event.markets].sort(
-    (a, b) => parseFloat(b.outcomePrices?.[0] ?? "0") - parseFloat(a.outcomePrices?.[0] ?? "0"),
+    (a, b) => (b.volumeNum ?? parseFloat(b.volume ?? "0")) - (a.volumeNum ?? parseFloat(a.volume ?? "0")),
   );
   const volume  = event.volumeNum ?? parseFloat(event.volume ?? "0");
   const selYesPrice = selectedMarket ? parseFloat(selectedMarket.outcomePrices?.[0] ?? "0") : 0;
@@ -677,10 +677,15 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                   {/* Selection indicator */}
                   <div className={clsx("w-1 h-6 rounded-full flex-shrink-0 transition-all", sel ? "opacity-100" : "opacity-0")} style={{ background: bar }} />
 
-                  {/* Name */}
-                  <span className={clsx("text-sm flex-1 min-w-0 truncate transition-colors", sel ? "text-text" : "text-text/70 group-hover:text-text/90")}>
-                    {label}
-                  </span>
+                  {/* Name + Volume */}
+                  <div className="flex flex-col flex-1 min-w-0">
+                    <span className={clsx("text-sm truncate transition-colors", sel ? "text-text" : "text-text/70 group-hover:text-text/90")}>
+                      {label}
+                    </span>
+                    <span className="text-[10px] text-muted-dim tabular-nums">
+                      {formatVolume(market.volumeNum ?? market.volume ?? 0)} vol
+                    </span>
+                  </div>
 
                   {/* Prob bar */}
                   <div className="w-20 h-[2px] bg-border rounded-full overflow-hidden flex-shrink-0 hidden sm:block">
