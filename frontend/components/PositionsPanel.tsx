@@ -34,7 +34,7 @@ interface PositionsPanelProps {
   onMarketIdsFound?: (ids: `0x${string}`[]) => void;
 }
 
-const MAX_SCAN = 10; // look back at most 10 batches
+const MAX_SCAN = 500; // scan all the way back to batch 1 (capped for safety)
 
 function BatchStatusBadge({ status }: { status: BatchStatus }) {
   if (status === BatchStatus.OPEN)
