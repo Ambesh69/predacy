@@ -25,6 +25,7 @@ const baseConfig = {
     apiPassphrase: process.env.POLYMARKET_API_PASSPHRASE ?? "",
   },
   batchWindowMs: parseInt(process.env.BATCH_WINDOW_MS ?? "30000"),
+  useRealZk:     process.env.USE_REAL_ZK === "true",
 };
 
 const PORT = parseInt(process.env.PORT ?? "3001");
@@ -37,8 +38,9 @@ const PRE_WARM_MARKET_ID = process.env.MARKET_ID
 // ── Per-market state ───────────────────────────────────────────────────────────
 
 interface MarketState {
-  processor:      BatchProcessor;
-  currentBatchId: bigint | null;
+  processor:       BatchProcessor;
+  currentBatchId:  bigint | null;   // currently OPEN batch (accepting orders)
+  settlingBatchId: bigint | null;   // batch being proved/settled in background
   processingBatch: boolean;
   openingBatch:    boolean;
   closingBatch:    boolean;
@@ -48,6 +50,18 @@ interface MarketState {
 /** activeMarkets: marketId (lowercase hex) → MarketState */
 const activeMarkets = new Map<string, MarketState>();
 
+/** Reverse index: batchId.toString() → marketKey — find market state from any batch event */
+const batchToMarket = new Map<string, string>();
+
+/** Find market state from any batch ID (current or settling). */
+function findMarketByBatchId(batchId: bigint): [MarketState, string] | [undefined, undefined] {
+  const key = batchToMarket.get(batchId.toString());
+  if (!key) return [undefined, undefined];
+  const state = activeMarkets.get(key);
+  if (!state) return [undefined, undefined];
+  return [state, key];
+}
+
 function makeConfig(marketId: `0x${string}`): RelayerConfig {
   return { ...baseConfig, marketId };
 }
@@ -56,6 +70,7 @@ function createMarketState(marketId: `0x${string}`): MarketState {
   return {
     processor:       new BatchProcessor(makeConfig(marketId)),
     currentBatchId:  null,
+    settlingBatchId: null,
     processingBatch: false,
     openingBatch:    false,
     closingBatch:    false,
@@ -75,6 +90,7 @@ async function ensureMarket(marketId: `0x${string}`): Promise<MarketState> {
     console.log(`[Relayer] New market ${marketId} — opening on-demand batch`);
     try {
       state.currentBatchId = await state.processor.openBatch(marketId);
+      batchToMarket.set(state.currentBatchId.toString(), key);
       console.log(`[Relayer] Opened batch ${state.currentBatchId} for market ${marketId}`);
     } catch (err: any) {
       if (err.message?.includes("batch already open")) {
@@ -85,6 +101,7 @@ async function ensureMarket(marketId: `0x${string}`): Promise<MarketState> {
           functionName: "getCurrentBatchId",
           args:    [marketId],
         }) as bigint;
+        batchToMarket.set(state.currentBatchId.toString(), key);
         console.log(`[Relayer] Recovered existing batch ${state.currentBatchId} for market ${marketId}`);
       } else {
         console.error(`[Relayer] openBatch for market ${marketId} failed:`, err);
@@ -130,14 +147,15 @@ const server = createServer((req, res) => {
 
   // GET /health
   if (req.method === "GET" && req.url === "/health") {
-    const markets: Record<string, { batchId: string | null; status: string }> = {};
+    const markets: Record<string, { batchId: string | null; settlingBatchId: string | null; status: string }> = {};
     for (const [key, state] of activeMarkets) {
       markets[key] = {
-        batchId: state.currentBatchId?.toString() ?? null,
-        status:  state.processingBatch ? "settling"
-               : state.closingBatch    ? "closing"
-               : state.openingBatch    ? "opening"
-               : "open",
+        batchId:         state.currentBatchId?.toString() ?? null,
+        settlingBatchId: state.settlingBatchId?.toString() ?? null,
+        status:          state.processingBatch ? "settling"
+                       : state.closingBatch    ? "closing"
+                       : state.openingBatch    ? "opening"
+                       : "open",
       };
     }
     send(missingVars.length === 0 ? 200 : 503, {
@@ -352,6 +370,7 @@ async function onSettleFail(state: MarketState, marketKey: string, batchId: bigi
       const marketId = marketKey as `0x${string}`;
       try {
         state.currentBatchId = await state.processor.openBatch(marketId);
+        batchToMarket.set(state.currentBatchId.toString(), marketKey);
         console.log(`[Relayer] Force-opened batch ${state.currentBatchId} (skipped unresolvable ${batchId})`);
       } catch (e: any) {
         if (e.message?.includes("batch already open")) {
@@ -361,6 +380,7 @@ async function onSettleFail(state: MarketState, marketKey: string, batchId: bigi
             functionName: "getCurrentBatchId",
             args:    [marketId],
           }) as bigint;
+          batchToMarket.set(state.currentBatchId.toString(), marketKey);
           console.log(`[Relayer] Next batch already open: ${state.currentBatchId}`);
         } else {
           console.error("[Relayer] openBatch (force-skip) failed:", e);
@@ -410,20 +430,67 @@ const poll = async () => {
           // Auto-close once window has elapsed AND there's at least one order
           if (nowSec >= Number(batchInfo.openedAt) + windowSec && batchInfo.commitmentCount > 0n) {
             state.closingBatch = true;
-            console.log(`[Relayer] Batch ${state.currentBatchId} (market ${marketKey}) window expired (${batchInfo.commitmentCount} orders) — closing`);
-            try   { await state.processor.closeBatch(); }
-            catch (err) { console.error(`[Relayer] closeBatch (market ${marketKey}) failed:`, err); }
-            finally { state.closingBatch = false; }
+            const closingId = state.currentBatchId!;
+            console.log(`[Relayer] Batch ${closingId} (market ${marketKey}) window expired (${batchInfo.commitmentCount} orders) — closing`);
+            try {
+              await state.processor.closeBatch();
+            } catch (err) {
+              console.error(`[Relayer] closeBatch (market ${marketKey}) failed:`, err);
+              state.closingBatch = false;
+              continue;
+            }
+
+            // Pipeline: immediately open next batch so users can submit without waiting for proof
+            state.openingBatch = true;
+            try {
+              state.currentBatchId = await state.processor.openBatch(marketKey as `0x${string}`);
+              batchToMarket.set(state.currentBatchId.toString(), marketKey);
+              console.log(`[Relayer] Opened batch ${state.currentBatchId} for market ${marketKey} (pipelined)`);
+            } catch (err: any) {
+              if (err.message?.includes("batch already open")) {
+                state.currentBatchId = await publicClient.readContract({
+                  address: baseConfig.vaultAddress,
+                  abi:     BATCH_VAULT_ABI,
+                  functionName: "getCurrentBatchId",
+                  args:    [marketKey as `0x${string}`],
+                }) as bigint;
+                batchToMarket.set(state.currentBatchId.toString(), marketKey);
+                console.log(`[Relayer] Next batch already open: ${state.currentBatchId} (market ${marketKey})`);
+              } else {
+                console.error(`[Relayer] openBatch (pipeline, market ${marketKey}) failed:`, err);
+              }
+            } finally {
+              state.openingBatch = false;
+              state.closingBatch = false;
+            }
+
+            // Settle old batch in background — ZK proof generation is non-blocking
+            if (!state.processingBatch) {
+              state.processingBatch = true;
+              state.settlingBatchId = closingId;
+              console.log(`[Relayer] Settling batch ${closingId} (market ${marketKey}) in background`);
+              state.processor.processBatch(closingId)
+                .then(() => {
+                  state.settleFailures.delete(closingId.toString());
+                  console.log(`[Relayer] Batch ${closingId} (market ${marketKey}) settled`);
+                })
+                .catch((err) => onSettleFail(state, marketKey, closingId, err))
+                .finally(() => {
+                  state.processingBatch = false;
+                  state.settlingBatchId = null;
+                });
+            }
           }
         } else if (batchInfo.status === SETTLING) {
+          // Fallback: batch found SETTLING without a background promise (edge case / stale state)
+          const settlingId = state.currentBatchId!;
           state.processingBatch = true;
-          console.log(`[Relayer] Batch ${state.currentBatchId} (market ${marketKey}) is SETTLING — processing`);
-          try {
-            await state.processor.processBatch(state.currentBatchId);
-            state.settleFailures.delete(state.currentBatchId.toString());
-          } catch (err) {
-            await onSettleFail(state, marketKey, state.currentBatchId, err);
-          } finally { state.processingBatch = false; }
+          state.settlingBatchId = settlingId;
+          console.log(`[Relayer] Batch ${settlingId} (market ${marketKey}) is SETTLING — processing`);
+          state.processor.processBatch(settlingId)
+            .then(() => { state.settleFailures.delete(settlingId.toString()); })
+            .catch((err) => onSettleFail(state, marketKey, settlingId, err))
+            .finally(() => { state.processingBatch = false; state.settlingBatchId = null; });
         } else if (batchInfo.status === SETTLED && !state.openingBatch) {
           // Batch settled but event was missed — open next batch directly
           state.openingBatch = true;
@@ -431,6 +498,7 @@ const poll = async () => {
           const marketId = marketKey as `0x${string}`;
           try {
             state.currentBatchId = await state.processor.openBatch(marketId);
+            batchToMarket.set(state.currentBatchId.toString(), marketKey);
           } catch (err: any) {
             if (err.message?.includes("batch already open")) {
               state.currentBatchId = await publicClient.readContract({
@@ -439,6 +507,7 @@ const poll = async () => {
                 functionName: "getCurrentBatchId",
                 args:    [marketId],
               }) as bigint;
+              batchToMarket.set(state.currentBatchId.toString(), marketKey);
               console.log(`[Relayer] Next batch already open: ${state.currentBatchId} (market ${marketKey})`);
             } else {
               console.error(`[Relayer] openBatch (post-settle recovery, market ${marketKey}) failed:`, err);
@@ -451,53 +520,68 @@ const poll = async () => {
     // ── BatchClosed → settle ─────────────────────────────────────────────────
     for (const log of closedLogs) {
       const batchId = log.args.batchId as bigint;
-      // Identify which market this batch belongs to
-      let targetState: MarketState | undefined;
-      let targetKey:   string | undefined;
-      for (const [key, state] of activeMarkets) {
-        if (state.currentBatchId === batchId) { targetState = state; targetKey = key; break; }
-      }
+      const [targetState, targetKey] = findMarketByBatchId(batchId);
       if (!targetState || !targetKey) {
         console.warn(`[Relayer] BatchClosed ${batchId} — no matching active market, skipping`);
         continue;
       }
       if (targetState.processingBatch) {
-        console.log(`[Relayer] BatchClosed ${batchId} (market ${targetKey}) — already settling, skipping`);
+        // Already settling in background (pipelined) — no-op
+        console.log(`[Relayer] BatchClosed ${batchId} (market ${targetKey}) — already settling (pipelined), skipping`);
         continue;
       }
+      // Fallback: not yet settling (e.g. pipeline openBatch step failed) — start now
       targetState.processingBatch = true;
+      targetState.settlingBatchId = batchId;
       console.log(`[Relayer] BatchClosed ${batchId} (market ${targetKey}, ${log.args.commitmentCount} orders) — settling`);
-      try {
-        await targetState.processor.processBatch(batchId);
-        targetState.settleFailures.delete(batchId.toString());
-      } catch (err) {
-        await onSettleFail(targetState, targetKey, batchId, err);
-      } finally { targetState.processingBatch = false; }
+      targetState.processor.processBatch(batchId)
+        .then(() => { targetState!.settleFailures.delete(batchId.toString()); })
+        .catch((err) => onSettleFail(targetState!, targetKey!, batchId, err))
+        .finally(() => { targetState!.processingBatch = false; targetState!.settlingBatchId = null; });
     }
 
-    // ── BatchSettled → open next batch ───────────────────────────────────────
+    // ── BatchSettled → open next batch (non-pipelined fallback only) ─────────
     for (const log of settledLogs) {
       const batchId = log.args.batchId as bigint;
-      let targetState: MarketState | undefined;
-      let targetKey:   string | undefined;
-      for (const [key, state] of activeMarkets) {
-        if (state.currentBatchId === batchId) { targetState = state; targetKey = key; break; }
-      }
+      const [targetState, targetKey] = findMarketByBatchId(batchId);
+      batchToMarket.delete(batchId.toString()); // clean up reverse index
+
       if (!targetState || !targetKey) {
         console.warn(`[Relayer] BatchSettled ${batchId} — no matching active market`);
         continue;
       }
+
+      // Pipelined: next batch already opened at closeBatch time — nothing to do
+      if (targetState.currentBatchId !== batchId) {
+        console.log(`[Relayer] BatchSettled ${batchId} (market ${targetKey}) — next batch ${targetState.currentBatchId} already open`);
+        continue;
+      }
+
+      // Non-pipelined fallback (e.g. restart recovery): currentBatchId === batchId → open next batch
       if (targetState.openingBatch) continue;
       console.log(`[Relayer] BatchSettled ${batchId} (market ${targetKey}) — opening next batch`);
       targetState.openingBatch = true;
       const marketId = targetKey as `0x${string}`;
       try {
         targetState.currentBatchId = await targetState.processor.openBatch(marketId);
+        batchToMarket.set(targetState.currentBatchId.toString(), targetKey);
       } catch (err: any) {
         console.error(`[Relayer] openBatch (post-settle event, market ${targetKey}) failed:`, err);
-        await new Promise((r) => setTimeout(r, 5_000));
-        try   { targetState.currentBatchId = await targetState.processor.openBatch(marketId); }
-        catch (e) { console.error(`[Relayer] openBatch retry (market ${targetKey}) failed:`, e); }
+        if (err.message?.includes("batch already open")) {
+          targetState.currentBatchId = await publicClient.readContract({
+            address: baseConfig.vaultAddress,
+            abi:     BATCH_VAULT_ABI,
+            functionName: "getCurrentBatchId",
+            args:    [marketId],
+          }) as bigint;
+          batchToMarket.set(targetState.currentBatchId.toString(), targetKey);
+        } else {
+          await new Promise((r) => setTimeout(r, 5_000));
+          try {
+            targetState.currentBatchId = await targetState.processor.openBatch(marketId);
+            batchToMarket.set(targetState.currentBatchId.toString(), targetKey);
+          } catch (e) { console.error(`[Relayer] openBatch retry (market ${targetKey}) failed:`, e); }
+        }
       } finally { targetState.openingBatch = false; }
     }
   } catch (err) {
@@ -553,8 +637,10 @@ async function recoverSettlingBatches() {
 
         const state = createMarketState(marketId);
         state.currentBatchId  = batchId;
+        state.settlingBatchId = batchId;
         state.processingBatch = true;
         activeMarkets.set(key, state);
+        batchToMarket.set(batchId.toString(), key);
         console.log(`[Relayer] Recovering SETTLING batch ${batchId} for market ${marketId}`);
 
         // Trigger settlement immediately in background
@@ -564,7 +650,7 @@ async function recoverSettlingBatches() {
             console.log(`[Relayer] Recovery: settled batch ${batchId} (market ${marketId})`);
           })
           .catch(async (err) => { await onSettleFail(state, key, batchId, err); })
-          .finally(() => { state.processingBatch = false; });
+          .finally(() => { state.processingBatch = false; state.settlingBatchId = null; });
       } catch (err) {
         console.error(`[Relayer] Recovery: failed to inspect batch ${batchId}:`, err);
       }

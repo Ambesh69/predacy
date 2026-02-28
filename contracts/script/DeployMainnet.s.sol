@@ -2,21 +2,34 @@
 pragma solidity ^0.8.20;
 
 import "forge-std/Script.sol";
-import "../src/MockBatchVerifier.sol";
+import "../src/BatchVerifier.sol";
 import "../src/BatchVault.sol";
 
 /// @notice Deploy Predacy to Polygon mainnet.
 ///
 /// Prerequisites:
-///   - Relayer wallet must have ~0.1 MATIC for deployment gas
+///   - Relayer wallet must have ~0.15 MATIC for deployment gas
+///     (4 contracts deployed: ZKTranscriptLib, RelationsLib, CommitmentSchemeLib, HonkVerifier + BatchVault)
 ///   - MARKET_ID must be a valid Polymarket condition ID on Polygon
 ///   - Polymarket CLOB API keys must be set in relayer .env
 ///
-/// Note: MockBatchVerifier is used as an interim verifier.
-///   Swap to the real Noir-generated verifier once the circuit is compiled:
-///     cd circuits/batch_clearing && nargo build
-///     bb write_vk -b target/batch_clearing.json && bb contract
-///   Then: vault.setVerifier(<new_verifier_address>)
+/// Deployment order (Forge auto-links library contracts before HonkVerifier):
+///   1. ZKTranscriptLib  (7,843 bytes)  — Fiat-Shamir transcript generation
+///   2. RelationsLib     (10,316 bytes) — UltraHonk relation accumulation
+///   3. CommitmentSchemeLib (1,076 bytes) — Gemini/Shplemini commitment scheme helpers
+///   4. HonkVerifier    (16,613 bytes) — Main verifier (calls libs via DELEGATECALL)
+///   5. BatchVault      — Core Predacy contract
+///   All contracts < 24,576-byte EIP-170 limit.
+///
+/// Note: Uses the real HonkVerifier generated from the Noir batch_clearing circuit.
+///   Re-generate with: cd circuits/batch_clearing && nargo build
+///     bb write_vk -b target/batch_clearing.json -o target/vk -t evm
+///     bb write_solidity_verifier -k target/vk/vk -o target/Verifier.sol -t evm
+///   Then copy target/Verifier.sol → contracts/src/BatchVerifier.sol and redeploy.
+///
+/// ZK pipeline test (run before mainnet deploy to confirm proofs verify):
+///   cd contracts && forge test --match-contract HonkVerifierTest --ffi -vv
+///   Requires: bb installed + circuits/batch_clearing/ compiled (nargo build)
 ///
 /// Usage:
 ///   forge script script/DeployMainnet.s.sol \
@@ -43,11 +56,13 @@ contract DeployMainnet is Script {
 
         vm.startBroadcast(deployerKey);
 
-        // 1. MockBatchVerifier — interim until Noir circuit is compiled
-        //    Replace with: cd circuits/batch_clearing && nargo build && bb contract
-        MockBatchVerifier verifier = new MockBatchVerifier();
-        console.log("MockBatchVerifier:  ", address(verifier));
-        console.log("  (interim - swap for real Noir verifier after circuit compilation)");
+        // 1. ZK library contracts + HonkVerifier
+        //    Forge auto-deploys ZKTranscriptLib, RelationsLib, CommitmentSchemeLib
+        //    and links their addresses into HonkVerifier before broadcasting it.
+        //    Each contract is < 24,576 bytes (EIP-170 limit). Library deployment
+        //    addresses appear in broadcast/DeployMainnet.s.sol/<chainId>/run-latest.json.
+        HonkVerifier verifier = new HonkVerifier();
+        console.log("HonkVerifier:       ", address(verifier));
 
         // 2. BatchVault — points to real USDC + Polymarket CTF
         //    Deployer wallet is the trusted relayer

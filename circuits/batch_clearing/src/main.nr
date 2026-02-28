@@ -1,7 +1,7 @@
 // Predacy: Batch Clearing Price ZK Circuit
 //
 // Proves that:
-//   1. Each revealed order pre-image matches its on-chain Pedersen commitment
+//   1. Each revealed order pre-image matches its on-chain keccak256 commitment
 //   2. The clearing price P maximizes filled volume (correct batch auction)
 //   3. The reported net buy amount is correctly computed from filled orders
 //
@@ -12,7 +12,7 @@
 //   - total_sell_vol:  USDC filled on sell side (6 decimals)
 //   - net_buy_amount:  net USDC to route to Polymarket (6 decimals)
 //
-// Private inputs (witness — never revealed):
+// Private inputs (witness -- never revealed):
 //   - orders: array of N order pre-images (trader, direction, amount, limitPrice, salt)
 //   - commitments: the on-chain commitment hashes
 //
@@ -26,10 +26,10 @@
 // Note: This circuit uses a fixed MAX_ORDERS compile-time constant.
 // For variable-length batches, pad unused orders with zero amounts.
 
-use dep::std::hash::keccak256;
+use keccak256::keccak256;
 
 // Maximum orders per batch (must match contract MAX_BATCH_ORDERS)
-// Noir requires fixed-size arrays — pad with zero-amount dummy orders
+// Noir requires fixed-size arrays -- pad with zero-amount dummy orders
 global MAX_ORDERS: u32 = 64;
 global PRICE_DECIMALS: u64 = 1_000_000;
 
@@ -77,7 +77,7 @@ fn compute_commitment(market_id: [u8; 32], order: Order) -> [u8; 32] {
         encoded[128 + i] = order.salt[i];
     }
 
-    // trader (address as uint256, right-aligned in 32 bytes — 12 zero bytes + 20 address bytes)
+    // trader (address as uint256, right-aligned in 32 bytes -- 12 zero bytes + 20 address bytes)
     for i in 0..20 {
         encoded[172 + i] = order.trader[i];
     }
@@ -133,11 +133,11 @@ fn main(
     orders: [Order; MAX_ORDERS],
     commitments: [[u8; 32]; MAX_ORDERS],
 ) {
-    // ── Constraint 1: Valid clearing price ────────────────────────────────
+    // -- Constraint 1: Valid clearing price -----------------------------------
     assert(clearing_price > 0, "clearing price must be > 0");
     assert(clearing_price < PRICE_DECIMALS, "clearing price must be < 1.0");
 
-    // ── Constraint 2: Each order commitment matches its pre-image ─────────
+    // -- Constraint 2: Each order commitment matches its pre-image ------------
     for i in 0..MAX_ORDERS {
         if (i as u32) < order_count {
             let computed = compute_commitment(market_id, orders[i]);
@@ -145,11 +145,11 @@ fn main(
         }
     }
 
-    // ── Constraint 3: Commitment root is correctly computed ───────────────
+    // -- Constraint 3: Commitment root is correctly computed ------------------
     let computed_root = compute_commitment_root(commitments, order_count);
     assert(computed_root == commitment_root, "commitment root mismatch");
 
-    // ── Constraint 4: Volume computations are correct ────────────────────
+    // -- Constraint 4: Volume computations are correct ------------------------
     let mut computed_buy_vol: u64 = 0;
     let mut computed_sell_vol: u64 = 0;
 
@@ -169,18 +169,18 @@ fn main(
     assert(computed_buy_vol == total_buy_vol, "buy volume mismatch");
     assert(computed_sell_vol == total_sell_vol, "sell volume mismatch");
 
-    // ── Constraint 5: Net buy amount is correctly computed ────────────────
+    // -- Constraint 5: Net buy amount is correctly computed -------------------
     let matched_vol = if total_buy_vol < total_sell_vol { total_buy_vol } else { total_sell_vol };
     let computed_net = total_buy_vol - matched_vol;
     assert(computed_net == net_buy_amount, "net buy amount mismatch");
 }
 
-// ─── Tests ─────────────────────────────────────────────────────────────────────
+// --- Tests ------------------------------------------------------------------
 
 #[test]
 fn test_basic_batch_clearing() {
     // Three orders: Alice buys $100 at $0.70, Bob buys $50 at $0.65, Carol sells $80 at $0.60
-    // Clearing price: $0.65 — all three fill
+    // Clearing price: $0.65 -- all three fill
     // Buy vol: 150, Sell vol: 80, Net buy: 70
 
     let market_id: [u8; 32] = [1; 32];

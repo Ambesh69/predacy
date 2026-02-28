@@ -159,6 +159,7 @@ export interface RelayerConfig {
   relayerPrivateKey: `0x${string}`;
   marketId: `0x${string}`;  // Polymarket condition ID this processor manages
   redisUrl?: string;        // Optional — falls back to in-memory if not set
+  useRealZk?: boolean;      // true = generate real UltraHonk proofs via bb; default false (mock)
   polymarket: {
     apiKey: string;
     apiSecret: string;
@@ -212,7 +213,7 @@ export class BatchProcessor {
       account,
     });
 
-    this.zkProver = new ZKProver(false); // false = prototype mode (mock proofs)
+    this.zkProver = new ZKProver(config.useRealZk ?? false);
     this.polymarket = new PolymarketClient(
       config.polymarket.apiKey,
       config.polymarket.apiSecret,
@@ -495,11 +496,12 @@ export class BatchProcessor {
       }
     }
 
-    // 6. Generate ZK proof (mock in prototype mode)
+    // 6. Generate ZK proof (mock in prototype mode; real proof when USE_REAL_ZK=true)
     const { proof } = await this.zkProver.generateProof({
+      marketId:          batchInfo.marketId,
       orders,
-      commitments: commitments.map((c) => c.hash),
-      clearingPrice: effectiveClearingPrice,
+      commitments:       commitments.map((c) => c.hash),
+      clearingPrice:     effectiveClearingPrice,
       netBuyAmount:      fills.netBuyAmount,
       filledBuyVolume:   fills.filledBuyVolume,
       filledSellVolume:  fills.filledSellYes,

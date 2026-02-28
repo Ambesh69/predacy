@@ -19,9 +19,11 @@ contracts/out/
 contracts/cache/
 contracts/broadcast/
 
-# Noir
-circuits/*/target/
+# Noir — ignore generated artifacts but keep compiled circuit JSON for Railway
 circuits/**/Prover.toml
+circuits/*/target/vk
+circuits/*/target/vk_*/
+circuits/*/target/*.sol
 
 # Build outputs
 dist/
