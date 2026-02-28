@@ -223,7 +223,8 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         const batchId = await publicClient.readContract({
           address: contracts.batchVault,
           abi: BATCH_VAULT_ABI,
-          functionName: "currentBatchId",
+          functionName: "getCurrentBatchId",
+          args: [id as `0x${string}`],
         }) as bigint;
 
         if (batchId === 0n) return;
@@ -482,6 +483,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       method:  "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        marketId:   id,             // Polymarket condition ID — routes to correct market's batch
         batchId:    batch.batchId.toString(),
         signer:     walletAddress,
         isBuy:      params.isBuy,
@@ -648,21 +650,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         </div>
       )}
 
-      {/* Market mismatch banner — batch on chain is for a different market */}
-      {batch.batchMarketId !== ("0x" + "0".repeat(64)) &&
-       batch.batchMarketId.toLowerCase() !== id.toLowerCase() && (
-        <div className="border-b border-yellow-500/20 bg-yellow-500/5 px-6 py-2 flex items-start gap-3">
-          <span className="text-yellow-400/60 text-xs flex-shrink-0">⚠</span>
-          <p className="text-yellow-400/80 text-[11px] leading-relaxed">
-            The relayer is currently running batches for a different market.
-            Your commitment will be sealed on-chain, but settlement routing may not apply to this market.
-            Active market:{" "}
-            <span className="hash-text text-[10px]">
-              {batch.batchMarketId.slice(0, 10)}…{batch.batchMarketId.slice(-6)}
-            </span>
-          </p>
-        </div>
-      )}
+      {/* (Market mismatch banner removed — each market now has its own batch slot) */}
 
       {/* Wrong-network banner */}
       {onWrongChain && (

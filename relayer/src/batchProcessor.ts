@@ -25,7 +25,7 @@ export const BATCH_VAULT_ABI = [
   {
     name: "closeBatch",
     type: "function",
-    inputs: [],
+    inputs: [{ name: "marketId", type: "bytes32" }],
     outputs: [],
     stateMutability: "nonpayable",
   },
@@ -39,6 +39,7 @@ export const BATCH_VAULT_ABI = [
       { name: "nonce",      type: "uint256" },
       { name: "deadline",   type: "uint256" },
       { name: "signature",  type: "bytes"   },
+      { name: "marketId",   type: "bytes32" },
     ],
     outputs: [],
     stateMutability: "nonpayable",
@@ -53,6 +54,7 @@ export const BATCH_VAULT_ABI = [
       { name: "nonce",      type: "uint256" },
       { name: "deadline",   type: "uint256" },
       { name: "signature",  type: "bytes"   },
+      { name: "marketId",   type: "bytes32" },
     ],
     outputs: [],
     stateMutability: "nonpayable",
@@ -139,9 +141,9 @@ export const BATCH_VAULT_ABI = [
     stateMutability: "view",
   },
   {
-    name: "currentBatchId",
+    name: "getCurrentBatchId",
     type: "function",
-    inputs: [],
+    inputs: [{ name: "marketId", type: "bytes32" }],
     outputs: [{ name: "", type: "uint256" }],
     stateMutability: "view",
   },
@@ -155,6 +157,7 @@ export interface RelayerConfig {
   chainId: number;          // 137 = Polygon mainnet, 80002 = Polygon Amoy
   vaultAddress: `0x${string}`;
   relayerPrivateKey: `0x${string}`;
+  marketId: `0x${string}`;  // Polymarket condition ID this processor manages
   redisUrl?: string;        // Optional — falls back to in-memory if not set
   polymarket: {
     apiKey: string;
@@ -248,7 +251,7 @@ export class BatchProcessor {
       address: this.config.vaultAddress,
       abi: BATCH_VAULT_ABI,
       functionName: "commitOrderFor",
-      args: [commitment, order.amount, signer, nonce, deadline, signature],
+      args: [commitment, order.amount, signer, nonce, deadline, signature, this.config.marketId],
       ...AMOY_GAS,
     });
 
@@ -282,7 +285,7 @@ export class BatchProcessor {
       address: this.config.vaultAddress,
       abi: BATCH_VAULT_ABI,
       functionName: "commitSellOrderFor",
-      args: [commitment, order.amount, signer, nonce, deadline, signature],
+      args: [commitment, order.amount, signer, nonce, deadline, signature, this.config.marketId],
       ...AMOY_GAS,
     });
 
@@ -326,23 +329,25 @@ export class BatchProcessor {
     const batchId = await this.publicClient.readContract({
       address: this.config.vaultAddress,
       abi: BATCH_VAULT_ABI,
-      functionName: "currentBatchId",
+      functionName: "getCurrentBatchId",
+      args: [marketId],
     }) as bigint;
 
     console.log(`[BatchProcessor] Batch ${batchId} opened (tx: ${hash})`);
     return batchId;
   }
 
-  /** Close the current batch (anyone can call after BATCH_WINDOW expires) */
+  /** Close the current batch for this processor's market (anyone can call after BATCH_WINDOW expires) */
   async closeBatch(): Promise<void> {
     const hash = await this._write({
       address: this.config.vaultAddress,
       abi: BATCH_VAULT_ABI,
       functionName: "closeBatch",
+      args: [this.config.marketId],
       ...AMOY_GAS,
     });
     await this.publicClient.waitForTransactionReceipt({ hash });
-    console.log(`[BatchProcessor] closeBatch tx: ${hash}`);
+    console.log(`[BatchProcessor] closeBatch tx: ${hash} (market: ${this.config.marketId})`);
   }
 
   /**

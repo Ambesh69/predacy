@@ -11,9 +11,9 @@ export const CONTRACTS = {
   },
   // Polygon Amoy testnet
   [polygonAmoy.id]: {
-    batchVault: "0x28016d51242f2d5EDfFe6D949362A80DdE847D64" as `0x${string}`,
-    usdc:       "0x7DBA7951D63fAd352DE4e525B4EA3bA08B5dd4CA" as `0x${string}`, // MockUSDC
-    ctf:        "0x0E9f3E3abb2beE4f315DB69D1b0646aDBdaA2463" as `0x${string}`, // MockCTF
+    batchVault: "0x704314474E34C01F99b98e5A4C956B7748e34e44" as `0x${string}`,
+    usdc:       "0xf8C8788b16C04C1330d31c98837B34Ca3BDc0D6d" as `0x${string}`, // MockUSDC
+    ctf:        "0x524980c7d25da2aD65BBD2f6EB137785F8Da134f" as `0x${string}`, // MockCTF
   },
 } as const;
 
@@ -89,6 +89,7 @@ export const BATCH_VAULT_ABI = [
     inputs: [
       { name: "commitment", type: "bytes32" },
       { name: "amount",     type: "uint256" },
+      { name: "marketId",   type: "bytes32" },
     ],
     outputs: [],
     stateMutability: "nonpayable",
@@ -103,6 +104,7 @@ export const BATCH_VAULT_ABI = [
       { name: "nonce",      type: "uint256" },
       { name: "deadline",   type: "uint256" },
       { name: "signature",  type: "bytes"   },
+      { name: "marketId",   type: "bytes32" },
     ],
     outputs: [],
     stateMutability: "nonpayable",
@@ -163,9 +165,9 @@ export const BATCH_VAULT_ABI = [
     stateMutability: "view",
   },
   {
-    name: "currentBatchId",
+    name: "getCurrentBatchId",
     type: "function",
-    inputs: [],
+    inputs: [{ name: "marketId", type: "bytes32" }],
     outputs: [{ name: "", type: "uint256" }],
     stateMutability: "view",
   },

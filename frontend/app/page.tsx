@@ -1,12 +1,9 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { createPublicClient, http } from "viem";
 import MarketCard from "@/components/MarketCard";
 import WalletButton from "@/components/WalletButton";
 import { MOCK_MARKETS, getMarkets, type Market } from "@/lib/polymarket";
-import { ACTIVE_CHAIN } from "@/lib/chain";
-import { getContracts, BATCH_VAULT_ABI } from "@/lib/contracts";
 
 const TICKER_ITEMS = [
   "SEALED BIDS",
@@ -18,36 +15,24 @@ const TICKER_ITEMS = [
   "PRIVATE POSITIONS",
 ];
 
-const publicClient = createPublicClient({
-  chain: ACTIVE_CHAIN,
-  transport: http(process.env.NEXT_PUBLIC_RPC_URL ?? ACTIVE_CHAIN.rpcUrls.default.http[0]),
-});
-
 export default function HomePage() {
   const [markets, setMarkets] = useState<Market[]>(MOCK_MARKETS);
   const [loading, setLoading] = useState(true);
-  const [liveMarketId, setLiveMarketId] = useState<string | null>(null);
+  const [liveMarketIds, setLiveMarketIds] = useState<Set<string>>(new Set());
 
-  // Fetch the live Predacy batch's marketId so we can pin + badge it
+  // Fetch all markets with active batches from the relayer's /health endpoint.
+  // Any market the relayer is tracking gets the "LIVE" badge.
   useEffect(() => {
+    const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
+    if (!relayerUrl) return;
     (async () => {
       try {
-        const contracts = getContracts(ACTIVE_CHAIN.id);
-        const batchId = await publicClient.readContract({
-          address: contracts.batchVault,
-          abi: BATCH_VAULT_ABI,
-          functionName: "currentBatchId",
-        }) as bigint;
-        if (batchId > 0n) {
-          const batch = await publicClient.readContract({
-            address: contracts.batchVault,
-            abi: BATCH_VAULT_ABI,
-            functionName: "getBatch",
-            args: [batchId],
-          }) as { marketId: `0x${string}` };
-          const mid = batch.marketId.toLowerCase();
-          if (mid !== ("0x" + "0".repeat(64))) setLiveMarketId(mid);
-        }
+        const res = await fetch(`${relayerUrl}/health`);
+        if (!res.ok) return;
+        const data = await res.json();
+        // data.markets: { [marketId]: { batchId, status } }
+        const ids = new Set<string>(Object.keys(data.markets ?? {}));
+        setLiveMarketIds(ids);
       } catch { /* non-fatal */ }
     })();
   }, []);
@@ -55,19 +40,21 @@ export default function HomePage() {
   useEffect(() => {
     getMarkets(20)
       .then((fetched) => {
-        // Pin the live Predacy market at index 0
-        if (liveMarketId) {
-          const idx = fetched.findIndex((m) => m.conditionId.toLowerCase() === liveMarketId);
-          if (idx > 0) {
-            const live = fetched.splice(idx, 1)[0];
-            fetched.unshift(live);
+        // Pin live Predacy markets at the front (in insertion order)
+        if (liveMarketIds.size > 0) {
+          const live: Market[] = [];
+          const rest: Market[] = [];
+          for (const m of fetched) {
+            if (liveMarketIds.has(m.conditionId.toLowerCase())) live.push(m);
+            else rest.push(m);
           }
+          fetched = [...live, ...rest];
         }
         setMarkets(fetched);
       })
       .catch(() => setMarkets(MOCK_MARKETS))
       .finally(() => setLoading(false));
-  }, [liveMarketId]);
+  }, [liveMarketIds]);
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -188,7 +175,7 @@ export default function HomePage() {
             <div key={market.conditionId} className="bg-bg">
               <MarketCard
                 market={market}
-                isLive={!!liveMarketId && market.conditionId.toLowerCase() === liveMarketId}
+                isLive={liveMarketIds.has(market.conditionId.toLowerCase())}
               />
             </div>
           ))}

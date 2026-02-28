@@ -109,7 +109,12 @@ contract BatchVault {
     /// @notice EIP-712 domain separator — computed once at construction
     bytes32 public immutable DOMAIN_SEPARATOR;
 
-    uint256 public currentBatchId;
+    /// @notice Global batch ID counter — monotonically increasing across all markets
+    uint256 private _nextBatchId;
+
+    /// @notice The active (OPEN) batch for each Polymarket condition ID
+    /// @dev    Replaces the old single `currentBatchId` — each market has its own slot
+    mapping(bytes32 => uint256) public currentBatchIdByMarket;
 
     // batchId => Batch
     mapping(uint256 => Batch) public batches;
@@ -191,19 +196,21 @@ contract BatchVault {
     // Relayer: batch lifecycle
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// @notice Open a new batch for a given Polymarket market (condition ID)
-    /// @dev Only the relayer can open batches. One active batch at a time.
+    /// @notice Open a new batch for a given Polymarket market (condition ID).
+    /// @dev Only the relayer can open batches. Each market has its own concurrent batch slot.
+    ///      Multiple markets can have OPEN batches simultaneously.
     function openBatch(bytes32 marketId) external returns (uint256 batchId) {
         if (msg.sender != relayer) revert OnlyRelayer();
 
-        // Allow opening if no batch is currently open
-        Batch storage current = batches[currentBatchId];
+        // Allow opening only if the market has no currently OPEN batch
+        uint256 existingId = currentBatchIdByMarket[marketId];
         require(
-            currentBatchId == 0 || current.status != BatchStatus.OPEN,
+            existingId == 0 || batches[existingId].status != BatchStatus.OPEN,
             "BatchVault: batch already open"
         );
 
-        batchId = ++currentBatchId;
+        batchId = ++_nextBatchId;
+        currentBatchIdByMarket[marketId] = batchId;
         batches[batchId] = Batch({
             marketId: marketId,
             openedAt: block.timestamp,
@@ -223,17 +230,19 @@ contract BatchVault {
         emit BatchOpened(batchId, marketId, block.timestamp);
     }
 
-    /// @notice Close the current batch (stop accepting orders)
-    /// @dev Can be called by anyone once BATCH_WINDOW has elapsed
-    function closeBatch() external {
-        Batch storage batch = batches[currentBatchId];
+    /// @notice Close a market's current batch (stop accepting orders).
+    /// @dev Can be called by anyone once BATCH_WINDOW has elapsed.
+    /// @param marketId The Polymarket condition ID whose batch to close.
+    function closeBatch(bytes32 marketId) external {
+        uint256 batchId = currentBatchIdByMarket[marketId];
+        Batch storage batch = batches[batchId];
         if (batch.status != BatchStatus.OPEN) revert BatchNotOpen();
         if (block.timestamp < batch.openedAt + BATCH_WINDOW) revert BatchWindowNotClosed();
 
         batch.status = BatchStatus.SETTLING;
         batch.closedAt = block.timestamp;
 
-        emit BatchClosed(currentBatchId, batch.commitmentCount);
+        emit BatchClosed(batchId, batch.commitmentCount);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -244,30 +253,34 @@ contract BatchVault {
     ///         Deposits USDC; trader receives YES tokens at clearing price.
     /// @param commitment Hash of (marketId, isBuy=true, amount, limitPrice, salt, msg.sender)
     /// @param amount     USDC amount to lock (6 decimals)
-    function commitOrder(bytes32 commitment, uint256 amount) external {
+    /// @param marketId   Polymarket condition ID for the market to trade
+    function commitOrder(bytes32 commitment, uint256 amount, bytes32 marketId) external {
         if (amount == 0) revert ZeroAmount();
-        _executeCommit(commitment, amount, msg.sender);
+        _executeCommit(commitment, amount, msg.sender, marketId);
     }
 
     /// @notice Privacy-preserving BUY commitment via EIP-712 meta-transaction.
     ///         The relayer submits on the trader's behalf — only relayer address visible on-chain.
+    /// @param marketId Polymarket condition ID — selects which market's batch to commit to
     function commitOrderFor(
         bytes32 commitment,
         uint256 amount,
         address signer,
         uint256 nonce,
         uint256 deadline,
-        bytes calldata signature
+        bytes calldata signature,
+        bytes32 marketId
     ) external {
         if (amount == 0) revert ZeroAmount();
         if (block.timestamp > deadline) revert SignatureExpired();
         if (nonce != nonces[signer]) revert InvalidSignature();
 
+        uint256 batchId = currentBatchIdByMarket[marketId];
         bytes32 structHash = keccak256(abi.encode(
             COMMITMENT_TYPEHASH,
             commitment,
             amount,
-            currentBatchId,
+            batchId,
             nonce,
             deadline
         ));
@@ -276,31 +289,32 @@ contract BatchVault {
         if (recovered == address(0) || recovered != signer) revert InvalidSignature();
 
         nonces[signer]++;
-        _executeCommit(commitment, amount, signer);
+        _executeCommit(commitment, amount, signer, marketId);
     }
 
     /// @dev Shared logic for commitOrder and commitOrderFor (USDC deposits)
-    function _executeCommit(bytes32 commitment, uint256 amount, address trader) internal {
-        Batch storage batch = batches[currentBatchId];
+    function _executeCommit(bytes32 commitment, uint256 amount, address trader, bytes32 marketId) internal {
+        uint256 batchId = currentBatchIdByMarket[marketId];
+        Batch storage batch = batches[batchId];
         if (batch.status != BatchStatus.OPEN) revert BatchNotOpen();
-        if (hasCommitted[currentBatchId][trader]) revert AlreadyCommitted();
+        if (hasCommitted[batchId][trader]) revert AlreadyCommitted();
         if (batch.commitmentCount >= MAX_BATCH_ORDERS) revert MaxOrdersExceeded();
 
         IERC20(usdc).transferFrom(trader, address(this), amount);
 
         uint256 idx = batch.commitmentCount++;
-        commitments[currentBatchId][idx] = Commitment({
+        commitments[batchId][idx] = Commitment({
             hash: commitment,
             amount: amount,
             trader: trader,
             claimed: false
         });
 
-        hasCommitted[currentBatchId][trader] = true;
-        traderCommitmentIndex[currentBatchId][trader] = idx;
+        hasCommitted[batchId][trader] = true;
+        traderCommitmentIndex[batchId][trader] = idx;
         batch.totalDeposited += amount;
 
-        emit OrderCommitted(currentBatchId, trader, commitment, amount);
+        emit OrderCommitted(batchId, trader, commitment, amount);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -312,32 +326,36 @@ contract BatchVault {
     ///         Requires trader to have called ctf.setApprovalForAll(vault, true) first.
     /// @param commitment Hash of (marketId, isBuy=false, yesAmount, limitPrice, salt, msg.sender)
     /// @param yesAmount  YES token amount to lock (6 decimals, same scale as USDC)
-    function commitSellOrder(bytes32 commitment, uint256 yesAmount) external {
+    /// @param marketId   Polymarket condition ID for the market to trade
+    function commitSellOrder(bytes32 commitment, uint256 yesAmount, bytes32 marketId) external {
         if (yesAmount == 0) revert ZeroAmount();
-        _executeCommitSell(commitment, yesAmount, msg.sender);
+        _executeCommitSell(commitment, yesAmount, msg.sender, marketId);
     }
 
     /// @notice Privacy-preserving SELL commitment via EIP-712 meta-transaction.
     ///         The relayer submits on the trader's behalf — only relayer address visible on-chain.
     ///         Uses the same COMMITMENT_TYPEHASH as commitOrderFor; the commitment hash itself
     ///         encodes isBuy=false which distinguishes it from a buy commitment.
+    /// @param marketId Polymarket condition ID — selects which market's batch to commit to
     function commitSellOrderFor(
         bytes32 commitment,
         uint256 yesAmount,
         address signer,
         uint256 nonce,
         uint256 deadline,
-        bytes calldata signature
+        bytes calldata signature,
+        bytes32 marketId
     ) external {
         if (yesAmount == 0) revert ZeroAmount();
         if (block.timestamp > deadline) revert SignatureExpired();
         if (nonce != nonces[signer]) revert InvalidSignature();
 
+        uint256 batchId = currentBatchIdByMarket[marketId];
         bytes32 structHash = keccak256(abi.encode(
             COMMITMENT_TYPEHASH,
             commitment,
             yesAmount,
-            currentBatchId,
+            batchId,
             nonce,
             deadline
         ));
@@ -346,14 +364,15 @@ contract BatchVault {
         if (recovered == address(0) || recovered != signer) revert InvalidSignature();
 
         nonces[signer]++;
-        _executeCommitSell(commitment, yesAmount, signer);
+        _executeCommitSell(commitment, yesAmount, signer, marketId);
     }
 
     /// @dev Shared logic for commitSellOrder and commitSellOrderFor (YES token deposits)
-    function _executeCommitSell(bytes32 commitment, uint256 yesAmount, address trader) internal {
-        Batch storage batch = batches[currentBatchId];
+    function _executeCommitSell(bytes32 commitment, uint256 yesAmount, address trader, bytes32 marketId) internal {
+        uint256 batchId = currentBatchIdByMarket[marketId];
+        Batch storage batch = batches[batchId];
         if (batch.status != BatchStatus.OPEN) revert BatchNotOpen();
-        if (hasCommitted[currentBatchId][trader]) revert AlreadyCommitted();
+        if (hasCommitted[batchId][trader]) revert AlreadyCommitted();
         if (batch.commitmentCount >= MAX_BATCH_ORDERS) revert MaxOrdersExceeded();
 
         // Transfer YES tokens from trader to vault (requires setApprovalForAll on CTF)
@@ -361,18 +380,18 @@ contract BatchVault {
         IConditionalTokens(ctf).safeTransferFrom(trader, address(this), yesTokenId, yesAmount, "");
 
         uint256 idx = batch.commitmentCount++;
-        commitments[currentBatchId][idx] = Commitment({
+        commitments[batchId][idx] = Commitment({
             hash: commitment,
             amount: yesAmount,
             trader: trader,
             claimed: false
         });
 
-        hasCommitted[currentBatchId][trader] = true;
-        traderCommitmentIndex[currentBatchId][trader] = idx;
+        hasCommitted[batchId][trader] = true;
+        traderCommitmentIndex[batchId][trader] = idx;
         batch.totalSellYes += yesAmount;
 
-        emit OrderCommitted(currentBatchId, trader, commitment, yesAmount);
+        emit OrderCommitted(batchId, trader, commitment, yesAmount);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -641,6 +660,12 @@ contract BatchVault {
     // ═══════════════════════════════════════════════════════════════════════
     // View helpers
     // ═══════════════════════════════════════════════════════════════════════
+
+    /// @notice Get the current active batch ID for a given market.
+    ///         Returns 0 if no batch has ever been opened for this market.
+    function getCurrentBatchId(bytes32 marketId) external view returns (uint256) {
+        return currentBatchIdByMarket[marketId];
+    }
 
     function getBatch(uint256 batchId) external view returns (Batch memory) {
         return batches[batchId];

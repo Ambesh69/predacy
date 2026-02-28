@@ -196,7 +196,7 @@ contract BatchVaultTest is Test {
     function _closeBatch(uint256 batchId) internal {
         // Skip past batch window
         vm.warp(block.timestamp + vault.BATCH_WINDOW() + 1);
-        vault.closeBatch();
+        vault.closeBatch(MARKET_ID);
         assertEq(uint256(vault.getBatch(batchId).status), uint256(BatchVault.BatchStatus.SETTLING));
     }
 
@@ -255,7 +255,7 @@ contract BatchVaultTest is Test {
     function test_openBatch() public {
         uint256 batchId = _openBatch();
         assertEq(batchId, 1);
-        assertEq(vault.currentBatchId(), 1);
+        assertEq(vault.getCurrentBatchId(MARKET_ID), 1);
         assertEq(uint256(vault.getBatch(1).status), uint256(BatchVault.BatchStatus.OPEN));
         assertEq(vault.getBatch(1).marketId, MARKET_ID);
     }
@@ -268,7 +268,7 @@ contract BatchVaultTest is Test {
     function test_closeBatch_beforeWindow_reverts() public {
         _openBatch();
         vm.expectRevert(BatchVault.BatchWindowNotClosed.selector);
-        vault.closeBatch();
+        vault.closeBatch(MARKET_ID);
     }
 
     function test_closeBatch_afterWindow_succeeds() public {
@@ -288,7 +288,7 @@ contract BatchVaultTest is Test {
         bytes32 commitment = _makeCommitment(MARKET_ID, true, amount, limitPrice, salt, alice);
 
         vm.prank(alice);
-        vault.commitOrder(commitment, amount);
+        vault.commitOrder(commitment, amount, MARKET_ID);
 
         assertEq(usdc.balanceOf(address(vault)), amount);
         assertEq(vault.getBatch(1).commitmentCount, 1);
@@ -305,7 +305,7 @@ contract BatchVaultTest is Test {
         emit BatchVault.OrderCommitted(1, alice, commitment, amount);
 
         vm.prank(alice);
-        vault.commitOrder(commitment, amount);
+        vault.commitOrder(commitment, amount, MARKET_ID);
     }
 
     function test_commitOrder_duplicateReverts() public {
@@ -313,11 +313,11 @@ contract BatchVaultTest is Test {
         bytes32 commitment = _makeCommitment(MARKET_ID, true, 100e6, 650000, bytes32(uint256(1)), alice);
 
         vm.prank(alice);
-        vault.commitOrder(commitment, 100e6);
+        vault.commitOrder(commitment, 100e6, MARKET_ID);
 
         vm.expectRevert(BatchVault.AlreadyCommitted.selector);
         vm.prank(alice);
-        vault.commitOrder(commitment, 100e6);
+        vault.commitOrder(commitment, 100e6, MARKET_ID);
     }
 
     function test_commitOrder_whenBatchClosed_reverts() public {
@@ -327,7 +327,7 @@ contract BatchVaultTest is Test {
         bytes32 commitment = _makeCommitment(MARKET_ID, true, 100e6, 650000, bytes32(uint256(1)), alice);
         vm.expectRevert(BatchVault.BatchNotOpen.selector);
         vm.prank(alice);
-        vault.commitOrder(commitment, 100e6);
+        vault.commitOrder(commitment, 100e6, MARKET_ID);
     }
 
     function test_commitOrder_zeroAmountReverts() public {
@@ -335,7 +335,7 @@ contract BatchVaultTest is Test {
         bytes32 commitment = bytes32(uint256(1));
         vm.expectRevert(BatchVault.ZeroAmount.selector);
         vm.prank(alice);
-        vault.commitOrder(commitment, 0);
+        vault.commitOrder(commitment, 0, MARKET_ID);
     }
 
     // ─── Tests: sell order commitment ──────────────────────────────────────
@@ -353,7 +353,7 @@ contract BatchVaultTest is Test {
         bytes32 commitment = _makeCommitment(MARKET_ID, false, yesAmount, limitPrice, salt, carol);
 
         vm.prank(carol);
-        vault.commitSellOrder(commitment, yesAmount);
+        vault.commitSellOrder(commitment, yesAmount, MARKET_ID);
 
         // YES tokens transferred to vault
         assertEq(ctf.balanceOf(carol, _yesTokenId()), 0);
@@ -368,7 +368,7 @@ contract BatchVaultTest is Test {
         _openBatch();
         vm.expectRevert(BatchVault.ZeroAmount.selector);
         vm.prank(carol);
-        vault.commitSellOrder(bytes32(uint256(1)), 0);
+        vault.commitSellOrder(bytes32(uint256(1)), 0, MARKET_ID);
     }
 
     function test_commitSellOrder_whenBatchClosed_reverts() public {
@@ -380,7 +380,7 @@ contract BatchVaultTest is Test {
         bytes32 commitment = _makeCommitment(MARKET_ID, false, 50e6, 600000, bytes32(uint256(1)), carol);
         vm.expectRevert(BatchVault.BatchNotOpen.selector);
         vm.prank(carol);
-        vault.commitSellOrder(commitment, 50e6);
+        vault.commitSellOrder(commitment, 50e6, MARKET_ID);
     }
 
     // ─── Tests: batch settlement ───────────────────────────────────────────
@@ -410,15 +410,15 @@ contract BatchVaultTest is Test {
         bytes32 cCarol = _makeCommitment(MARKET_ID, false, amtCarol, limitCarol, saltCarol, carol);
 
         vm.prank(alice);
-        vault.commitOrder(cAlice, amtAlice);
+        vault.commitOrder(cAlice, amtAlice, MARKET_ID);
         vm.prank(bob);
-        vault.commitOrder(cBob, amtBob);
+        vault.commitOrder(cBob, amtBob, MARKET_ID);
 
         // Carol deposits YES tokens
         _mintYes(carol, amtCarol);
         _approveVaultCTF(carol);
         vm.prank(carol);
-        vault.commitSellOrder(cCarol, amtCarol);
+        vault.commitSellOrder(cCarol, amtCarol, MARKET_ID);
 
         _closeBatch(batchId);
 
@@ -453,7 +453,7 @@ contract BatchVaultTest is Test {
         bytes32 commitment = _makeCommitment(MARKET_ID, true, 100e6, 650000, salt, alice);
 
         vm.prank(alice);
-        vault.commitOrder(commitment, 100e6);
+        vault.commitOrder(commitment, 100e6, MARKET_ID);
         _closeBatch(batchId);
 
         // Tampered order: different limit price than committed
@@ -471,7 +471,7 @@ contract BatchVaultTest is Test {
         bytes32 salt = bytes32(uint256(1));
         bytes32 commitment = _makeCommitment(MARKET_ID, true, 100e6, 650000, salt, alice);
         vm.prank(alice);
-        vault.commitOrder(commitment, 100e6);
+        vault.commitOrder(commitment, 100e6, MARKET_ID);
         _closeBatch(batchId);
 
         BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
@@ -494,7 +494,7 @@ contract BatchVaultTest is Test {
 
         bytes32 commitment = _makeCommitment(MARKET_ID, true, amount, limitAlice, salt, alice);
         vm.prank(alice);
-        vault.commitOrder(commitment, amount);
+        vault.commitOrder(commitment, amount, MARKET_ID);
         _closeBatch(batchId);
 
         BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
@@ -518,7 +518,7 @@ contract BatchVaultTest is Test {
         bytes32 salt = bytes32(uint256(1));
         bytes32 commitment = _makeCommitment(MARKET_ID, true, 100e6, 400000, salt, alice);
         vm.prank(alice);
-        vault.commitOrder(commitment, 100e6);
+        vault.commitOrder(commitment, 100e6, MARKET_ID);
         _closeBatch(batchId);
 
         BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
@@ -550,12 +550,12 @@ contract BatchVaultTest is Test {
         bytes32 cCarol = _makeCommitment(MARKET_ID, false, yesCarol, 600000, saltCarol, carol);
 
         vm.prank(alice);
-        vault.commitOrder(cAlice, amtAlice);
+        vault.commitOrder(cAlice, amtAlice, MARKET_ID);
 
         _mintYes(carol, yesCarol);
         _approveVaultCTF(carol);
         vm.prank(carol);
-        vault.commitSellOrder(cCarol, yesCarol);
+        vault.commitSellOrder(cCarol, yesCarol, MARKET_ID);
 
         _closeBatch(batchId);
 
@@ -594,7 +594,7 @@ contract BatchVaultTest is Test {
         _mintYes(carol, yesCarol);
         _approveVaultCTF(carol);
         vm.prank(carol);
-        vault.commitSellOrder(cCarol, yesCarol);
+        vault.commitSellOrder(cCarol, yesCarol, MARKET_ID);
 
         _closeBatch(batchId);
 
@@ -634,12 +634,12 @@ contract BatchVaultTest is Test {
         bytes32 cCarol = _makeCommitment(MARKET_ID, false, yesCarol, 600000, bytes32(uint256(2)), carol);
 
         vm.prank(alice);
-        vault.commitOrder(cAlice, amtAlice);
+        vault.commitOrder(cAlice, amtAlice, MARKET_ID);
 
         _mintYes(carol, yesCarol);
         _approveVaultCTF(carol);
         vm.prank(carol);
-        vault.commitSellOrder(cCarol, yesCarol);
+        vault.commitSellOrder(cCarol, yesCarol, MARKET_ID);
 
         _closeBatch(batchId);
 
@@ -684,7 +684,7 @@ contract BatchVaultTest is Test {
         bytes32 commitment = _makeCommitment(MARKET_ID, isBuy, amount, limitPrice, salt, alice);
 
         vm.prank(alice);
-        vault.commitOrder(commitment, amount);
+        vault.commitOrder(commitment, amount, MARKET_ID);
 
         // On-chain commitment reveals only the hash — not direction, price, or salt
         BatchVault.Commitment memory c = vault.getCommitment(1, 0);
@@ -735,7 +735,7 @@ contract BatchVaultTest is Test {
         bytes memory sig = _signCommitOrder(daveKey, commitment, amount, batchId, 0, deadline);
 
         vm.prank(relayer);
-        vault.commitOrderFor(commitment, amount, dave, 0, deadline, sig);
+        vault.commitOrderFor(commitment, amount, dave, 0, deadline, sig, MARKET_ID);
 
         assertEq(usdc.balanceOf(dave), 900e6);
         assertEq(usdc.balanceOf(address(vault)), amount);
@@ -761,7 +761,7 @@ contract BatchVaultTest is Test {
         emit BatchVault.OrderCommitted(batchId, dave, commitment, 50e6);
 
         vm.prank(relayer);
-        vault.commitOrderFor(commitment, 50e6, dave, 0, block.timestamp + 1 hours, sig);
+        vault.commitOrderFor(commitment, 50e6, dave, 0, block.timestamp + 1 hours, sig, MARKET_ID);
     }
 
     function test_commitOrderFor_invalidSignature_reverts() public {
@@ -778,7 +778,7 @@ contract BatchVaultTest is Test {
 
         vm.expectRevert(BatchVault.InvalidSignature.selector);
         vm.prank(relayer);
-        vault.commitOrderFor(commitment, 50e6, dave, 0, block.timestamp + 1 hours, badSig);
+        vault.commitOrderFor(commitment, 50e6, dave, 0, block.timestamp + 1 hours, badSig, MARKET_ID);
     }
 
     function test_commitOrderFor_expiredDeadline_reverts() public {
@@ -795,7 +795,7 @@ contract BatchVaultTest is Test {
 
         vm.expectRevert(BatchVault.SignatureExpired.selector);
         vm.prank(relayer);
-        vault.commitOrderFor(commitment, 50e6, dave, 0, deadline, sig);
+        vault.commitOrderFor(commitment, 50e6, dave, 0, deadline, sig, MARKET_ID);
     }
 
     function test_commitOrderFor_wrongNonce_reverts() public {
@@ -811,7 +811,7 @@ contract BatchVaultTest is Test {
 
         vm.expectRevert(BatchVault.InvalidSignature.selector);
         vm.prank(relayer);
-        vault.commitOrderFor(commitment, 50e6, dave, 1, block.timestamp + 1 hours, sig);
+        vault.commitOrderFor(commitment, 50e6, dave, 1, block.timestamp + 1 hours, sig, MARKET_ID);
     }
 
     function test_commitOrderFor_replayReverts() public {
@@ -826,11 +826,11 @@ contract BatchVaultTest is Test {
         bytes memory sig = _signCommitOrder(daveKey, commitment, 50e6, batchId, 0, block.timestamp + 1 hours);
 
         vm.prank(relayer);
-        vault.commitOrderFor(commitment, 50e6, dave, 0, block.timestamp + 1 hours, sig);
+        vault.commitOrderFor(commitment, 50e6, dave, 0, block.timestamp + 1 hours, sig, MARKET_ID);
 
         vm.expectRevert(BatchVault.InvalidSignature.selector);
         vm.prank(relayer);
-        vault.commitOrderFor(commitment, 50e6, dave, 0, block.timestamp + 1 hours, sig);
+        vault.commitOrderFor(commitment, 50e6, dave, 0, block.timestamp + 1 hours, sig, MARKET_ID);
     }
 
     function test_commitOrderFor_settlesCorrectly() public {
@@ -850,7 +850,7 @@ contract BatchVaultTest is Test {
         bytes memory sig = _signCommitOrder(daveKey, commitment, amount, batchId, 0, block.timestamp + 1 hours);
 
         vm.prank(relayer);
-        vault.commitOrderFor(commitment, amount, dave, 0, block.timestamp + 1 hours, sig);
+        vault.commitOrderFor(commitment, amount, dave, 0, block.timestamp + 1 hours, sig, MARKET_ID);
 
         _closeBatch(batchId);
 
@@ -879,7 +879,7 @@ contract BatchVaultTest is Test {
         _mintYes(carol, yesCarol);
         _approveVaultCTF(carol);
         vm.prank(carol);
-        vault.commitSellOrder(cCarol, yesCarol);
+        vault.commitSellOrder(cCarol, yesCarol, MARKET_ID);
 
         _closeBatch(batchId);
 
@@ -922,7 +922,7 @@ contract BatchVaultTest is Test {
 
         bytes32 commitment = _makeCommitment(MARKET_ID, true, 100e6, 650000, bytes32(uint256(1)), alice);
         vm.prank(alice);
-        vault.commitOrder(commitment, 100e6);
+        vault.commitOrder(commitment, 100e6, MARKET_ID);
         _closeBatch(batchId);
 
         BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
@@ -931,5 +931,82 @@ contract BatchVaultTest is Test {
         vm.expectRevert(BatchVault.OnlyRelayer.selector);
         vm.prank(alice);
         vault.settleBatch(batchId, orders, 650000, 100e6, 0, 100e6, 0, "");
+    }
+
+    // ─── Tests: concurrent multi-market ────────────────────────────────────
+
+    function test_twoMarketsConcurrent() public {
+        bytes32 MARKET_ID_2 = keccak256("polymarket:will-btc-reach-150k-2026");
+
+        // Fund bob for market 2 (alice already funded in setUp)
+        // Both markets open simultaneously
+        vm.prank(relayer);
+        uint256 batchId1 = vault.openBatch(MARKET_ID);
+        vm.prank(relayer);
+        uint256 batchId2 = vault.openBatch(MARKET_ID_2);
+
+        assertEq(batchId1, 1);
+        assertEq(batchId2, 2);
+        assertEq(vault.getCurrentBatchId(MARKET_ID),   1);
+        assertEq(vault.getCurrentBatchId(MARKET_ID_2), 2);
+        assertEq(uint256(vault.getBatch(1).status), uint256(BatchVault.BatchStatus.OPEN));
+        assertEq(uint256(vault.getBatch(2).status), uint256(BatchVault.BatchStatus.OPEN));
+
+        // Alice commits to market 1 with a market-1 commitment hash
+        bytes32 saltAlice = bytes32(uint256(1));
+        bytes32 saltBob   = bytes32(uint256(2));
+        uint256 amtAlice  = 100e6;
+        uint256 amtBob    = 50e6;
+
+        bytes32 cAlice = _makeCommitment(MARKET_ID,   true, amtAlice, 650000, saltAlice, alice);
+        bytes32 cBob   = _makeCommitment(MARKET_ID_2, true, amtBob,   700000, saltBob,   bob);
+
+        vm.prank(alice);
+        vault.commitOrder(cAlice, amtAlice, MARKET_ID);
+        vm.prank(bob);
+        vault.commitOrder(cBob, amtBob, MARKET_ID_2);
+
+        // Orders land in the correct batches
+        assertEq(vault.getBatch(1).commitmentCount, 1);
+        assertEq(vault.getBatch(2).commitmentCount, 1);
+        assertEq(vault.getBatch(1).totalDeposited, amtAlice);
+        assertEq(vault.getBatch(2).totalDeposited, amtBob);
+
+        // Close and settle market 1 — market 2 remains OPEN
+        vm.warp(block.timestamp + vault.BATCH_WINDOW() + 1);
+        vault.closeBatch(MARKET_ID);
+        assertEq(uint256(vault.getBatch(1).status), uint256(BatchVault.BatchStatus.SETTLING));
+        assertEq(uint256(vault.getBatch(2).status), uint256(BatchVault.BatchStatus.OPEN));
+
+        BatchVault.RevealedOrder[] memory orders1 = new BatchVault.RevealedOrder[](1);
+        orders1[0] = BatchVault.RevealedOrder(alice, true, amtAlice, 650000, saltAlice);
+        vm.prank(relayer);
+        vault.settleBatch(batchId1, orders1, 650000, amtAlice, 0, amtAlice, 0, "");
+        assertEq(uint256(vault.getBatch(1).status), uint256(BatchVault.BatchStatus.SETTLED));
+
+        // Market 2 batch is still OPEN after market 1 settles
+        assertEq(uint256(vault.getBatch(2).status), uint256(BatchVault.BatchStatus.OPEN));
+
+        // Close and settle market 2
+        vault.closeBatch(MARKET_ID_2);
+        assertEq(uint256(vault.getBatch(2).status), uint256(BatchVault.BatchStatus.SETTLING));
+
+        BatchVault.RevealedOrder[] memory orders2 = new BatchVault.RevealedOrder[](1);
+        orders2[0] = BatchVault.RevealedOrder(bob, true, amtBob, 700000, saltBob);
+        vm.prank(relayer);
+        vault.settleBatch(batchId2, orders2, 700000, amtBob, 0, amtBob, 0, "");
+        assertEq(uint256(vault.getBatch(2).status), uint256(BatchVault.BatchStatus.SETTLED));
+
+        // Each trader's position is in the correct batch
+        BatchVault.Position memory alicePos = vault.getPosition(batchId1, alice);
+        BatchVault.Position memory bobPos   = vault.getPosition(batchId2, bob);
+        assertEq(alicePos.filledAmount, amtAlice);
+        assertEq(bobPos.filledAmount,   amtBob);
+
+        // Cross-check: alice has no position in batch 2, bob has none in batch 1
+        BatchVault.Position memory aliceInBatch2 = vault.getPosition(batchId2, alice);
+        BatchVault.Position memory bobInBatch1   = vault.getPosition(batchId1, bob);
+        assertEq(aliceInBatch2.filledAmount, 0);
+        assertEq(bobInBatch1.filledAmount,   0);
     }
 }
