@@ -195,6 +195,14 @@ function fmtPct(p: number): string {
   if (p < 0.995) return `${(p * 100).toFixed(1)}%`;
   return "100%";
 }
+// Format price in cents — always show decimal for sub-1¢ values, never round to 0
+function fmtCents(p: number): string {
+  const c = p * 100;
+  if (c === 0) return "0¢";
+  if (c >= 99.5) return "100¢";
+  if (c >= 0.95) return `${Math.round(c)}¢`;
+  return `${c.toFixed(1)}¢`; // e.g. "0.4¢", "0.1¢"
+}
 function fmtXLabel(ts: number, iv: Interval): string {
   const d = new Date(ts * 1000);
   if (iv === "6h" || iv === "1d")
@@ -836,18 +844,18 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
 
                   {/* Prob % */}
                   <span className="text-sm font-black tabular-nums w-9 text-right flex-shrink-0" style={{ fontFamily: "var(--font-display)", color: bar }}>
-                    {prob}%
+                    {fmtPct(yp)}
                   </span>
 
                   {/* YES / NO chips */}
                   <div className="hidden lg:flex items-center gap-1 flex-shrink-0">
                     <span className="text-[10px] px-1.5 py-0.5 border font-mono tabular-nums"
                       style={{ borderColor: "#00FFB330", color: "#00FFB3", background: "#00FFB305" }}>
-                      {Math.round(yp * 100)}¢
+                      {fmtCents(yp)}
                     </span>
                     <span className="text-[10px] px-1.5 py-0.5 border font-mono tabular-nums"
                       style={{ borderColor: "#FF335530", color: "#FF3355", background: "#FF335505" }}>
-                      {Math.round(np * 100)}¢
+                      {fmtCents(np)}
                     </span>
                   </div>
 
@@ -877,16 +885,16 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                 <p className="text-sm font-bold text-text leading-snug">{outcomeLabel(selectedMarket)}</p>
                 <div className="flex items-center gap-2 mt-1.5">
                   <span className="text-2xl font-black" style={{ fontFamily: "var(--font-display)", color: selBarColor }}>
-                    {selYesProb}%
+                    {fmtPct(selYesPrice)}
                   </span>
                   <span className="text-[10px] text-muted tracking-widest uppercase">chance</span>
                   <div className="ml-auto flex items-center gap-1.5">
                     <span className="text-[10px] px-1.5 py-0.5 border font-mono" style={{ borderColor: "#00FFB340", color: "#00FFB3", background: "#00FFB308" }}>
-                      YES {Math.round(selYesPrice * 100)}¢
+                      YES {fmtCents(selYesPrice)}
                     </span>
                     <span className="text-[10px] px-1.5 py-0.5 border font-mono"
                       style={{ borderColor: "#FF335540", color: "#FF3355", background: "#FF335508" }}>
-                      NO {Math.round((1 - selYesPrice) * 100)}¢
+                      NO {fmtCents(1 - selYesPrice)}
                     </span>
                   </div>
                 </div>
