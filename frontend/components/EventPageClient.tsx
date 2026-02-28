@@ -683,7 +683,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                       {label}
                     </span>
                     <span className="text-[10px] text-muted-dim tabular-nums">
-                      {formatVolume(market.volumeNum ?? market.volume ?? 0)} vol
+                      {formatVolume(market.volumeNum || parseFloat(market.volume ?? "0"))} vol
                     </span>
                   </div>
 
