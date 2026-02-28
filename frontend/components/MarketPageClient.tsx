@@ -155,6 +155,17 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
 
   const onWrongChain = isConnected && rawChainId !== null && rawChainId.toLowerCase() !== ACTIVE_CHAIN_ID_HEX;
 
+  // ── Pre-warm: open a batch for this market before the user submits an order ──
+  useEffect(() => {
+    const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
+    if (!relayerUrl || !id) return;
+    fetch(`${relayerUrl}/warm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ marketId: id }),
+    }).catch(() => { /* best-effort, ignore failures */ });
+  }, [id]);
+
   // ── Load market ─────────────────────────────────────────────────────────────
   useEffect(() => {
     const found = MOCK_MARKETS.find((m) => m.conditionId === id);

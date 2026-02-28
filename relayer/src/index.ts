@@ -225,6 +225,31 @@ const server = createServer((req, res) => {
     return;
   }
 
+  // POST /warm — pre-open a batch for a market before the first order arrives.
+  // Responds 202 immediately; batch opens in the background.
+  if (req.method === "POST" && req.url === "/warm") {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      try {
+        const { marketId } = JSON.parse(body);
+        if (!marketId) { send(400, { error: "Missing marketId" }); return; }
+        const key = (marketId as string).toLowerCase();
+        if (activeMarkets.has(key)) {
+          // Already tracked — nothing to do
+          send(200, { ok: true, alreadyOpen: true });
+          return;
+        }
+        // Fire-and-forget: don't await so the response goes out instantly
+        ensureMarket(marketId as `0x${string}`).catch((err) =>
+          console.warn(`[Relayer] /warm background openBatch failed for ${marketId}:`, err.message),
+        );
+        send(202, { ok: true, warming: true });
+      } catch { send(400, { error: "Invalid JSON" }); }
+    });
+    return;
+  }
+
   // POST /admin/force-advance?marketId=0x...
   // Force-opens the next batch for a given market, abandoning any stuck SETTLING batch.
   if (req.method === "POST" && req.url?.startsWith("/admin/force-advance")) {
@@ -266,6 +291,7 @@ const server = createServer((req, res) => {
 server.listen(PORT, () => {
   console.log(`[Relayer] HTTP server on :${PORT}`);
   console.log(`[Relayer]   GET  /health                               — liveness check`);
+  console.log(`[Relayer]   POST /warm                                 — pre-open a batch for a market (fire-and-forget)`);
   console.log(`[Relayer]   POST /order                                — submit off-chain order details (include marketId)`);
   console.log(`[Relayer]   POST /admin/force-advance?marketId=0x...   — skip stuck SETTLING batch`);
 });
