@@ -195,13 +195,14 @@ function fmtPct(p: number): string {
   if (p < 0.995) return `${(p * 100).toFixed(1)}%`;
   return "100%";
 }
-// Format price in cents — always show decimal for sub-1¢ values, never round to 0
+// Format price in cents — preserves decimals for sub-1¢ and near-100¢ values
 function fmtCents(p: number): string {
   const c = p * 100;
-  if (c === 0) return "0¢";
-  if (c >= 99.5) return "100¢";
-  if (c >= 0.95) return `${Math.round(c)}¢`;
-  return `${c.toFixed(1)}¢`; // e.g. "0.4¢", "0.1¢"
+  if (c <= 0) return "0¢";
+  if (c >= 99.95) return "100¢";          // truly 100¢ (p = 1.0)
+  if (c >= 99) return `${c.toFixed(1)}¢`; // "99.6¢" — don't round up to 100
+  if (c >= 0.95) return `${Math.round(c)}¢`; // "8¢", "95¢"
+  return `${c.toFixed(1)}¢`;             // "0.4¢", "0.1¢"
 }
 function fmtXLabel(ts: number, iv: Interval): string {
   const d = new Date(ts * 1000);
@@ -737,6 +738,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   );
   const volume  = event.volumeNum ?? parseFloat(event.volume ?? "0");
   const selYesPrice = selectedMarket ? parseFloat(selectedMarket.outcomePrices?.[0] ?? "0") : 0;
+  const selNoPrice  = selectedMarket ? parseFloat(selectedMarket.outcomePrices?.[1] ?? "0") : 0;
   const selYesProb  = Math.round(selYesPrice * 100);
   const selBarColor = selYesProb > 60 ? "#00FFB3" : selYesProb < 20 ? "#FF3355" : "#4D83FF";
 
@@ -904,7 +906,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                     </span>
                     <span className="text-[10px] px-1.5 py-0.5 border font-mono"
                       style={{ borderColor: "#FF335540", color: "#FF3355", background: "#FF335508" }}>
-                      NO {fmtCents(1 - selYesPrice)}
+                      NO {fmtCents(selNoPrice)}
                     </span>
                   </div>
                 </div>
