@@ -738,7 +738,8 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   );
   const volume  = event.volumeNum ?? parseFloat(event.volume ?? "0");
   const selYesPrice = selectedMarket ? parseFloat(selectedMarket.outcomePrices?.[0] ?? "0") : 0;
-  const selNoPrice  = selectedMarket ? parseFloat(selectedMarket.outcomePrices?.[1] ?? "0") : 0;
+  const selNoPriceRaw = selectedMarket ? parseFloat(selectedMarket.outcomePrices?.[1] ?? "0") : 0;
+  const selNoPrice    = selNoPriceRaw >= 0.999 ? (1 - selNoPriceRaw) : selNoPriceRaw;
   const selYesProb  = Math.round(selYesPrice * 100);
   const selBarColor = selYesProb > 60 ? "#00FFB3" : selYesProb < 20 ? "#FF3355" : "#4D83FF";
 
@@ -823,6 +824,10 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
               const bar  = prob > 60 ? "#00FFB3" : prob < 20 ? "#FF3355" : "#4D83FF";
               const sel  = selectedMarket?.conditionId === market.conditionId;
               const label = outcomeLabel(market);
+              // When Gamma returns outcomePrices[1] ≈ 1.0 (illiquid market, no real NO price),
+              // invert it so we show a tiny value like Polymarket does (e.g. "0¢" not "100¢").
+              // Threshold 0.999 preserves real near-100¢ values like Michelle Bowman's 99.6¢.
+              const npDisplay = np >= 0.999 ? (1 - np) : np;
 
               return (
                 <div
@@ -867,7 +872,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                     </span>
                     <span className="text-[10px] px-1.5 py-0.5 border font-mono tabular-nums"
                       style={{ borderColor: "#FF335530", color: "#FF3355", background: "#FF335505" }}>
-                      {fmtCents(np)}
+                      {fmtCents(npDisplay)}
                     </span>
                   </div>
 
