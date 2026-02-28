@@ -505,13 +505,84 @@ const poll = async () => {
   }
 };
 
-// Startup: set fromBlock, pre-warm MARKET_ID if set, then begin polling
+// ── Startup recovery: re-process any SETTLING batches from before restart ──────
+// Scans BatchClosed events from the last ~70 h and finds any that never emitted
+// BatchSettled. For each one, reconstructs the MarketState and retriggers
+// processBatch() so users' USDC isn't stuck after a Railway redeploy.
+
+async function recoverSettlingBatches() {
+  if (missingVars.length > 0) return;
+  console.log("[Relayer] Scanning for SETTLING batches to recover...");
+  try {
+    const toBlock  = await publicClient.getBlockNumber();
+    // ~50 000 blocks ≈ 70 h on Amoy (5 s/block) / 28 h on Polygon mainnet (2 s/block)
+    const scanFrom = toBlock > 50_000n ? toBlock - 50_000n : 0n;
+
+    const [closedLogs, settledLogs] = await Promise.all([
+      publicClient.getLogs({ address: baseConfig.vaultAddress, event: BATCH_CLOSED_EVENT,  fromBlock: scanFrom, toBlock }),
+      publicClient.getLogs({ address: baseConfig.vaultAddress, event: BATCH_SETTLED_EVENT, fromBlock: scanFrom, toBlock }),
+    ]);
+
+    const settledIds = new Set(settledLogs.map((l) => (l.args.batchId as bigint).toString()));
+    const unsettled  = closedLogs.filter((l) => !settledIds.has((l.args.batchId as bigint).toString()));
+
+    if (unsettled.length === 0) {
+      console.log("[Relayer] No SETTLING batches found — clean startup");
+      return;
+    }
+    console.log(`[Relayer] Found ${unsettled.length} SETTLING batch(es) to recover`);
+
+    for (const log of unsettled) {
+      const batchId = log.args.batchId as bigint;
+      try {
+        const batchInfo = await publicClient.readContract({
+          address:      baseConfig.vaultAddress,
+          abi:          BATCH_VAULT_ABI,
+          functionName: "getBatch",
+          args:         [batchId],
+        }) as { marketId: `0x${string}`; status: number };
+
+        if (batchInfo.status !== 1 /* SETTLING */) {
+          console.log(`[Relayer] Batch ${batchId} status=${batchInfo.status} (not SETTLING) — skipping`);
+          continue;
+        }
+
+        const marketId = batchInfo.marketId;
+        const key      = marketId.toLowerCase();
+        if (activeMarkets.has(key)) continue; // already tracked
+
+        const state = createMarketState(marketId);
+        state.currentBatchId  = batchId;
+        state.processingBatch = true;
+        activeMarkets.set(key, state);
+        console.log(`[Relayer] Recovering SETTLING batch ${batchId} for market ${marketId}`);
+
+        // Trigger settlement immediately in background
+        state.processor.processBatch(batchId)
+          .then(() => {
+            state.settleFailures.delete(batchId.toString());
+            console.log(`[Relayer] Recovery: settled batch ${batchId} (market ${marketId})`);
+          })
+          .catch(async (err) => { await onSettleFail(state, key, batchId, err); })
+          .finally(() => { state.processingBatch = false; });
+      } catch (err) {
+        console.error(`[Relayer] Recovery: failed to inspect batch ${batchId}:`, err);
+      }
+    }
+  } catch (err) {
+    console.error("[Relayer] recoverSettlingBatches failed:", err);
+  }
+}
+
+// Startup: set fromBlock, recover SETTLING batches, pre-warm MARKET_ID if set, then begin polling
 (async () => {
   try {
     fromBlock = await publicClient.getBlockNumber();
   } catch {
     fromBlock = 0n;
   }
+
+  await recoverSettlingBatches();
 
   if (missingVars.length === 0 && PRE_WARM_MARKET_ID) {
     console.log(`[Relayer] Pre-warming market ${PRE_WARM_MARKET_ID} (MARKET_ID env var)`);
