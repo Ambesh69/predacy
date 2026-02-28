@@ -136,7 +136,9 @@ export class ZKProver {
     const { createRequire } = await import("module");
     const _require = createRequire(import.meta.url);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const circuit = _require("../../circuits/batch_clearing/target/batch_clearing.json") as any;
+    // Path is relative to relayer/src/ — circuit JSON lives in relayer/circuits/
+    // so it's accessible on Railway (which only mounts the relayer/ root dir).
+    const circuit = _require("../circuits/batch_clearing.json") as any;
 
     console.log("[ZKProver] Initialising Barretenberg backend...");
     // Use the native bb binary when available (much faster than WASM fallback)
