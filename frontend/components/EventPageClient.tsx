@@ -10,6 +10,7 @@ import { usePrivy, useWallets } from "@privy-io/react-auth";
 import WalletButton from "@/components/WalletButton";
 import BatchTimer from "@/components/BatchTimer";
 import OrderForm from "@/components/OrderForm";
+import PositionsPanel from "@/components/PositionsPanel";
 import type { Market } from "@/lib/polymarket";
 import {
   filterAndDeduplicateMarkets,
@@ -431,6 +432,9 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   const [faucetLoading, setFaucetLoading] = useState(false);
   const [balanceVersion, setBalanceVersion] = useState(0);
   const [orderSealed, setOrderSealed] = useState(false);
+  const [activeTab, setActiveTab] = useState<"order" | "positions">("order");
+  const [claimLoading, setClaimLoading] = useState(false);
+  const [historicalMarketIds, setHistoricalMarketIds] = useState<`0x${string}`[]>([]);
 
   // ── Wallet ───────────────────────────────────────────────────────────────────
   const { authenticated, login } = usePrivy();
@@ -571,6 +575,34 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     return createWalletClient({ account: walletAddress, chain: ACTIVE_CHAIN, transport: custom(provider) });
   };
 
+  // ── Claim position ───────────────────────────────────────────────────────────
+  const handleClaimPosition = async (batchId: bigint) => {
+    setClaimLoading(true);
+    setChainError(null);
+    try {
+      const walletClient = await ensureAmoy();
+      const contracts = getContracts(ACTIVE_CHAIN.id);
+      const tx = await walletClient.writeContract({
+        address: contracts.batchVault,
+        abi: BATCH_VAULT_ABI,
+        functionName: "claimPosition",
+        args: [batchId],
+        ...CHAIN_GAS,
+        gas: 400_000n,
+      });
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: tx });
+      if (receipt.status === "reverted") {
+        throw new Error("Transaction reverted — the batch may not be fully settled yet. Try again in a few seconds.");
+      }
+      setBalanceVersion(v => v + 1);
+    } catch (e: any) {
+      if (e?.code !== 4001) setChainError(e.message ?? "Claim failed");
+      throw e;
+    } finally {
+      setClaimLoading(false);
+    }
+  };
+
   // ── Submit order ─────────────────────────────────────────────────────────────
   const handleOrderSubmit = async (params: {
     commitment: `0x${string}`; amount: bigint; salt: `0x${string}`; isBuy: boolean; limitPrice: bigint;
@@ -657,6 +689,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       }));
     }
     setOrderSealed(true);
+    setActiveTab("positions"); // Auto-switch so user can track and claim
   };
 
   // ── Faucet ───────────────────────────────────────────────────────────────────
@@ -898,55 +931,111 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                 />
               </div>
 
-              {/* Order sealed confirmation */}
-              {orderSealed && (
-                <div className="px-4 py-3 border-b border-border bg-accent/5">
-                  <div className="flex items-center gap-2 mb-1">
-                    <svg className="w-3 h-3 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                    </svg>
-                    <span className="text-[11px] text-accent tracking-widest uppercase">Order Sealed</span>
-                  </div>
-                  <p className="text-[11px] text-muted-dim">
-                    Your commitment is sealed in the current batch. It will settle at the uniform clearing price.
-                  </p>
-                  <button
-                    onClick={() => setOrderSealed(false)}
-                    className="mt-2 text-[10px] text-muted hover:text-text tracking-widest uppercase"
-                  >
-                    PLACE ANOTHER ORDER
-                  </button>
-                </div>
-              )}
+              {/* Order / My Positions tab bar */}
+              <div className="border-b border-border px-4 flex items-center">
+                <button
+                  type="button"
+                  onClick={() => { setActiveTab("order"); setOrderSealed(false); }}
+                  className={clsx(
+                    "px-3 py-3 text-[10px] tracking-widest uppercase transition-colors border-b-2",
+                    activeTab === "order"
+                      ? "border-text/40 text-text"
+                      : "border-transparent text-muted hover:text-text"
+                  )}
+                >
+                  Order
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("positions")}
+                  className={clsx(
+                    "px-3 py-3 text-[10px] tracking-widest uppercase transition-colors border-b-2",
+                    activeTab === "positions"
+                      ? "border-text/40 text-text"
+                      : "border-transparent text-muted hover:text-text"
+                  )}
+                >
+                  My Positions
+                </button>
+              </div>
 
-              {/* Order form */}
-              {!orderSealed && (
-                <div className="px-4 py-3">
-                  {submitStep && (
-                    <div className="mb-3 flex items-center gap-2 text-[11px] text-muted">
-                      <div className="w-2.5 h-2.5 border border-muted/40 border-t-transparent rounded-full animate-spin" />
-                      {submitStep === "approving" ? "Approving USDC…" : "Waiting for signature…"}
+              {/* Tab content */}
+              {activeTab === "positions" ? (
+                isConnected && walletAddress ? (
+                  <PositionsPanel
+                    walletAddress={walletAddress}
+                    currentBatchId={batch.batchId}
+                    currentBatchStatus={batch.status}
+                    currentBatchCommitments={commitments
+                      .filter((c) => c.trader === walletAddress)
+                      .map((c) => ({ hash: c.hash, amount: c.amount }))}
+                    onClaim={handleClaimPosition}
+                    onMarketIdsFound={setHistoricalMarketIds}
+                  />
+                ) : (
+                  <div className="flex-1 flex flex-col items-center justify-center gap-3 p-6">
+                    <p className="text-muted text-xs text-center">Connect your wallet to view positions</p>
+                    <button
+                      onClick={login}
+                      className="border border-border-bright text-text text-[11px] tracking-widest uppercase px-4 py-2 hover:border-text/30 transition-colors"
+                    >
+                      Connect Wallet
+                    </button>
+                  </div>
+                )
+              ) : (
+                <>
+                  {/* Order sealed confirmation */}
+                  {orderSealed && (
+                    <div className="px-4 py-3 border-b border-border bg-accent/5">
+                      <div className="flex items-center gap-2 mb-1">
+                        <svg className="w-3 h-3 text-accent" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                        </svg>
+                        <span className="text-[11px] text-accent tracking-widest uppercase">Order Sealed</span>
+                      </div>
+                      <p className="text-[11px] text-muted-dim">
+                        Your commitment is sealed in the current batch. It will settle at the uniform clearing price.
+                      </p>
+                      <button
+                        onClick={() => setOrderSealed(false)}
+                        className="mt-2 text-[10px] text-muted hover:text-text tracking-widest uppercase"
+                      >
+                        PLACE ANOTHER ORDER
+                      </button>
                     </div>
                   )}
-                  <OrderForm
-                    market={selectedMarket}
-                    marketId={selectedMarket.conditionId as `0x${string}`}
-                    batchOpen={batch.status === BatchStatus.OPEN}
-                    onSubmit={async (p) => {
-                      setSubmitStep(null);
-                      try { await handleOrderSubmit(p); }
-                      catch (e: any) {
-                        if (e?.code !== 4001) setChainError(e.message ?? "Order failed");
-                      } finally { setSubmitStep(null); }
-                    }}
-                    walletAddress={walletAddress}
-                    isConnected={isConnected}
-                    onConnect={login}
-                    submitStep={submitStep}
-                    balanceVersion={balanceVersion}
-                    candidateMarketIds={[selectedMarket.conditionId as `0x${string}`]}
-                  />
-                </div>
+
+                  {/* Order form */}
+                  {!orderSealed && (
+                    <div className="px-4 py-3">
+                      {submitStep && (
+                        <div className="mb-3 flex items-center gap-2 text-[11px] text-muted">
+                          <div className="w-2.5 h-2.5 border border-muted/40 border-t-transparent rounded-full animate-spin" />
+                          {submitStep === "approving" ? "Approving USDC…" : "Waiting for signature…"}
+                        </div>
+                      )}
+                      <OrderForm
+                        market={selectedMarket}
+                        marketId={selectedMarket.conditionId as `0x${string}`}
+                        batchOpen={batch.status === BatchStatus.OPEN}
+                        onSubmit={async (p) => {
+                          setSubmitStep(null);
+                          try { await handleOrderSubmit(p); }
+                          catch (e: any) {
+                            if (e?.code !== 4001) setChainError(e.message ?? "Order failed");
+                          } finally { setSubmitStep(null); }
+                        }}
+                        walletAddress={walletAddress}
+                        isConnected={isConnected}
+                        onConnect={login}
+                        submitStep={submitStep}
+                        balanceVersion={balanceVersion}
+                        candidateMarketIds={[selectedMarket.conditionId as `0x${string}`, ...historicalMarketIds]}
+                      />
+                    </div>
+                  )}
+                </>
               )}
             </>
           ) : (
