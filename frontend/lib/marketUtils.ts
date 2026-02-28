@@ -20,14 +20,23 @@ export function outcomeLabel(m: Market): string {
 }
 
 /**
- * Remove phantom placeholder slots and deduplicate same-name entries.
- * - Strips "Individual A / B / …" markets with no price or volume.
+ * Remove phantom placeholder slots, resolved/closed markets, and deduplicate
+ * same-name entries.
+ * - Skips markets with closed=true (already resolved sub-markets). These have
+ *   outcomePrices[0] ≈ 1.0, so without filtering they sort to the top and
+ *   appear above still-live outcomes — exactly the bug Polymarket avoids with
+ *   "Hide resolved". The parent event may still be active while individual
+ *   sub-markets (e.g. a resolved ETH price bracket) are already closed.
+ * - Strips "Individual A / B / …" anonymous placeholder slots.
  * - When two markets have the same label (e.g. two "Rick Rieder" entries),
  *   keeps the one with higher volume; ties broken by higher YES probability.
  */
 export function filterAndDeduplicateMarkets(markets: Market[]): Market[] {
-  // Step 1 — remove phantom placeholders
+  // Step 1 — remove resolved/closed markets and phantom placeholders
   const active = markets.filter((m) => {
+    // Skip resolved sub-markets — their YES price ≈ 1.0 would float them
+    // to the top of any probability-sorted list, hiding live outcomes.
+    if (m.closed === true) return false;
     const label = (m.groupItemTitle ?? m.question ?? "").trim();
     if (ANON_PLACEHOLDER.test(label)) return false;
     // Drop markets with literally no price AND no volume (pure ghost slots)

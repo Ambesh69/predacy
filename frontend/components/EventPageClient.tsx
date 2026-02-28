@@ -779,6 +779,12 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
           </div>
 
           <div className="divide-y divide-border/40">
+            {sorted.length === 0 && (
+              <div className="px-5 py-8 text-center">
+                <p className="text-sm text-muted">All outcomes resolved</p>
+                <p className="text-[11px] text-muted-dim mt-1">This event has fully settled.</p>
+              </div>
+            )}
             {sorted.map((market, idx) => {
               const yp   = parseFloat(market.outcomePrices?.[0] ?? "0");
               const np   = parseFloat(market.outcomePrices?.[1] ?? "0");
