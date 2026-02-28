@@ -189,8 +189,10 @@ function lerp(pts: Array<{ t: number; p: number }>, t: number): number {
   const frac = (t - pts[lo].t) / (pts[hi].t - pts[lo].t);
   return pts[lo].p + frac * (pts[hi].p - pts[lo].p);
 }
-/// Format probability like Polymarket: integer %, "<1%" for tiny, ">99%" for near-certain
+// Format probability like Polymarket: integer %, "<1%" for tiny, ">99%" for near-certain
+// Gamma API can return negative or NaN prices for illiquid markets — clamp defensively.
 function fmtPct(p: number): string {
+  if (!isFinite(p) || p <= 0) return "<1%";
   const pct = Math.round(p * 100);
   if (pct < 1)  return "<1%";
   if (pct > 99) return ">99%";
@@ -492,21 +494,37 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   const walletAddress = wallet?.address as `0x${string}` | undefined;
   const isConnected   = authenticated && !!walletAddress;
 
-  // ── Load event ───────────────────────────────────────────────────────────────
+  // ── Load event + 30-second price polling ─────────────────────────────────────
+  // Polymarket prices update continuously. We poll every 30s so displayed prices
+  // stay fresh and don't drift far from the real market.
   useEffect(() => {
-    fetch(`/api/event/${id}`)
-      .then((r) => r.json())
-      .then((data) => {
-        if (!data || data.error) { setEvent(null); return; }
-        const parse = (v: any) => (typeof v === "string" ? JSON.parse(v) : v);
-        setEvent({
-          ...data,
-          tags:    parse(data.tags)    ?? [],
-          markets: (data.markets ?? []).map(normalizeMarket),
-        });
-      })
-      .catch(() => setEvent(null))
-      .finally(() => setEventLoading(false));
+    let cancelled = false;
+
+    const fetchEvent = (isInitial: boolean) => {
+      fetch(`/api/event/${id}`)
+        .then((r) => r.json())
+        .then((data) => {
+          if (cancelled) return;
+          if (!data || data.error) { if (isInitial) setEvent(null); return; }
+          const parse = (v: any) => (typeof v === "string" ? JSON.parse(v) : v);
+          const markets = (data.markets ?? []).map(normalizeMarket);
+          setEvent({ ...data, tags: parse(data.tags) ?? [], markets });
+          // On subsequent polls, update the selected market's prices in-place
+          // so the trading panel always shows the latest bid without resetting state.
+          if (!isInitial) {
+            setSelectedMarket((prev) => {
+              if (!prev) return prev;
+              return markets.find((m: Market) => m.conditionId === prev.conditionId) ?? prev;
+            });
+          }
+        })
+        .catch(() => { if (isInitial) setEvent(null); })
+        .finally(() => { if (isInitial) setEventLoading(false); });
+    };
+
+    fetchEvent(true);
+    const timer = setInterval(() => fetchEvent(false), 30_000);
+    return () => { cancelled = true; clearInterval(timer); };
   }, [id]);
 
   // ── Auto-select top outcome on load (like Polymarket) ───────────────────────
