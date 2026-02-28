@@ -189,20 +189,19 @@ function lerp(pts: Array<{ t: number; p: number }>, t: number): number {
   const frac = (t - pts[lo].t) / (pts[hi].t - pts[lo].t);
   return pts[lo].p + frac * (pts[hi].p - pts[lo].p);
 }
-// Format probability like Polymarket: "<1%" for tiny values, one decimal otherwise
+/// Format probability like Polymarket: integer %, "<1%" for tiny, ">99%" for near-certain
 function fmtPct(p: number): string {
-  if (p < 0.005) return "<1%";
-  if (p < 0.995) return `${(p * 100).toFixed(1)}%`;
-  return "100%";
+  const pct = Math.round(p * 100);
+  if (pct < 1)  return "<1%";
+  if (pct > 99) return ">99%";
+  return `${pct}%`;
 }
-// Format price in cents — preserves decimals for sub-1¢ and near-100¢ values
+// Format price in cents — always 1 decimal like Polymarket (e.g. "92.4¢", "4.8¢", "0.4¢")
 function fmtCents(p: number): string {
   const c = p * 100;
-  if (c <= 0) return "0¢";
-  if (c >= 99.95) return "100¢";          // truly 100¢ (p = 1.0)
-  if (c >= 99) return `${c.toFixed(1)}¢`; // "99.6¢" — don't round up to 100
-  if (c >= 0.95) return `${Math.round(c)}¢`; // "8¢", "95¢"
-  return `${c.toFixed(1)}¢`;             // "0.4¢", "0.1¢"
+  if (c <= 0)    return "0¢";
+  if (c >= 99.95) return "100¢"; // caps true 100¢ (p = 1.0) cleanly
+  return `${c.toFixed(1)}¢`;    // always 1 decimal for everything else
 }
 function fmtXLabel(ts: number, iv: Interval): string {
   const d = new Date(ts * 1000);
