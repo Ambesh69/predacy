@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { clsx } from "clsx";
 import type { PolyEvent } from "@/lib/polymarket";
 import MiniSparkline from "@/components/MiniSparkline";
@@ -35,6 +36,7 @@ function outcomeLabel(question: string, groupItemTitle?: string): string {
 }
 
 export default function EventCard({ event, liveMarketIds }: EventCardProps) {
+  const router   = useRouter();
   const isMulti  = event.markets.length > 1;
   const isLive   = event.markets.some((m) => liveMarketIds.has(m.conditionId.toLowerCase()));
   const volume   = event.volumeNum ?? parseFloat(event.volume ?? "0");
@@ -142,12 +144,18 @@ export default function EventCard({ event, liveMarketIds }: EventCardProps) {
   const hidden  = sorted.length - visible.length;
 
   return (
-    <div className={clsx(
-      "market-card border bg-surface flex flex-col h-full",
-      isLive ? "border-accent/40" : "border-border",
-    )}>
-      {/* Header — links to top-ranked outcome's market page */}
-      <Link href={`/market/${sorted[0].conditionId}`} className="block p-4 pb-2 hover:bg-white/[0.02] transition-colors cursor-crosshair">
+    // Clicking anywhere on the card navigates to the top-ranked outcome.
+    // Individual outcome row Links stop propagation so they go to their own market.
+    <div
+      className={clsx(
+        "market-card border bg-surface flex flex-col h-full cursor-crosshair",
+        isLive ? "border-accent/40" : "border-border",
+      )}
+      onClick={() => router.push(`/market/${sorted[0].conditionId}`)}
+      role="link"
+    >
+      {/* Header */}
+      <div className="p-4 pb-2">
         <div className="flex flex-col gap-2">
           <div className="flex items-center gap-2 flex-wrap">
             {isLive && (
@@ -169,7 +177,7 @@ export default function EventCard({ event, liveMarketIds }: EventCardProps) {
             {event.title}
           </h3>
         </div>
-      </Link>
+      </div>
 
       {/* Outcome rows */}
       <div className="flex flex-col flex-1 divide-y divide-border/40">
@@ -189,6 +197,7 @@ export default function EventCard({ event, liveMarketIds }: EventCardProps) {
             <Link
               key={market.conditionId}
               href={`/market/${market.conditionId}`}
+              onClick={(e) => e.stopPropagation()}
               className="flex items-center gap-3 px-4 py-2.5 hover:bg-white/[0.02] transition-colors cursor-crosshair group"
             >
               {/* Outcome name */}
