@@ -151,7 +151,7 @@ export default function EventCard({ event, liveMarketIds }: EventCardProps) {
         "market-card border bg-surface flex flex-col h-full cursor-crosshair",
         isLive ? "border-accent/40" : "border-border",
       )}
-      onClick={() => router.push(`/market/${sorted[0].conditionId}`)}
+      onClick={() => router.push(`/event/${event.id}`)}
       role="link"
     >
       {/* Header */}
