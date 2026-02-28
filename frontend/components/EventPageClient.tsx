@@ -152,7 +152,7 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
   const [loading, setLoading] = useState(true);
 
   const top4 = [...markets]
-    .sort((a, b) => (b.volumeNum ?? parseFloat(b.volume ?? "0")) - (a.volumeNum ?? parseFloat(a.volume ?? "0")))
+    .sort((a, b) => parseFloat(b.outcomePrices?.[0] ?? "0") - parseFloat(a.outcomePrices?.[0] ?? "0"))
     .filter((m) => !!getTokenId(m))
     .slice(0, 4);
 
@@ -573,7 +573,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   }
 
   const sorted  = [...event.markets].sort(
-    (a, b) => (b.volumeNum ?? parseFloat(b.volume ?? "0")) - (a.volumeNum ?? parseFloat(a.volume ?? "0")),
+    (a, b) => parseFloat(b.outcomePrices?.[0] ?? "0") - parseFloat(a.outcomePrices?.[0] ?? "0"),
   );
   const volume  = event.volumeNum ?? parseFloat(event.volume ?? "0");
   const selYesPrice = selectedMarket ? parseFloat(selectedMarket.outcomePrices?.[0] ?? "0") : 0;
