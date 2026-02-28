@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, useEffect, use } from "react";
+import dynamic from "next/dynamic";
+import type { LivelineSeries } from "liveline";
 import Link from "next/link";
 import { clsx } from "clsx";
 import {
@@ -146,14 +148,8 @@ async function findBestProvider(): Promise<{ provider: any; name: string }> {
   return { provider: eth, name: eth.isMetaMask ? "MetaMask" : eth.isBackpack ? "Backpack" : "Wallet" };
 }
 
-// ── Multi-outcome chart (improved: auto-scale Y, real date x-axis) ───────────
+// ── Multi-outcome chart (liveline — canvas, cursor scrub) ────────────────────
 const OUTCOME_COLORS = ["#00FFB3", "#4D83FF", "#FFB800", "#FF6B35"];
-
-const W   = 600;
-const H   = 130;
-const PAD = { t: 10, r: 52, b: 24, l: 40 };
-const CW  = W - PAD.l - PAD.r;
-const CH  = H - PAD.t - PAD.b;
 
 type Interval = "6h" | "1d" | "1w" | "max";
 const INTERVALS: { label: string; value: Interval; fidelity: number }[] = [
@@ -162,33 +158,23 @@ const INTERVALS: { label: string; value: Interval; fidelity: number }[] = [
   { label: "1W",  value: "1w",  fidelity: 240  },
   { label: "ALL", value: "max", fidelity: 1440 },
 ];
+const INTERVAL_SECS: Record<Interval, number> = {
+  "6h":  6 * 3600,
+  "1d":  24 * 3600,
+  "1w":  7 * 24 * 3600,
+  "max": 365 * 24 * 3600,
+};
 
-interface ChartLine { name: string; color: string; pts: Array<{ t: number; p: number }>; }
-
-function smoothPath(pts: { x: number; y: number }[]): string {
-  if (pts.length < 2) return "";
-  let d = `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`;
-  for (let i = 1; i < pts.length; i++) {
-    const p0 = pts[i - 1], p1 = pts[i];
-    const cx = ((p0.x + p1.x) / 2).toFixed(1);
-    d += ` C ${cx} ${p0.y.toFixed(1)}, ${cx} ${p1.y.toFixed(1)}, ${p1.x.toFixed(1)} ${p1.y.toFixed(1)}`;
-  }
-  return d;
-}
-function downsample(pts: Array<{ t: number; p: number }>, max = 150) {
-  if (pts.length <= max) return pts;
-  const step = Math.ceil(pts.length / max);
-  return pts.filter((_, i) => i % step === 0 || i === pts.length - 1);
-}
-function fmtXLabel(ts: number, iv: Interval): string {
-  const d = new Date(ts * 1000);
-  if (iv === "6h" || iv === "1d") return d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-}
+// liveline uses Unix seconds for `time`. data[].time = p.t (already seconds).
+// Dynamic import avoids SSR canvas errors.
+const LivelineComp = dynamic(
+  () => import("liveline").then((m) => ({ default: m.Liveline })),
+  { ssr: false },
+);
 
 function MultiOutcomeChart({ markets }: { markets: Market[] }) {
   const [iv, setIv]           = useState<Interval>("1d");
-  const [lines, setLines]     = useState<ChartLine[]>([]);
+  const [series, setSeries]   = useState<LivelineSeries[]>([]);
   const [loading, setLoading] = useState(true);
 
   const top4 = filterAndDeduplicateMarkets(markets)
@@ -206,62 +192,56 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
       top4.map((m, idx) =>
         fetch(`/api/prices?token_id=${encodeURIComponent(getTokenId(m)!)}&interval=${iv}&fidelity=${fidelity}`)
           .then((r) => r.json())
-          .then((d) => ({
-            name:  outcomeLabel(m),
+          .then((d): LivelineSeries => {
+            const history = (d.history ?? []).filter(
+              (p: any) => typeof p.p === "number" && p.p > 0,
+            ) as Array<{ t: number; p: number }>;
+            return {
+              id:    m.conditionId,
+              // liveline time = Unix seconds (same as p.t)
+              data:  history.map((p) => ({ time: p.t, value: p.p })),
+              value: parseFloat(m.outcomePrices?.[0] ?? "0"),
+              color: OUTCOME_COLORS[idx],
+              label: outcomeLabel(m),
+            };
+          })
+          .catch((): LivelineSeries => ({
+            id:    m.conditionId,
+            data:  [],
+            value: parseFloat(m.outcomePrices?.[0] ?? "0"),
             color: OUTCOME_COLORS[idx],
-            pts:   (d.history ?? []).filter((p: any) => typeof p.p === "number" && p.p > 0),
-          }))
-          .catch(() => ({ name: outcomeLabel(m), color: OUTCOME_COLORS[idx], pts: [] })),
+            label: outcomeLabel(m),
+          })),
       ),
     )
-      .then((results) => setLines(results.filter((r) => r.pts.length >= 2)))
+      .then(setSeries)
       .finally(() => setLoading(false));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [iv, marketKey]);
 
-  const hasData = lines.some((l) => l.pts.length >= 2);
+  const hasData   = series.some((s) => s.data.length >= 2);
+  const firstData = series[0]?.data ?? [];
+  const firstVal  = series[0]?.value ?? 0;
 
-  // ── Auto-scale Y to actual price range ──────────────────────────────────────
-  const allPrices = lines.flatMap((l) => l.pts.map((p) => p.p));
-  const rawMin    = hasData ? Math.min(...allPrices) : 0;
-  const rawMax    = hasData ? Math.max(...allPrices) : 1;
-  const pad       = Math.max((rawMax - rawMin) * 0.12, 0.04);
-  const chartMin  = Math.max(0, rawMin - pad);
-  const chartMax  = Math.min(1, rawMax + pad);
-  const chartRange = chartMax - chartMin || 1;
-
-  const allT  = lines.flatMap((l) => l.pts.map((p) => p.t));
-  const minT  = hasData ? Math.min(...allT) : 0;
-  const maxT  = hasData ? Math.max(...allT) : 1;
-  const timeRange = maxT - minT || 1;
-
-  const toX = (t: number)  => PAD.l + ((t - minT) / timeRange) * CW;
-  const toY = (p: number)  => PAD.t + (1 - (Math.max(chartMin, Math.min(chartMax, p)) - chartMin) / chartRange) * CH;
-
-  // Y-axis grid lines at nice rounded values
-  const ySteps = 5;
-  const yGrid: number[] = [];
-  for (let i = 0; i <= ySteps; i++) {
-    const v = chartMin + (i / ySteps) * chartRange;
-    yGrid.push(Math.round(v * 100) / 100);
-  }
-  // X-axis ticks at 4 positions
-  const xTicks = [0.2, 0.4, 0.6, 0.8].map((f) => ({ t: minT + f * timeRange, x: PAD.l + f * CW }));
-
-  const MUTED = "#42425A";
-  const MONO  = "var(--font-mono)";
+  // Format scrub time label (liveline passes Unix seconds)
+  const fmtTime = (t: number) => {
+    const d = new Date(t * 1000);
+    if (iv === "6h" || iv === "1d")
+      return d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
+    return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  };
 
   return (
     <div className="border-b border-border">
       {/* Legend + interval selector */}
       <div className="flex items-center justify-between px-4 py-2.5 gap-2">
         <div className="flex items-center gap-4 flex-wrap min-w-0">
-          {(hasData ? lines : top4.slice(0, 4).map((m, i) => ({ name: outcomeLabel(m), color: OUTCOME_COLORS[i] }))).map(
-            (l, i) => (
+          {(series.length > 0 ? series : top4.slice(0, 4).map((m, i) => ({ label: outcomeLabel(m), color: OUTCOME_COLORS[i] }))).map(
+            (s, i) => (
               <div key={i} className="flex items-center gap-1.5 min-w-0">
-                <div className="w-4 h-px flex-shrink-0" style={{ backgroundColor: l.color }} />
-                <span className="text-[10px] tracking-widest uppercase truncate max-w-[100px]" style={{ color: l.color }}>
-                  {l.name}
+                <div className="w-4 h-px flex-shrink-0" style={{ backgroundColor: s.color }} />
+                <span className="text-[10px] tracking-widest uppercase truncate max-w-[100px]" style={{ color: s.color }}>
+                  {s.label}
                 </span>
               </div>
             ),
@@ -284,64 +264,33 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
         </div>
       </div>
 
-      {/* SVG */}
-      <div className="px-2 pb-2">
-        <svg viewBox={`0 0 ${W} ${H}`} width="100%" style={{ display: "block" }}>
-          {/* Y-axis grid + labels */}
-          {yGrid.map((v) => {
-            const y = toY(v);
-            return (
-              <g key={v}>
-                <line x1={PAD.l} y1={y.toFixed(1)} x2={W - PAD.r} y2={y.toFixed(1)} stroke="#13131F" strokeWidth="1" />
-                <text x={(PAD.l - 6).toFixed(1)} y={(y + 3.5).toFixed(1)} fill={MUTED} fontSize="8" fontFamily={MONO} textAnchor="end">
-                  {Math.round(v * 100)}%
-                </text>
-              </g>
-            );
-          })}
-
-          {/* No data */}
-          {!hasData && !loading && (
-            <text x={(W / 2).toFixed(1)} y={(H / 2 + 4).toFixed(1)} fill={MUTED} fontSize="10" fontFamily={MONO} textAnchor="middle">
-              NO PRICE HISTORY
-            </text>
-          )}
-
-          {/* Price lines */}
-          {lines.map((line, i) => {
-            const ds     = downsample(line.pts);
-            const svgPts = ds.map((d) => ({ x: toX(d.t), y: toY(d.p) }));
-            const path   = smoothPath(svgPts);
-            const lastPt = svgPts[svgPts.length - 1];
-            const lastP  = ds[ds.length - 1]?.p ?? 0;
-
-            return (
-              <g key={i}>
-                <path d={path} fill="none" stroke={line.color}
-                  strokeWidth={i === 0 ? "2" : "1.5"} strokeLinejoin="round" strokeLinecap="round"
-                  strokeOpacity={i === 0 ? 1 : 0.8} />
-                {lastPt && (
-                  <>
-                    <line x1={lastPt.x.toFixed(1)} y1={lastPt.y.toFixed(1)}
-                      x2={(W - PAD.r + 4).toFixed(1)} y2={lastPt.y.toFixed(1)}
-                      stroke={line.color} strokeWidth="0.75" strokeDasharray="2,3" strokeOpacity="0.5" />
-                    <circle cx={lastPt.x.toFixed(1)} cy={lastPt.y.toFixed(1)} r="2.5" fill={line.color} />
-                    <text x={(W - PAD.r + 8).toFixed(1)} y={(lastPt.y + 4).toFixed(1)} fill={line.color} fontSize="11" fontFamily={MONO}>
-                      {Math.round(lastP * 100)}%
-                    </text>
-                  </>
-                )}
-              </g>
-            );
-          })}
-
-          {/* X-axis ticks */}
-          {hasData && xTicks.map(({ t, x }, i) => (
-            <text key={i} x={x.toFixed(1)} y={(H - 5).toFixed(1)} fill={MUTED} fontSize="8" fontFamily={MONO} textAnchor="middle">
-              {fmtXLabel(t, iv)}
-            </text>
-          ))}
-        </svg>
+      {/* Chart — fixed height, liveline fills container */}
+      <div className="h-[130px] px-1 pb-1">
+        {loading ? (
+          <div className="h-full flex items-center justify-center">
+            <div className="w-3 h-3 border border-muted/40 border-t-transparent rounded-full animate-spin" />
+          </div>
+        ) : !hasData ? (
+          <div className="h-full flex items-center justify-center">
+            <span className="text-[10px] text-muted-dim tracking-widest font-mono">NO PRICE HISTORY</span>
+          </div>
+        ) : (
+          <LivelineComp
+            data={firstData}
+            value={firstVal}
+            series={series}
+            window={INTERVAL_SECS[iv]}
+            theme="dark"
+            scrub
+            grid
+            badge={false}
+            pulse={false}
+            fill={false}
+            momentum={false}
+            formatValue={(v: number) => `${Math.round(v * 100)}%`}
+            formatTime={fmtTime}
+          />
+        )}
       </div>
     </div>
   );
