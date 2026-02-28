@@ -196,7 +196,7 @@ export default function EventCard({ event, liveMarketIds }: EventCardProps) {
           return (
             <Link
               key={market.conditionId}
-              href={`/market/${market.conditionId}`}
+              href={`/event/${event.id}`}
               onClick={(e) => e.stopPropagation()}
               className="flex items-center gap-3 px-4 py-2.5 hover:bg-white/[0.02] transition-colors cursor-crosshair group"
             >
