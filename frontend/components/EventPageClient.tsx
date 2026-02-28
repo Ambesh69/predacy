@@ -12,6 +12,12 @@ import BatchTimer from "@/components/BatchTimer";
 import OrderForm from "@/components/OrderForm";
 import type { Market } from "@/lib/polymarket";
 import {
+  filterAndDeduplicateMarkets,
+  outcomeLabel,
+  fmtPct,
+  fmtCents,
+} from "@/lib/marketUtils";
+import {
   BATCH_VAULT_ABI, CTF_ABI, ERC20_ABI, MOCK_USDC_ABI,
   BatchStatus, getContracts,
 } from "@/lib/contracts";
@@ -64,14 +70,7 @@ function normalizeMarket(m: any): Market {
     clobTokenIds:  parseField(m.clobTokenIds)  ?? [],
   };
 }
-function outcomeLabel(m: Market): string {
-  if (m.groupItemTitle) return m.groupItemTitle;
-  return m.question
-    .replace(/^Will\s+/i, "")
-    .replace(/\s+as\s+the\s+next\s+.*\?$/i, "?")
-    .replace(/\s+win\s+.*\?$/i, "?")
-    .replace(/\s+become\s+.*\?$/i, "?");
-}
+
 // Resolves the YES token ID for CLOB price-history fetches.
 // The Gamma events endpoint sometimes omits clobTokenIds but always populates
 // tokens[{ token_id }], so we fall back to tokens[0].token_id.
@@ -79,45 +78,6 @@ function getTokenId(m: Market): string | undefined {
   return m.clobTokenIds?.[0] ?? m.tokens?.[0]?.token_id;
 }
 
-// ── Deduplicate + filter phantom markets ─────────────────────────────────────
-// Polymarket's events endpoint can return:
-//   • Anonymous placeholder slots — "Individual T", "Individual P", etc.
-//     created as future-nomination buckets with no price or volume.
-//   • Duplicate entries for the same person (e.g. two "Rick Rieder" markets
-//     with different conditionIds). We keep the one with the higher volume.
-const ANON_PLACEHOLDER = /^Individual\s+[A-Z]$/i;
-
-function filterAndDeduplicateMarkets(markets: Market[]): Market[] {
-  // Step 1 — remove phantom placeholders
-  const active = markets.filter((m) => {
-    const label = (m.groupItemTitle ?? m.question ?? "").trim();
-    if (ANON_PLACEHOLDER.test(label)) return false;
-    // Also drop markets with literally no price AND no volume (pure ghost slots)
-    const yp  = parseFloat(m.outcomePrices?.[0] ?? "0");
-    const np  = parseFloat(m.outcomePrices?.[1] ?? "0");
-    const vol = m.volumeNum || parseFloat(m.volume ?? "0");
-    if (yp === 0 && np === 0 && vol === 0) return false;
-    return true;
-  });
-
-  // Step 2 — deduplicate by groupItemTitle, keeping highest-volume entry
-  const seen = new Map<string, Market>();
-  for (const m of active) {
-    const key = outcomeLabel(m).trim().toLowerCase();
-    const prev = seen.get(key);
-    if (!prev) { seen.set(key, m); continue; }
-    const prevVol = prev.volumeNum || parseFloat(prev.volume ?? "0");
-    const curVol  = m.volumeNum    || parseFloat(m.volume    ?? "0");
-    // Prefer higher volume; break ties by higher YES probability
-    if (curVol > prevVol ||
-        (curVol === prevVol &&
-         parseFloat(m.outcomePrices?.[0] ?? "0") >
-         parseFloat(prev.outcomePrices?.[0] ?? "0"))) {
-      seen.set(key, m);
-    }
-  }
-  return Array.from(seen.values());
-}
 
 // ── EIP-6963 provider discovery (same as MarketPageClient) ───────────────────
 async function findBestProvider(): Promise<{ provider: any; name: string }> {
@@ -189,22 +149,7 @@ function lerp(pts: Array<{ t: number; p: number }>, t: number): number {
   const frac = (t - pts[lo].t) / (pts[hi].t - pts[lo].t);
   return pts[lo].p + frac * (pts[hi].p - pts[lo].p);
 }
-// Format probability like Polymarket: integer %, "<1%" for tiny, ">99%" for near-certain
-// Gamma API can return negative or NaN prices for illiquid markets — clamp defensively.
-function fmtPct(p: number): string {
-  if (!isFinite(p) || p <= 0) return "<1%";
-  const pct = Math.round(p * 100);
-  if (pct < 1)  return "<1%";
-  if (pct > 99) return ">99%";
-  return `${pct}%`;
-}
-// Format price in cents — always 1 decimal like Polymarket (e.g. "92.4¢", "4.8¢", "0.4¢")
-function fmtCents(p: number): string {
-  const c = p * 100;
-  if (c <= 0)    return "0¢";
-  if (c >= 99.95) return "100¢"; // caps true 100¢ (p = 1.0) cleanly
-  return `${c.toFixed(1)}¢`;    // always 1 decimal for everything else
-}
+
 function fmtXLabel(ts: number, iv: Interval): string {
   const d = new Date(ts * 1000);
   if (iv === "6h" || iv === "1d")

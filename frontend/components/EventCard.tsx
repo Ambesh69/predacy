@@ -5,6 +5,12 @@ import { useRouter } from "next/navigation";
 import { clsx } from "clsx";
 import type { PolyEvent } from "@/lib/polymarket";
 import MiniSparkline from "@/components/MiniSparkline";
+import {
+  filterAndDeduplicateMarkets,
+  outcomeLabel,
+  fmtPct,
+  fmtCents,
+} from "@/lib/marketUtils";
 
 interface EventCardProps {
   event: PolyEvent;
@@ -24,17 +30,6 @@ function formatDate(dateStr: string): string {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "2-digit" });
 }
 
-// For multi-outcome events: the label shown per outcome row
-function outcomeLabel(question: string, groupItemTitle?: string): string {
-  if (groupItemTitle) return groupItemTitle;
-  // Strip common binary-question prefixes to get a short name
-  return question
-    .replace(/^Will\s+/i, "")
-    .replace(/\s+as\s+the\s+next\s+.*\?$/i, "?")
-    .replace(/\s+win\s+.*\?$/i, "?")
-    .replace(/\s+become\s+.*\?$/i, "?");
-}
-
 export default function EventCard({ event, liveMarketIds }: EventCardProps) {
   const router   = useRouter();
   const isMulti  = event.markets.length > 1;
@@ -43,16 +38,17 @@ export default function EventCard({ event, liveMarketIds }: EventCardProps) {
   const endDate  = event.endDate ?? event.markets[0]?.endDate;
   const category = event.category ?? event.markets[0]?.category;
 
-  // ── Single-outcome binary card (same look as old MarketCard) ─────────────
+  // ── Single-outcome binary card ─────────────────────────────────────────────
   if (!isMulti) {
     const market   = event.markets[0];
     if (!market) return null;
     const yesPrice = parseFloat(market.outcomePrices?.[0] ?? "0");
-    const noPrice  = parseFloat(market.outcomePrices?.[1] ?? "0");
-    const yesProb  = Math.round(yesPrice * 100);
+    const noRaw    = parseFloat(market.outcomePrices?.[1] ?? "0");
+    // Invert near-1.0 NO prices (Gamma API returns "1" for illiquid markets)
+    const noDisplay = noRaw >= 0.999 ? (1 - noRaw) : noRaw;
     const probColor =
-      yesProb > 60 ? "#00FFB3" :
-      yesProb < 40 ? "#FF3355" :
+      yesPrice > 0.6 ? "#00FFB3" :
+      yesPrice < 0.4 ? "#FF3355" :
       "#4D83FF";
 
     return (
@@ -84,23 +80,23 @@ export default function EventCard({ event, liveMarketIds }: EventCardProps) {
             {event.title || market.question}
           </h3>
 
-          {/* probability + pills */}
+          {/* probability + chips */}
           <div className="flex items-end justify-between gap-3">
             <div className="flex items-baseline gap-1">
               <span className="text-3xl font-black tabular-nums leading-none"
                 style={{ fontFamily: "var(--font-display)", color: probColor }}>
-                {yesProb}%
+                {fmtPct(yesPrice)}
               </span>
               <span className="text-[10px] text-muted tracking-widest uppercase">chance</span>
             </div>
             <div className="flex items-center gap-1.5">
               <span className="text-[11px] px-2 py-1 border font-mono tabular-nums"
                 style={{ borderColor: "#00FFB340", color: "#00FFB3", background: "#00FFB308" }}>
-                YES {Math.round(yesPrice * 100)}¢
+                YES {fmtCents(yesPrice)}
               </span>
               <span className="text-[11px] px-2 py-1 border font-mono tabular-nums"
                 style={{ borderColor: "#FF335540", color: "#FF3355", background: "#FF335508" }}>
-                NO {Math.round(noPrice * 100)}¢
+                NO {fmtCents(noDisplay)}
               </span>
             </div>
           </div>
@@ -108,7 +104,7 @@ export default function EventCard({ event, liveMarketIds }: EventCardProps) {
           {/* prob bar */}
           <div className="h-[2px] bg-border rounded-full overflow-hidden">
             <div className="h-full transition-all duration-500"
-              style={{ width: `${yesProb}%`, background: probColor }} />
+              style={{ width: `${Math.max(Math.round(yesPrice * 100), 1)}%`, background: probColor }} />
           </div>
 
           {/* Mini sparkline — 1D price trend + delta */}
@@ -132,20 +128,21 @@ export default function EventCard({ event, liveMarketIds }: EventCardProps) {
   }
 
   // ── Multi-outcome event card ───────────────────────────────────────────────
-  // Sort outcomes by YES price descending (most likely first)
-  const sorted = [...event.markets].sort((a, b) => {
+  // Filter out phantom placeholders and deduplicate same-person entries FIRST,
+  // then sort by YES price. This ensures the card and the event detail page
+  // show exactly the same set of outcomes.
+  const filtered = filterAndDeduplicateMarkets(event.markets);
+  const sorted   = [...filtered].sort((a, b) => {
     const pa = parseFloat(a.outcomePrices?.[0] ?? "0");
     const pb = parseFloat(b.outcomePrices?.[0] ?? "0");
     return pb - pa;
   });
 
-  // Show top 4 outcomes; hide the rest
+  // Show top 4 real outcomes; "+N more" count is from the filtered set
   const visible = sorted.slice(0, 4);
   const hidden  = sorted.length - visible.length;
 
   return (
-    // Clicking anywhere on the card navigates to the top-ranked outcome.
-    // Individual outcome row Links stop propagation so they go to their own market.
     <div
       className={clsx(
         "market-card border bg-surface flex flex-col h-full cursor-crosshair",
@@ -182,16 +179,12 @@ export default function EventCard({ event, liveMarketIds }: EventCardProps) {
       {/* Outcome rows */}
       <div className="flex flex-col flex-1 divide-y divide-border/40">
         {visible.map((market) => {
-          const yesPrice = parseFloat(market.outcomePrices?.[0] ?? "0");
-          const yesProb  = Math.round(yesPrice * 100);
+          const yesPrice     = parseFloat(market.outcomePrices?.[0] ?? "0");
           const isMarketLive = liveMarketIds.has(market.conditionId.toLowerCase());
-
           const barColor =
-            yesProb > 60 ? "#00FFB3" :
-            yesProb < 20 ? "#FF3355" :
+            yesPrice > 0.6 ? "#00FFB3" :
+            yesPrice < 0.2 ? "#FF3355" :
             "#4D83FF";
-
-          const label = outcomeLabel(market.question, market.groupItemTitle);
 
           return (
             <Link
@@ -202,14 +195,14 @@ export default function EventCard({ event, liveMarketIds }: EventCardProps) {
             >
               {/* Outcome name */}
               <span className="text-[12px] text-text/80 flex-1 truncate group-hover:text-text transition-colors">
-                {label}
+                {outcomeLabel(market)}
               </span>
 
               {/* Prob bar */}
               <div className="w-20 h-[3px] bg-border rounded-full overflow-hidden flex-shrink-0">
                 <div
                   className="h-full rounded-full transition-all duration-500"
-                  style={{ width: `${Math.max(yesProb, 1)}%`, background: barColor }}
+                  style={{ width: `${Math.max(Math.round(yesPrice * 100), 1)}%`, background: barColor }}
                 />
               </div>
 
@@ -218,7 +211,7 @@ export default function EventCard({ event, liveMarketIds }: EventCardProps) {
                 className="text-[12px] font-black tabular-nums w-8 text-right flex-shrink-0"
                 style={{ fontFamily: "var(--font-display)", color: barColor }}
               >
-                {yesProb}%
+                {fmtPct(yesPrice)}
               </span>
 
               {isMarketLive && (
@@ -240,7 +233,7 @@ export default function EventCard({ event, liveMarketIds }: EventCardProps) {
         <span className="text-[11px] text-muted">{formatVolume(volume)} vol</span>
         <div className="flex items-center gap-1">
           <svg className="w-3 h-3 text-muted-dim" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="square" strokeWidth={1.5} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+            <path strokeLinecap="square" strokeWidth={1.5} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
           </svg>
           <span className="text-[10px] text-muted-dim tracking-widest uppercase">dark pool</span>
         </div>
