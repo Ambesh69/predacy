@@ -210,15 +210,16 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
   const [loading, setLoading] = useState(true);
   const [hoverX, setHoverX]   = useState<number | null>(null); // SVG x coord
 
-  // The Gamma API already returns markets in all-time-volume order (most traded first).
-  // Re-sorting by local volume/price picks the wrong candidates (recent volume ≠ all-time).
-  // So: preserve API order for SELECTION (which 4 to show), then price-sort for DISPLAY order.
+  // Sort by current YES probability descending — this is exactly how Polymarket orders its
+  // chart outcomes: highest probability candidate first, then next, etc.
+  // The Gamma API's own market order is NOT by probability (it's internal/alphabetical),
+  // so we must sort ourselves. Judy Shelton at 4.5% should always rank above <1% candidates.
   const top4 = filterAndDeduplicateMarkets(markets)
     .filter((m) => !!getTokenId(m))
-    .slice(0, 4)                               // first 4 in API order = most relevant candidates
-    .sort((a, b) =>                            // sort selected 4 by current price for display
+    .sort((a, b) =>
       parseFloat(b.outcomePrices?.[0] ?? "0") - parseFloat(a.outcomePrices?.[0] ?? "0")
-    );
+    )
+    .slice(0, 4);
 
   const marketKey = top4.map((m) => getTokenId(m) ?? m.conditionId).join(",");
 
