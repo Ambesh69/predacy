@@ -210,16 +210,15 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
   const [loading, setLoading] = useState(true);
   const [hoverX, setHoverX]   = useState<number | null>(null); // SVG x coord
 
-  // Sort by volume (most traded = most relevant), matching Polymarket's chart outcome selection.
-  // Using price-sort would surface obscure low-volume outcomes over well-known ones.
+  // The Gamma API already returns markets in all-time-volume order (most traded first).
+  // Re-sorting by local volume/price picks the wrong candidates (recent volume ≠ all-time).
+  // So: preserve API order for SELECTION (which 4 to show), then price-sort for DISPLAY order.
   const top4 = filterAndDeduplicateMarkets(markets)
-    .sort((a, b) => {
-      const aVol = a.volumeNum || parseFloat(a.volume ?? "0");
-      const bVol = b.volumeNum || parseFloat(b.volume ?? "0");
-      return bVol - aVol;
-    })
     .filter((m) => !!getTokenId(m))
-    .slice(0, 4);
+    .slice(0, 4)                               // first 4 in API order = most relevant candidates
+    .sort((a, b) =>                            // sort selected 4 by current price for display
+      parseFloat(b.outcomePrices?.[0] ?? "0") - parseFloat(a.outcomePrices?.[0] ?? "0")
+    );
 
   const marketKey = top4.map((m) => getTokenId(m) ?? m.conditionId).join(",");
 
