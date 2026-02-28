@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { clsx } from "clsx";
 import type { PolyEvent } from "@/lib/polymarket";
+import MiniSparkline from "@/components/MiniSparkline";
 
 interface EventCardProps {
   event: PolyEvent;
@@ -107,6 +108,11 @@ export default function EventCard({ event, liveMarketIds }: EventCardProps) {
             <div className="h-full transition-all duration-500"
               style={{ width: `${yesProb}%`, background: probColor }} />
           </div>
+
+          {/* Mini sparkline — 1D price trend + delta */}
+          {market.clobTokenIds?.[0] && (
+            <MiniSparkline tokenId={market.clobTokenIds[0]} currentPrice={yesPrice} />
+          )}
 
           {/* volume + dark pool */}
           <div className="flex items-center justify-between pt-1">
