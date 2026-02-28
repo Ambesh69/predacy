@@ -347,6 +347,9 @@ const publicClient = createPublicClient({
   transport: http(baseConfig.rpcUrl, { retryCount: 3 }),
 });
 
+const BATCH_OPENED_EVENT = parseAbiItem(
+  "event BatchOpened(uint256 indexed batchId, bytes32 indexed marketId, uint256 openedAt)",
+);
 const BATCH_CLOSED_EVENT = parseAbiItem(
   "event BatchClosed(uint256 indexed batchId, uint256 commitmentCount)",
 );
@@ -660,7 +663,66 @@ async function recoverSettlingBatches() {
   }
 }
 
-// Startup: set fromBlock, recover SETTLING batches, pre-warm MARKET_ID if set, then begin polling
+// ── Startup recovery: re-register any markets with OPEN (but expired) batches ──
+// Scans BatchOpened events, removes those that have a BatchClosed, and re-adds
+// each remaining market to activeMarkets so the poll loop closes & settles them.
+// This means any market a user has ever traded is automatically recovered on
+// restart — no MARKET_ID env var or manual /warm call required.
+
+async function recoverOpenBatches() {
+  if (missingVars.length > 0) return;
+  console.log("[Relayer] Scanning for OPEN batches to recover...");
+  try {
+    const toBlock  = await publicClient.getBlockNumber();
+    const scanFrom = toBlock > 50_000n ? toBlock - 50_000n : 0n;
+
+    const [openedLogs, closedLogs] = await Promise.all([
+      publicClient.getLogs({ address: baseConfig.vaultAddress, event: BATCH_OPENED_EVENT, fromBlock: scanFrom, toBlock }),
+      publicClient.getLogs({ address: baseConfig.vaultAddress, event: BATCH_CLOSED_EVENT, fromBlock: scanFrom, toBlock }),
+    ]);
+
+    const closedIds = new Set(closedLogs.map((l) => (l.args.batchId as bigint).toString()));
+    // Keep only batches that were opened but never closed = still OPEN
+    const stillOpen = openedLogs.filter((l) => !closedIds.has((l.args.batchId as bigint).toString()));
+
+    if (stillOpen.length === 0) {
+      console.log("[Relayer] No OPEN batches to recover");
+      return;
+    }
+
+    console.log(`[Relayer] Found ${stillOpen.length} OPEN batch(es) to recover`);
+    for (const log of stillOpen) {
+      const batchId  = log.args.batchId  as bigint;
+      const marketId = log.args.marketId as `0x${string}`;
+      const key      = marketId.toLowerCase();
+
+      if (activeMarkets.has(key)) continue; // already tracked (e.g. by recoverSettlingBatches)
+
+      // Confirm on-chain status is still OPEN (0)
+      const batchInfo = await publicClient.readContract({
+        address:      baseConfig.vaultAddress,
+        abi:          BATCH_VAULT_ABI,
+        functionName: "getBatch",
+        args:         [batchId],
+      }) as { status: number };
+
+      if (batchInfo.status !== 0 /* OPEN */) {
+        console.log(`[Relayer] Batch ${batchId} status=${batchInfo.status} — skipping`);
+        continue;
+      }
+
+      const state = createMarketState(marketId);
+      state.currentBatchId = batchId;
+      activeMarkets.set(key, state);
+      batchToMarket.set(batchId.toString(), key);
+      console.log(`[Relayer] Recovered OPEN batch ${batchId} for market ${marketId}`);
+    }
+  } catch (err) {
+    console.error("[Relayer] recoverOpenBatches failed:", err);
+  }
+}
+
+// Startup: set fromBlock, recover SETTLING + OPEN batches, pre-warm MARKET_ID if set, then begin polling
 (async () => {
   try {
     fromBlock = await publicClient.getBlockNumber();
@@ -669,6 +731,7 @@ async function recoverSettlingBatches() {
   }
 
   await recoverSettlingBatches();
+  await recoverOpenBatches();
 
   if (missingVars.length === 0 && PRE_WARM_MARKET_ID) {
     console.log(`[Relayer] Pre-warming market ${PRE_WARM_MARKET_ID} (MARKET_ID env var)`);
