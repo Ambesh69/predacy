@@ -146,28 +146,30 @@ export default function EventCard({ event, liveMarketIds }: EventCardProps) {
       "market-card border bg-surface flex flex-col h-full",
       isLive ? "border-accent/40" : "border-border",
     )}>
-      {/* Header */}
-      <div className="p-4 pb-2 flex flex-col gap-2">
-        <div className="flex items-center gap-2 flex-wrap">
-          {isLive && (
-            <span className="flex items-center gap-1 text-[10px] text-accent tracking-widest uppercase border border-accent/30 px-2 py-0.5 bg-accent/5">
-              <span className="w-1 h-1 rounded-full bg-accent animate-pulse inline-block" />
-              LIVE
-            </span>
-          )}
-          {category && (
-            <span className="text-[10px] text-muted tracking-widest uppercase border border-border px-2 py-0.5">
-              {category}
-            </span>
-          )}
-          {endDate && (
-            <span className="text-[10px] text-muted ml-auto">Ends {formatDate(endDate)}</span>
-          )}
+      {/* Header — links to top-ranked outcome's market page */}
+      <Link href={`/market/${sorted[0].conditionId}`} className="block p-4 pb-2 hover:bg-white/[0.02] transition-colors cursor-crosshair">
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            {isLive && (
+              <span className="flex items-center gap-1 text-[10px] text-accent tracking-widest uppercase border border-accent/30 px-2 py-0.5 bg-accent/5">
+                <span className="w-1 h-1 rounded-full bg-accent animate-pulse inline-block" />
+                LIVE
+              </span>
+            )}
+            {category && (
+              <span className="text-[10px] text-muted tracking-widest uppercase border border-border px-2 py-0.5">
+                {category}
+              </span>
+            )}
+            {endDate && (
+              <span className="text-[10px] text-muted ml-auto">Ends {formatDate(endDate)}</span>
+            )}
+          </div>
+          <h3 className="text-text text-sm font-medium leading-snug line-clamp-2">
+            {event.title}
+          </h3>
         </div>
-        <h3 className="text-text text-sm font-medium leading-snug line-clamp-2">
-          {event.title}
-        </h3>
-      </div>
+      </Link>
 
       {/* Outcome rows */}
       <div className="flex flex-col flex-1 divide-y divide-border/40">
