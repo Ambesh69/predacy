@@ -168,8 +168,15 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
 
   // ── Load market ─────────────────────────────────────────────────────────────
   useEffect(() => {
+    // 1. Mock fallback (dev)
     const found = MOCK_MARKETS.find((m) => m.conditionId === id);
     if (found) { setMarket(found); setLoading(false); return; }
+    // 2. sessionStorage cache — set by event page when navigating here directly
+    try {
+      const cached = sessionStorage.getItem(`predacy:market:${id}`);
+      if (cached) { setMarket(JSON.parse(cached)); setLoading(false); return; }
+    } catch { /* ignore */ }
+    // 3. Gamma API lookup
     getMarket(id)
       .then((m) => setMarket(m))
       .catch(() => setMarket(null))
