@@ -282,9 +282,10 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
             const liveP = l.pts[l.pts.length - 1]?.p ?? 0;
             const dispP = (inPlot && hoverT) ? lerp(l.pts, hoverT) : liveP;
             return (
-              <div key={i} className="flex items-center gap-1 flex-shrink-0">
+              <div key={i} className="flex items-center gap-1.5 flex-shrink-0">
                 <div className="w-3 h-[2px] flex-shrink-0" style={{ background: l.color }} />
-                <span className="text-[10px] font-mono tabular-nums" style={{ color: l.color }}>
+                <span className="text-[10px] truncate max-w-[90px]" style={{ color: l.color }}>{l.name}</span>
+                <span className="text-[10px] font-mono tabular-nums opacity-90" style={{ color: l.color }}>
                   {Math.round(dispP * 100)}%
                 </span>
               </div>
