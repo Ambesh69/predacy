@@ -546,6 +546,14 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     return () => { cancelled = true; clearInterval(iv); };
   }, [selectedMarket?.conditionId]);
 
+  // Auto-switch to My Positions when the batch settles so the user sees the
+  // claim button immediately without having to refresh or click a tab.
+  useEffect(() => {
+    if (batch.status === BatchStatus.SETTLED && isConnected) {
+      setActiveTab("positions");
+    }
+  }, [batch.status, isConnected]);
+
   // ── Chain switching ──────────────────────────────────────────────────────────
   const ensureAmoy = async () => {
     if (!walletAddress) throw new Error("Wallet not connected");
@@ -1006,8 +1014,28 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                     </div>
                   )}
 
+                  {/* Settled nudge — shown on Order tab after batch settles (e.g. post-refresh) */}
+                  {!orderSealed && batch.status === BatchStatus.SETTLED && (
+                    <div className="px-4 py-4 border-b border-border">
+                      <div className="border border-accent/20 bg-accent/5 p-3 space-y-2">
+                        <p className="text-[11px] text-accent tracking-widest uppercase">Batch Settled</p>
+                        <p className="text-[11px] text-muted-dim">
+                          This batch has cleared at {batch.clearingPrice > 0n
+                            ? `${(Number(batch.clearingPrice) / 1e6 * 100).toFixed(1)}¢`
+                            : "no cross"}.
+                        </p>
+                        <button
+                          onClick={() => setActiveTab("positions")}
+                          className="text-[10px] text-accent tracking-widest uppercase hover:underline"
+                        >
+                          VIEW MY POSITIONS →
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Order form */}
-                  {!orderSealed && (
+                  {!orderSealed && batch.status !== BatchStatus.SETTLED && (
                     <div className="px-4 py-3">
                       {submitStep && (
                         <div className="mb-3 flex items-center gap-2 text-[11px] text-muted">
