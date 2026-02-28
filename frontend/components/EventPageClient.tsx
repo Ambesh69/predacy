@@ -189,6 +189,12 @@ function lerp(pts: Array<{ t: number; p: number }>, t: number): number {
   const frac = (t - pts[lo].t) / (pts[hi].t - pts[lo].t);
   return pts[lo].p + frac * (pts[hi].p - pts[lo].p);
 }
+// Format probability like Polymarket: "<1%" for tiny values, one decimal otherwise
+function fmtPct(p: number): string {
+  if (p < 0.005) return "<1%";
+  if (p < 0.995) return `${(p * 100).toFixed(1)}%`;
+  return "100%";
+}
 function fmtXLabel(ts: number, iv: Interval): string {
   const d = new Date(ts * 1000);
   if (iv === "6h" || iv === "1d")
@@ -309,10 +315,10 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
             const dispP = (inPlot && hoverT) ? lerp(l.pts, hoverT) : liveP;
             return (
               <div key={i} className="flex items-center gap-1.5 flex-shrink-0">
-                <div className="w-3 h-[2px] flex-shrink-0" style={{ background: l.color }} />
-                <span className="text-[10px] truncate max-w-[90px]" style={{ color: l.color }}>{l.name}</span>
-                <span className="text-[10px] font-mono tabular-nums opacity-90" style={{ color: l.color }}>
-                  {Math.round(dispP * 100)}%
+                <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: l.color }} />
+                <span className="text-[11px] text-text/70 truncate max-w-[160px]">{l.name}</span>
+                <span className="text-[11px] font-bold tabular-nums" style={{ color: l.color }}>
+                  {fmtPct(dispP)}
                 </span>
               </div>
             );
@@ -374,8 +380,17 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
                     strokeWidth={i === 0 ? "2" : "1.5"} strokeLinejoin="round" strokeLinecap="round"
                     opacity={i === 0 ? 1 : 0.85} />
                   {last && !inPlot && (
-                    <circle cx={last.x.toFixed(1)} cy={last.y.toFixed(1)} r="3"
-                      fill={line.color} stroke="#0D0D1A" strokeWidth="1.5" />
+                    <g>
+                      {/* Pulsating outer ring */}
+                      <circle cx={last.x.toFixed(1)} cy={last.y.toFixed(1)} r="3"
+                        fill="none" stroke={line.color} strokeWidth="1.5">
+                        <animate attributeName="r" from="3" to="9" dur="1.8s" repeatCount="indefinite" />
+                        <animate attributeName="stroke-opacity" from="0.7" to="0" dur="1.8s" repeatCount="indefinite" />
+                      </circle>
+                      {/* Solid inner dot */}
+                      <circle cx={last.x.toFixed(1)} cy={last.y.toFixed(1)} r="3"
+                        fill={line.color} stroke="#0D0D1A" strokeWidth="1.5" />
+                    </g>
                   )}
                 </g>
               );
@@ -400,7 +415,7 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
                         <text x={lx.toFixed(1)} y={(cy - 5).toFixed(1)}
                           fill={line.color} fontSize="11" fontFamily={MONO} textAnchor={anc}
                           style={{ fontWeight: 600 }}>
-                          {Math.round(p * 100)}%
+                          {fmtPct(p)}
                         </text>
                       </g>
                     );
