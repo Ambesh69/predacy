@@ -256,8 +256,34 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
 
   // Y-axis ticks: all quarter-marks within the visible range
   const Y_TICKS = [0, 0.25, 0.5, 0.75, 1.0].filter((v) => v >= yMin - 0.01 && v <= yMax + 0.01);
-  // X-axis ticks: 4 evenly distributed labels
-  const X_TICKS = [0.15, 0.38, 0.62, 0.85].map((f) => ({ t: minT + f * tRange, x: PAD.l + f * CW }));
+
+  // X-axis ticks: calendar month/day boundaries so no month is ever skipped
+  const X_TICKS = (() => {
+    if (!hasData) return [] as { t: number; x: number }[];
+    if (iv === "6h" || iv === "1d") {
+      // Evenly-spaced for short ranges
+      return [0.15, 0.38, 0.62, 0.85].map((f) => ({ t: minT + f * tRange, x: PAD.l + f * CW }));
+    }
+    const ticks: { t: number; x: number }[] = [];
+    const start = new Date(minT * 1000);
+    // Advance to first calendar boundary after minT
+    const cur = iv === "1w"
+      ? new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate() + 1))
+      : new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1));
+    while (cur.getTime() / 1000 <= maxT) {
+      const t = cur.getTime() / 1000;
+      const x = toX(t);
+      if (x > PAD.l + 20 && x < PAD.l + CW - 20) ticks.push({ t, x });
+      if (iv === "1w") cur.setUTCDate(cur.getUTCDate() + 1);
+      else cur.setUTCMonth(cur.getUTCMonth() + 1);
+    }
+    // Thin out if more than 7 labels
+    if (ticks.length > 7) {
+      const step = Math.ceil(ticks.length / 6);
+      return ticks.filter((_, i) => i % step === 0);
+    }
+    return ticks.length >= 2 ? ticks : [0.15, 0.38, 0.62, 0.85].map((f) => ({ t: minT + f * tRange, x: PAD.l + f * CW }));
+  })();
 
   // Hover timestamp
   const inPlot = hoverX !== null && hoverX >= PAD.l && hoverX <= PAD.l + CW;
@@ -355,25 +381,38 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
               );
             })}
 
-            {/* Hover: vertical line + dots on each series */}
-            {inPlot && hoverT && (
-              <g>
-                <line x1={hoverX!.toFixed(1)} y1={PAD.t} x2={hoverX!.toFixed(1)} y2={VH - PAD.b}
-                  stroke="#ffffff" strokeWidth="1" strokeOpacity="0.12" />
-                {lines.map((line, i) => {
-                  const p = lerp(line.pts, hoverT);
-                  return (
-                    <circle key={i} cx={hoverX!.toFixed(1)} cy={toY(p).toFixed(1)} r="3.5"
-                      fill={line.color} stroke="#0D0D1A" strokeWidth="1.5" />
-                  );
-                })}
-                {/* Hover time label */}
-                <text x={hoverX!.toFixed(1)} y={(VH - PAD.b + 16).toFixed(1)}
-                  fill="#6B6B8A" fontSize="11" fontFamily={MONO} textAnchor="middle">
-                  {fmtXLabel(hoverT, iv)}
-                </text>
-              </g>
-            )}
+            {/* Hover: vertical line + dots + inline % labels */}
+            {inPlot && hoverT && (() => {
+              const nearRight = hoverX! > PAD.l + CW * 0.72;
+              const lx  = nearRight ? hoverX! - 8 : hoverX! + 8;
+              const anc = nearRight ? "end" : "start";
+              return (
+                <g>
+                  <line x1={hoverX!.toFixed(1)} y1={PAD.t} x2={hoverX!.toFixed(1)} y2={VH - PAD.b}
+                    stroke="#ffffff" strokeWidth="1" strokeOpacity="0.12" />
+                  {lines.map((line, i) => {
+                    const p  = lerp(line.pts, hoverT);
+                    const cy = toY(p);
+                    return (
+                      <g key={i}>
+                        <circle cx={hoverX!.toFixed(1)} cy={cy.toFixed(1)} r="3.5"
+                          fill={line.color} stroke="#0D0D1A" strokeWidth="1.5" />
+                        <text x={lx.toFixed(1)} y={(cy - 5).toFixed(1)}
+                          fill={line.color} fontSize="11" fontFamily={MONO} textAnchor={anc}
+                          style={{ fontWeight: 600 }}>
+                          {Math.round(p * 100)}%
+                        </text>
+                      </g>
+                    );
+                  })}
+                  {/* Hover time label at bottom */}
+                  <text x={hoverX!.toFixed(1)} y={(VH - PAD.b + 16).toFixed(1)}
+                    fill="#6B6B8A" fontSize="11" fontFamily={MONO} textAnchor="middle">
+                    {fmtXLabel(hoverT, iv)}
+                  </text>
+                </g>
+              );
+            })()}
 
             {/* X-axis static labels (hidden while hovering) */}
             {!inPlot && X_TICKS.map(({ t, x }, i) => (
