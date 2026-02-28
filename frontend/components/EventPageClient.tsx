@@ -237,7 +237,7 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
       <div className="flex items-center justify-between px-4 py-2 border-b border-border/50 gap-3">
 
         {/* Outcome legend — dot + name + current % */}
-        <div className="flex items-center gap-3 flex-wrap min-w-0">
+        <div className="flex items-center gap-2 flex-wrap min-w-0">
           {(series.length > 0
             ? series
             : top4.slice(0, 4).map((m, i) => ({
@@ -246,18 +246,18 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
                 value: parseFloat(m.outcomePrices?.[0] ?? "0"),
               }))
           ).map((s, i) => (
-            <div key={i} className="flex items-center gap-1.5 min-w-0 flex-shrink-0">
-              <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: s.color }} />
-              <span className="text-[10px] tracking-wide truncate max-w-[88px]" style={{ color: s.color }}>
+            <div key={i} className="flex items-center gap-1 min-w-0 flex-shrink-0">
+              <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: s.color }} />
+              <span className="text-[10px] truncate max-w-[60px]" style={{ color: s.color }}>
                 {s.label}
               </span>
-              <span className="text-[10px] font-mono tabular-nums" style={{ color: s.color, opacity: 0.75 }}>
+              <span className="text-[10px] font-mono tabular-nums" style={{ color: s.color, opacity: 0.7 }}>
                 {Math.round((s.value ?? 0) * 100)}%
               </span>
             </div>
           ))}
           {loading && (
-            <div className="w-2.5 h-2.5 border border-muted/40 border-t-transparent rounded-full animate-spin flex-shrink-0" />
+            <div className="w-2 h-2 border border-muted/40 border-t-transparent rounded-full animate-spin flex-shrink-0" />
           )}
         </div>
 
@@ -280,11 +280,16 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
         </div>
       </div>
 
-      {/* ── Chart — liveline canvas fills this, built-in toggle is suppressed ── */}
-      {/* .predacy-ll > div:first-child targets liveline's series-toggle row   */}
-      <style>{`.predacy-ll > div:first-child { display: none !important; }`}</style>
+      {/* ── Chart ──────────────────────────────────────────────────────────── */}
+      {/*
+        liveline renders as a React Fragment, so its children (control-bar div
+        + canvas div) become direct children of whatever wraps it in the DOM.
+        .ll-wrap > div:first-child = the control-bar (series toggle) → hide it.
+        The canvas div (second child) then fills the full wrapper height.
+      */}
+      <style>{`.ll-wrap > div:first-child { display: none !important; }`}</style>
 
-      <div className="h-[200px] px-1 pt-1 pb-1">
+      <div className="h-[210px] px-1 pb-1 pt-0.5">
         {loading ? (
           <div className="h-full flex items-center justify-center">
             <div className="w-3 h-3 border border-muted/40 border-t-transparent rounded-full animate-spin" />
@@ -294,22 +299,26 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
             <span className="text-[10px] text-muted-dim tracking-widest font-mono">NO PRICE HISTORY</span>
           </div>
         ) : (
-          <LivelineComp
-            className="predacy-ll"
-            data={firstData}
-            value={firstVal}
-            series={series}
-            window={INTERVAL_SECS[iv]}
-            theme="dark"
-            scrub
-            grid
-            badge={false}
-            pulse={false}
-            fill={false}
-            momentum={false}
-            formatValue={(v: number) => `${Math.round(v * 100)}%`}
-            formatTime={fmtTime}
-          />
+          // The wrapper div becomes the real DOM parent so our CSS can target
+          // liveline's Fragment children with a stable class selector.
+          <div className="ll-wrap h-full">
+            <LivelineComp
+              data={firstData}
+              value={firstVal}
+              series={series}
+              window={INTERVAL_SECS[iv]}
+              theme="dark"
+              scrub
+              grid
+              badge={false}
+              pulse={false}
+              fill={false}
+              momentum={false}
+              padding={{ left: 8, right: 8, top: 6, bottom: 24 }}
+              formatValue={(v: number) => `${Math.round(v * 100)}%`}
+              formatTime={fmtTime}
+            />
+          </div>
         )}
       </div>
     </div>
@@ -656,7 +665,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
           {/* Outcome list scrolls below */}
           <div className="flex-1 overflow-y-auto">
           {/* Subheader */}
-          <div className="px-5 py-2.5 border-b border-border">
+          <div className="px-5 py-3 border-b border-border">
             <span className="text-[10px] text-muted tracking-widest uppercase">
               {sorted.length} Outcomes · select to trade
             </span>
