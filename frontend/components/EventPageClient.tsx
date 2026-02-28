@@ -233,21 +233,35 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
 
   return (
     <div className="border-b border-border">
-      {/* Legend + interval selector */}
-      <div className="flex items-center justify-between px-4 py-2.5 gap-2">
-        <div className="flex items-center gap-4 flex-wrap min-w-0">
-          {(series.length > 0 ? series : top4.slice(0, 4).map((m, i) => ({ label: outcomeLabel(m), color: OUTCOME_COLORS[i] }))).map(
-            (s, i) => (
-              <div key={i} className="flex items-center gap-1.5 min-w-0">
-                <div className="w-4 h-px flex-shrink-0" style={{ backgroundColor: s.color }} />
-                <span className="text-[10px] tracking-widest uppercase truncate max-w-[100px]" style={{ color: s.color }}>
-                  {s.label}
-                </span>
-              </div>
-            ),
+      {/* ── Legend row + interval tabs ────────────────────────────────────── */}
+      <div className="flex items-center justify-between px-4 py-2 border-b border-border/50 gap-3">
+
+        {/* Outcome legend — dot + name + current % */}
+        <div className="flex items-center gap-3 flex-wrap min-w-0">
+          {(series.length > 0
+            ? series
+            : top4.slice(0, 4).map((m, i) => ({
+                label: outcomeLabel(m),
+                color: OUTCOME_COLORS[i],
+                value: parseFloat(m.outcomePrices?.[0] ?? "0"),
+              }))
+          ).map((s, i) => (
+            <div key={i} className="flex items-center gap-1.5 min-w-0 flex-shrink-0">
+              <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: s.color }} />
+              <span className="text-[10px] tracking-wide truncate max-w-[88px]" style={{ color: s.color }}>
+                {s.label}
+              </span>
+              <span className="text-[10px] font-mono tabular-nums" style={{ color: s.color, opacity: 0.75 }}>
+                {Math.round((s.value ?? 0) * 100)}%
+              </span>
+            </div>
+          ))}
+          {loading && (
+            <div className="w-2.5 h-2.5 border border-muted/40 border-t-transparent rounded-full animate-spin flex-shrink-0" />
           )}
-          {loading && <div className="w-2.5 h-2.5 border border-muted/40 border-t-transparent rounded-full animate-spin flex-shrink-0" />}
         </div>
+
+        {/* Interval tabs */}
         <div className="flex items-center gap-0.5 flex-shrink-0">
           {INTERVALS.map(({ label, value }) => (
             <button
@@ -255,7 +269,9 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
               onClick={() => setIv(value)}
               className={clsx(
                 "text-[10px] px-1.5 py-0.5 tracking-widest transition-colors",
-                iv === value ? "text-accent border border-accent/30 bg-accent/5" : "text-muted-dim hover:text-muted",
+                iv === value
+                  ? "text-accent border border-accent/30 bg-accent/5"
+                  : "text-muted-dim hover:text-muted",
               )}
             >
               {label}
@@ -264,8 +280,11 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
         </div>
       </div>
 
-      {/* Chart — fixed height, liveline fills container */}
-      <div className="h-[130px] px-1 pb-1">
+      {/* ── Chart — liveline canvas fills this, built-in toggle is suppressed ── */}
+      {/* .predacy-ll > div:first-child targets liveline's series-toggle row   */}
+      <style>{`.predacy-ll > div:first-child { display: none !important; }`}</style>
+
+      <div className="h-[200px] px-1 pt-1 pb-1">
         {loading ? (
           <div className="h-full flex items-center justify-center">
             <div className="w-3 h-3 border border-muted/40 border-t-transparent rounded-full animate-spin" />
@@ -276,6 +295,7 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
           </div>
         ) : (
           <LivelineComp
+            className="predacy-ll"
             data={firstData}
             value={firstVal}
             series={series}
