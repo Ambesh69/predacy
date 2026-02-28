@@ -72,6 +72,12 @@ function outcomeLabel(m: Market): string {
     .replace(/\s+win\s+.*\?$/i, "?")
     .replace(/\s+become\s+.*\?$/i, "?");
 }
+// Resolves the YES token ID for CLOB price-history fetches.
+// The Gamma events endpoint sometimes omits clobTokenIds but always populates
+// tokens[{ token_id }], so we fall back to tokens[0].token_id.
+function getTokenId(m: Market): string | undefined {
+  return m.clobTokenIds?.[0] ?? m.tokens?.[0]?.token_id;
+}
 
 // ── EIP-6963 provider discovery (same as MarketPageClient) ───────────────────
 async function findBestProvider(): Promise<{ provider: any; name: string }> {
@@ -104,8 +110,8 @@ async function findBestProvider(): Promise<{ provider: any; name: string }> {
 const OUTCOME_COLORS = ["#00FFB3", "#4D83FF", "#FFB800", "#FF6B35"];
 
 const W   = 600;
-const H   = 180;
-const PAD = { t: 16, r: 56, b: 32, l: 44 };
+const H   = 130;
+const PAD = { t: 10, r: 52, b: 24, l: 40 };
 const CW  = W - PAD.l - PAD.r;
 const CH  = H - PAD.t - PAD.b;
 
@@ -147,10 +153,10 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
 
   const top4 = [...markets]
     .sort((a, b) => parseFloat(b.outcomePrices?.[0] ?? "0") - parseFloat(a.outcomePrices?.[0] ?? "0"))
-    .filter((m) => m.clobTokenIds?.[0])
+    .filter((m) => !!getTokenId(m))
     .slice(0, 4);
 
-  const marketKey = top4.map((m) => m.conditionId).join(",");
+  const marketKey = top4.map((m) => getTokenId(m) ?? m.conditionId).join(",");
 
   useEffect(() => {
     if (top4.length === 0) { setLoading(false); return; }
@@ -158,7 +164,7 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
     const fidelity = INTERVALS.find((i) => i.value === iv)?.fidelity ?? 60;
     Promise.all(
       top4.map((m, idx) =>
-        fetch(`/api/prices?token_id=${encodeURIComponent(m.clobTokenIds![0])}&interval=${iv}&fidelity=${fidelity}`)
+        fetch(`/api/prices?token_id=${encodeURIComponent(getTokenId(m)!)}&interval=${iv}&fidelity=${fidelity}`)
           .then((r) => r.json())
           .then((d) => ({
             name:  outcomeLabel(m),
@@ -621,9 +627,6 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         </h1>
       </div>
 
-      {/* Chart */}
-      <MultiOutcomeChart markets={event.markets} />
-
       {/* Chain error */}
       {chainError && (
         <div className="mx-6 mt-3 px-3 py-2 border border-danger/30 bg-danger/5 text-[11px] text-danger">
@@ -635,8 +638,14 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       {/* Two-column: outcome list | trading panel */}
       <div className="flex flex-1 min-h-0 divide-x divide-border">
 
-        {/* ── Outcome list ─────────────────────────────────────────────────── */}
-        <div className="flex-1 overflow-y-auto">
+        {/* ── Left column: compact chart + scrollable outcome list ──────── */}
+        <div className="flex-1 flex flex-col min-h-0">
+
+          {/* Chart pinned at top of left column */}
+          <MultiOutcomeChart markets={event.markets} />
+
+          {/* Outcome list scrolls below */}
+          <div className="flex-1 overflow-y-auto">
           {/* Subheader */}
           <div className="px-5 py-2.5 border-b border-border">
             <span className="text-[10px] text-muted tracking-widest uppercase">
@@ -704,7 +713,8 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
               );
             })}
           </div>
-        </div>
+        </div>{/* end scroll area */}
+        </div>{/* end left column */}
 
         {/* ── Trading panel ────────────────────────────────────────────────── */}
         <div className="w-[340px] xl:w-[380px] flex-shrink-0 flex flex-col overflow-y-auto">
