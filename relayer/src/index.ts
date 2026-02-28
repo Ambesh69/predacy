@@ -66,17 +66,19 @@ function createMarketState(marketId: `0x${string}`): MarketState {
 /** Ensure a market is tracked and has an open batch. Returns the MarketState. */
 async function ensureMarket(marketId: `0x${string}`): Promise<MarketState> {
   const key = marketId.toLowerCase();
+
   if (!activeMarkets.has(key)) {
     const state = createMarketState(marketId);
+    // Set openingBatch = true BEFORE adding to map so concurrent callers wait
+    state.openingBatch = true;
     activeMarkets.set(key, state);
-    // Open a batch on-demand (first order for this market)
     console.log(`[Relayer] New market ${marketId} — opening on-demand batch`);
     try {
       state.currentBatchId = await state.processor.openBatch(marketId);
       console.log(`[Relayer] Opened batch ${state.currentBatchId} for market ${marketId}`);
     } catch (err: any) {
       if (err.message?.includes("batch already open")) {
-        // A batch was already open (relayer restart) — read from chain
+        // A batch was already open (relayer restart or concurrent /warm) — read from chain
         state.currentBatchId = await publicClient.readContract({
           address: baseConfig.vaultAddress,
           abi:     BATCH_VAULT_ABI,
@@ -89,9 +91,20 @@ async function ensureMarket(marketId: `0x${string}`): Promise<MarketState> {
         activeMarkets.delete(key); // Clean up failed state
         throw err;
       }
+    } finally {
+      state.openingBatch = false;
     }
   }
-  return activeMarkets.get(key)!;
+
+  // If a concurrent call is still running openBatch, wait for it to finish
+  const state = activeMarkets.get(key)!;
+  if (state.openingBatch) {
+    console.log(`[Relayer] Market ${marketId} batch still opening — waiting...`);
+    while (state.openingBatch) await new Promise((r) => setTimeout(r, 100));
+    if (state.currentBatchId === null) throw new Error(`openBatch failed for market ${marketId}`);
+  }
+
+  return state;
 }
 
 // ── HTTP server ────────────────────────────────────────────────────────────────
@@ -384,9 +397,17 @@ const poll = async () => {
         const OPEN = 0, SETTLING = 1, SETTLED = 2;
 
         if (batchInfo.status === OPEN) {
-          // Auto-close once window has elapsed AND there's at least one order
           const nowSec    = Math.floor(Date.now() / 1000);
           const windowSec = baseConfig.batchWindowMs / 1000;
+
+          // Evict idle markets: OPEN for > 2× window with zero orders — stop polling them
+          if (batchInfo.commitmentCount === 0n && nowSec >= Number(batchInfo.openedAt) + windowSec * 2) {
+            console.log(`[Relayer] Evicting idle market ${marketKey} — no orders in ${windowSec * 2}s`);
+            activeMarkets.delete(marketKey);
+            continue;
+          }
+
+          // Auto-close once window has elapsed AND there's at least one order
           if (nowSec >= Number(batchInfo.openedAt) + windowSec && batchInfo.commitmentCount > 0n) {
             state.closingBatch = true;
             console.log(`[Relayer] Batch ${state.currentBatchId} (market ${marketKey}) window expired (${batchInfo.commitmentCount} orders) — closing`);

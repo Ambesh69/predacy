@@ -38,7 +38,7 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
-    getMarkets(20)
+    getMarkets(100)
       .then((fetched) => {
         // Pin live Predacy markets at the front (in insertion order)
         if (liveMarketIds.size > 0) {

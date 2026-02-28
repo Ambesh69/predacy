@@ -10,7 +10,7 @@ const GAMMA_API = "https://gamma-api.polymarket.com";
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const conditionId = searchParams.get("condition_id");
-  const limit       = searchParams.get("limit") ?? "20";
+  const limit       = searchParams.get("limit") ?? "100";
 
   // Single-market lookup by conditionId
   const url = conditionId
