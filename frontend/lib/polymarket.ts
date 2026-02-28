@@ -20,6 +20,23 @@ export interface Market {
   category?: string;
   tags?: string[];
   slug?: string;               // Polymarket event slug for exit link
+  groupItemTitle?: string;     // Short outcome label for multi-outcome events (e.g. "Kevin Warsh")
+}
+
+export interface PolyEvent {
+  id: string;
+  title: string;
+  slug?: string;
+  volume: string;
+  volumeNum: number;
+  active: boolean;
+  closed: boolean;
+  endDate: string;
+  image?: string;
+  icon?: string;
+  category?: string;
+  tags?: string[];
+  markets: Market[];
 }
 
 /** Parse fields that Gamma API returns as JSON-encoded strings */
@@ -39,6 +56,21 @@ function normalizeMarket(m: any): Market {
 export async function getMarkets(limit = 20): Promise<Market[]> {
   const res = await axios.get(`/api/markets`, { params: { limit } });
   return (res.data ?? []).map(normalizeMarket);
+}
+
+function normalizeEvent(e: any): PolyEvent {
+  const parse = (v: any) => (typeof v === "string" ? JSON.parse(v) : v);
+  return {
+    ...e,
+    tags:    parse(e.tags)    ?? [],
+    markets: (e.markets ?? []).map(normalizeMarket),
+  };
+}
+
+/** Fetch active events (grouped markets) — uses server-side proxy to avoid CORS */
+export async function getEvents(limit = 50): Promise<PolyEvent[]> {
+  const res = await axios.get(`/api/events`, { params: { limit } });
+  return (res.data ?? []).map(normalizeEvent);
 }
 
 /** Get a single market by condition ID — uses server-side proxy to avoid CORS */

@@ -1,9 +1,9 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import MarketCard from "@/components/MarketCard";
+import EventCard from "@/components/EventCard";
 import WalletButton from "@/components/WalletButton";
-import { MOCK_MARKETS, getMarkets, type Market } from "@/lib/polymarket";
+import { MOCK_MARKETS, getEvents, type PolyEvent } from "@/lib/polymarket";
 
 const TICKER_ITEMS = [
   "SEALED BIDS",
@@ -16,7 +16,9 @@ const TICKER_ITEMS = [
 ];
 
 export default function HomePage() {
-  const [markets, setMarkets] = useState<Market[]>(MOCK_MARKETS);
+  const [events, setEvents] = useState<PolyEvent[]>(
+    MOCK_MARKETS.map((m) => ({ id: m.conditionId, title: m.question, volume: m.volume, volumeNum: m.volumeNum, active: m.active, closed: m.closed, endDate: m.endDate, category: m.category, tags: m.tags, markets: [m] }))
+  );
   const [loading, setLoading] = useState(true);
   const [liveMarketIds, setLiveMarketIds] = useState<Set<string>>(new Set());
 
@@ -38,21 +40,21 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
-    getMarkets(100)
+    getEvents(50)
       .then((fetched) => {
-        // Pin live Predacy markets at the front (in insertion order)
+        // Pin events that have at least one live market at the front
         if (liveMarketIds.size > 0) {
-          const live: Market[] = [];
-          const rest: Market[] = [];
-          for (const m of fetched) {
-            if (liveMarketIds.has(m.conditionId.toLowerCase())) live.push(m);
-            else rest.push(m);
+          const live: PolyEvent[] = [];
+          const rest: PolyEvent[] = [];
+          for (const e of fetched) {
+            if (e.markets.some((m) => liveMarketIds.has(m.conditionId.toLowerCase()))) live.push(e);
+            else rest.push(e);
           }
           fetched = [...live, ...rest];
         }
-        setMarkets(fetched);
+        setEvents(fetched);
       })
-      .catch(() => setMarkets(MOCK_MARKETS))
+      .catch(() => {/* keep mock fallback */})
       .finally(() => setLoading(false));
   }, [liveMarketIds]);
 
@@ -171,12 +173,9 @@ export default function HomePage() {
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-px bg-border">
-          {markets.map((market) => (
-            <div key={market.conditionId} className="bg-bg">
-              <MarketCard
-                market={market}
-                isLive={liveMarketIds.has(market.conditionId.toLowerCase())}
-              />
+          {events.map((event) => (
+            <div key={event.id} className="bg-bg">
+              <EventCard event={event} liveMarketIds={liveMarketIds} />
             </div>
           ))}
         </div>
