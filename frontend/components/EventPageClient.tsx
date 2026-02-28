@@ -160,8 +160,8 @@ const INTERVALS: { label: string; value: Interval; fidelity: number }[] = [
 interface ChartSeries { name: string; color: string; pts: Array<{ t: number; p: number }>; }
 
 // SVG viewBox geometry
-const VW = 620, VH = 190;
-const PAD = { t: 10, r: 46, b: 28, l: 6 };
+const VW = 620, VH = 310;
+const PAD = { t: 12, r: 46, b: 30, l: 6 };
 const CW  = VW - PAD.l - PAD.r;
 const CH  = VH - PAD.t - PAD.b;
 
@@ -239,11 +239,12 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
   const maxT  = hasData ? Math.max(...allT) : 1;
   const tRange = maxT - minT || 1;
 
-  // Y: auto-scale to data range with padding, clamped to [0,1]
+  // Y: auto-scale tight to data range — like Polymarket zooms to visible prices
   const allP   = lines.flatMap((l) => l.pts.map((p) => p.p));
   const rawMin = hasData ? Math.min(...allP) : 0;
   const rawMax = hasData ? Math.max(...allP) : 1;
-  const pPad   = Math.max((rawMax - rawMin) * 0.15, 0.04);
+  // Small padding: 8% of range, min 2pp — so lines don't hug the edges
+  const pPad   = Math.max((rawMax - rawMin) * 0.08, 0.02);
   const yMin   = Math.max(0, rawMin - pPad);
   const yMax   = Math.min(1, rawMax + pPad);
   const yRange = yMax - yMin || 1;
@@ -251,8 +252,16 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
   const toX = (t: number) => PAD.l + ((t - minT) / tRange) * CW;
   const toY = (p: number) => PAD.t + (1 - (Math.max(yMin, Math.min(yMax, p)) - yMin) / yRange) * CH;
 
-  // Y-axis ticks: quarter-marks that fall within visible range
-  const Y_TICKS = [0, 0.25, 0.5, 0.75, 1.0].filter((v) => v >= yMin - 0.01 && v <= yMax + 0.01);
+  // Y-axis ticks: show quarter-marks that fall in visible range; always show at least 3 ticks
+  const quarterTicks = [0, 0.25, 0.5, 0.75, 1.0].filter((v) => v >= yMin - 0.01 && v <= yMax + 0.01);
+  // If zoomed in tight (< 3 quarter-marks visible), generate evenly-spaced ticks inside the range
+  const Y_TICKS: number[] = quarterTicks.length >= 3 ? quarterTicks : (() => {
+    const step = yRange <= 0.08 ? 0.01 : yRange <= 0.2 ? 0.05 : 0.1;
+    const ticks: number[] = [];
+    for (let v = Math.ceil(yMin / step) * step; v <= yMax + 0.001; v += step)
+      ticks.push(parseFloat(v.toFixed(4)));
+    return ticks;
+  })();
   // X-axis ticks: 4 evenly distributed labels
   const X_TICKS = [0.15, 0.38, 0.62, 0.85].map((f) => ({ t: minT + f * tRange, x: PAD.l + f * CW }));
 
@@ -301,7 +310,7 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
       </div>
 
       {/* ── SVG chart ─────────────────────────────────────────────────────── */}
-      <div className="pt-0.5 pb-1 px-1" style={{ height: 210 }}>
+      <div className="pt-0.5 pb-1 px-1" style={{ height: 330 }}>
         {loading ? (
           <div className="h-full flex items-center justify-center">
             <div className="w-3 h-3 border border-muted/40 border-t-transparent rounded-full animate-spin" />
@@ -312,6 +321,7 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
           </div>
         ) : (
           <svg viewBox={`0 0 ${VW} ${VH}`} width="100%" height="100%"
+            preserveAspectRatio="none"
             style={{ display: "block", cursor: "crosshair" }}
             onMouseMove={handleMouseMove}
             onMouseLeave={() => setHoverX(null)}
