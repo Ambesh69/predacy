@@ -79,6 +79,46 @@ function getTokenId(m: Market): string | undefined {
   return m.clobTokenIds?.[0] ?? m.tokens?.[0]?.token_id;
 }
 
+// ── Deduplicate + filter phantom markets ─────────────────────────────────────
+// Polymarket's events endpoint can return:
+//   • Anonymous placeholder slots — "Individual T", "Individual P", etc.
+//     created as future-nomination buckets with no price or volume.
+//   • Duplicate entries for the same person (e.g. two "Rick Rieder" markets
+//     with different conditionIds). We keep the one with the higher volume.
+const ANON_PLACEHOLDER = /^Individual\s+[A-Z]$/i;
+
+function filterAndDeduplicateMarkets(markets: Market[]): Market[] {
+  // Step 1 — remove phantom placeholders
+  const active = markets.filter((m) => {
+    const label = (m.groupItemTitle ?? m.question ?? "").trim();
+    if (ANON_PLACEHOLDER.test(label)) return false;
+    // Also drop markets with literally no price AND no volume (pure ghost slots)
+    const yp  = parseFloat(m.outcomePrices?.[0] ?? "0");
+    const np  = parseFloat(m.outcomePrices?.[1] ?? "0");
+    const vol = m.volumeNum || parseFloat(m.volume ?? "0");
+    if (yp === 0 && np === 0 && vol === 0) return false;
+    return true;
+  });
+
+  // Step 2 — deduplicate by groupItemTitle, keeping highest-volume entry
+  const seen = new Map<string, Market>();
+  for (const m of active) {
+    const key = outcomeLabel(m).trim().toLowerCase();
+    const prev = seen.get(key);
+    if (!prev) { seen.set(key, m); continue; }
+    const prevVol = prev.volumeNum || parseFloat(prev.volume ?? "0");
+    const curVol  = m.volumeNum    || parseFloat(m.volume    ?? "0");
+    // Prefer higher volume; break ties by higher YES probability
+    if (curVol > prevVol ||
+        (curVol === prevVol &&
+         parseFloat(m.outcomePrices?.[0] ?? "0") >
+         parseFloat(prev.outcomePrices?.[0] ?? "0"))) {
+      seen.set(key, m);
+    }
+  }
+  return Array.from(seen.values());
+}
+
 // ── EIP-6963 provider discovery (same as MarketPageClient) ───────────────────
 async function findBestProvider(): Promise<{ provider: any; name: string }> {
   if (typeof window === "undefined") throw new Error("Not in browser");
@@ -151,7 +191,7 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
   const [lines, setLines]     = useState<ChartLine[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const top4 = [...markets]
+  const top4 = filterAndDeduplicateMarkets(markets)
     .sort((a, b) => parseFloat(b.outcomePrices?.[0] ?? "0") - parseFloat(a.outcomePrices?.[0] ?? "0"))
     .filter((m) => !!getTokenId(m))
     .slice(0, 4);
@@ -572,7 +612,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     );
   }
 
-  const sorted  = [...event.markets].sort(
+  const sorted  = filterAndDeduplicateMarkets(event.markets).sort(
     (a, b) => parseFloat(b.outcomePrices?.[0] ?? "0") - parseFloat(a.outcomePrices?.[0] ?? "0"),
   );
   const volume  = event.volumeNum ?? parseFloat(event.volume ?? "0");
@@ -649,7 +689,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
           {/* Subheader */}
           <div className="px-5 py-2.5 border-b border-border">
             <span className="text-[10px] text-muted tracking-widest uppercase">
-              {event.markets.length} Outcomes · select to trade
+              {sorted.length} Outcomes · select to trade
             </span>
           </div>
 
