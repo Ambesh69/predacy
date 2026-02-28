@@ -509,6 +509,16 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       .finally(() => setEventLoading(false));
   }, [id]);
 
+  // ── Auto-select top outcome on load (like Polymarket) ───────────────────────
+  useEffect(() => {
+    if (!event || selectedMarket) return;
+    const top = filterAndDeduplicateMarkets(event.markets).sort(
+      (a, b) => parseFloat(b.outcomePrices?.[0] ?? "0") - parseFloat(a.outcomePrices?.[0] ?? "0"),
+    );
+    if (top.length > 0) setSelectedMarket(top[0]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [event]);
+
   // ── Pre-warm batch for selected market ──────────────────────────────────────
   useEffect(() => {
     if (!selectedMarket) return;
