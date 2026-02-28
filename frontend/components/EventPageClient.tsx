@@ -193,7 +193,9 @@ function fmtXLabel(ts: number, iv: Interval): string {
   const d = new Date(ts * 1000);
   if (iv === "6h" || iv === "1d")
     return d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  if (iv === "max")
+    return d.toLocaleDateString("en-US", { month: "short" }); // "Oct", "Nov", "Dec"
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" }); // "Nov 15" for 1W
 }
 
 function MultiOutcomeChart({ markets }: { markets: Market[] }) {
@@ -252,13 +254,8 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
   const toX = (t: number) => PAD.l + ((t - minT) / tRange) * CW;
   const toY = (p: number) => PAD.t + (1 - (Math.max(yMin, Math.min(yMax, p)) - yMin) / yRange) * CH;
 
-  // Y-axis ticks: only show quarter-marks that have a line within 12pp of them.
-  // This removes the 25/50/75% gridlines when they fall in empty dead zones.
-  const lastPrices = lines.map((l) => l.pts[l.pts.length - 1]?.p ?? 0);
-  const Y_TICKS = [0, 0.25, 0.5, 0.75, 1.0].filter((v) => {
-    if (v < yMin - 0.01 || v > yMax + 0.01) return false;
-    return lastPrices.some((p) => Math.abs(p - v) <= 0.12);
-  });
+  // Y-axis ticks: all quarter-marks within the visible range
+  const Y_TICKS = [0, 0.25, 0.5, 0.75, 1.0].filter((v) => v >= yMin - 0.01 && v <= yMax + 0.01);
   // X-axis ticks: 4 evenly distributed labels
   const X_TICKS = [0.15, 0.38, 0.62, 0.85].map((f) => ({ t: minT + f * tRange, x: PAD.l + f * CW }));
 
@@ -331,7 +328,7 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
                   <line x1={PAD.l} y1={y.toFixed(1)} x2={VW - PAD.r} y2={y.toFixed(1)}
                     stroke={GRID} strokeWidth="1" strokeDasharray="3,4" />
                   <text x={(VW - PAD.r + 5).toFixed(1)} y={(y + 3.5).toFixed(1)}
-                    fill={LABEL} fontSize="7.5" fontFamily={MONO} textAnchor="start">
+                    fill={LABEL} fontSize="11" fontFamily={MONO} textAnchor="start">
                     {Math.round(v * 100)}%
                   </text>
                 </g>
@@ -371,7 +368,7 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
                 })}
                 {/* Hover time label */}
                 <text x={hoverX!.toFixed(1)} y={(VH - PAD.b + 16).toFixed(1)}
-                  fill="#6B6B8A" fontSize="7.5" fontFamily={MONO} textAnchor="middle">
+                  fill="#6B6B8A" fontSize="11" fontFamily={MONO} textAnchor="middle">
                   {fmtXLabel(hoverT, iv)}
                 </text>
               </g>
@@ -380,7 +377,7 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
             {/* X-axis static labels (hidden while hovering) */}
             {!inPlot && X_TICKS.map(({ t, x }, i) => (
               <text key={i} x={x.toFixed(1)} y={(VH - PAD.b + 16).toFixed(1)}
-                fill={LABEL} fontSize="7.5" fontFamily={MONO} textAnchor="middle">
+                fill={LABEL} fontSize="11" fontFamily={MONO} textAnchor="middle">
                 {fmtXLabel(t, iv)}
               </text>
             ))}
