@@ -655,7 +655,7 @@ export default function ProfileClient() {
               </p>
               {[
                 ["Your wallet address", shortAddr],
-                ["Amount deposited", "in USDC / YES tokens"],
+                ["Amount deposited", "USDC / YES tokens"],
                 ["Commitment hash", "sealed keccak256"],
                 ["Batch ID", "sequential integer"],
               ].map(([label, sub]) => (
@@ -680,7 +680,7 @@ export default function ProfileClient() {
                 ["Buy / Sell direction", "not stored on-chain"],
                 ["Your limit price", "not stored on-chain"],
                 ["Random salt", "blinding factor"],
-                ["Order rationale", "never logged"],
+                ["Clearing price", "hidden until settlement"],
               ].map(([label, sub]) => (
                 <div
                   key={label}

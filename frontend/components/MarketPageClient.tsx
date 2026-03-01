@@ -731,30 +731,36 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
 
           {/* Privacy explainer */}
           <div className="border border-border p-3 space-y-2">
-            <p className="text-[10px] text-muted-dim tracking-widest uppercase">What's hidden</p>
+            <p className="text-[10px] text-muted-dim tracking-widest uppercase">Privacy status</p>
             <div className="space-y-1.5">
               {[
-                { item: "Your wallet address",       hidden: true },
-                { item: "Your direction (buy/sell)", hidden: true },
-                { item: "Your order type & price",   hidden: true },
-                { item: "Your trade amount",         hidden: true },
-                { item: "Clearing price (until settle)", hidden: true },
-                { item: "Commitment hash",           hidden: false },
-                { item: "USDC deposited",            hidden: false },
+                { item: "Buy / Sell direction",          hidden: true  },
+                { item: "Your limit price",              hidden: true  },
+                { item: "Salt (blinding factor)",        hidden: true  },
+                { item: "Clearing price (until settle)", hidden: true  },
+                { item: "Wallet address",                hidden: false },
+                { item: "Amount deposited",              hidden: false },
+                { item: "Commitment hash",               hidden: false },
               ].map(({ item, hidden }) => (
                 <div key={item} className="flex items-center gap-2">
-                  <span className={clsx("text-[10px]", hidden ? "text-accent/60" : "text-muted-dim")}>
-                    {hidden ? "✓" : "○"}
+                  <span className={clsx("text-[10px]", hidden ? "text-accent/60" : "text-danger/50")}>
+                    {hidden ? "✓" : "◆"}
                   </span>
                   <span className={clsx("text-[11px]", hidden ? "text-text/70" : "text-muted-dim")}>
                     {item}
                   </span>
-                  {hidden && (
-                    <span className="ml-auto text-[10px] text-accent/40 tracking-widest uppercase">hidden</span>
-                  )}
+                  <span className={clsx(
+                    "ml-auto text-[9px] tracking-widest uppercase",
+                    hidden ? "text-accent/40" : "text-danger/40"
+                  )}>
+                    {hidden ? "hidden" : "on-chain"}
+                  </span>
                 </div>
               ))}
             </div>
+            <p className="text-[9px] text-muted-dim pt-1 border-t border-border/40">
+              Direction &amp; price are sealed inside the commitment hash — they cannot be back-tracked.
+            </p>
           </div>
         </div>
 
