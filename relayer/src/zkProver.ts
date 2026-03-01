@@ -32,7 +32,7 @@ export interface ProofOutput {
 }
 
 // Must match global MAX_ORDERS in circuits/batch_clearing/src/main.nr
-const CIRCUIT_MAX_ORDERS = 64;
+const CIRCUIT_MAX_ORDERS = 8;
 
 export class ZKProver {
   private useRealProver: boolean;

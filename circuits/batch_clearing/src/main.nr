@@ -30,7 +30,7 @@ use keccak256::keccak256;
 
 // Maximum orders per batch (must match contract MAX_BATCH_ORDERS)
 // Noir requires fixed-size arrays -- pad with zero-amount dummy orders
-global MAX_ORDERS: u32 = 64;
+global MAX_ORDERS: u32 = 8;
 global PRICE_DECIMALS: u64 = 1_000_000;
 
 struct Order {
