@@ -79,7 +79,7 @@ export class RedisOrderStore implements OrderStore {
   async save(batchId: string, trader: string, order: Order): Promise<void> {
     const r = await this.client();
     await r.hset(this.key(batchId), trader, serialize(order));
-    await r.expire(this.key(batchId), 3_600); // 1h TTL — far longer than any batch window
+    await r.expire(this.key(batchId), 604_800); // 7-day TTL — survives extended outages/OOM loops
   }
 
   async load(batchId: string): Promise<Map<string, Order>> {
