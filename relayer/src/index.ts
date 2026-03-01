@@ -593,6 +593,39 @@ const poll = async () => {
 };
 
 // ── Startup recovery: re-process any SETTLING batches from before restart ──────
+/**
+ * getLogs in chunks to avoid public-RPC block-range limits (~3 500 blocks on Amoy).
+ * Retries with half the chunk size on rate-limit / range errors.
+ */
+async function getLogsChunked(
+  params: Omit<Parameters<typeof publicClient.getLogs>[0], "fromBlock" | "toBlock">,
+  fromBlock: bigint,
+  toBlock:   bigint,
+  chunkSize  = 3_000n,
+) {
+  const all: Awaited<ReturnType<typeof publicClient.getLogs>> = [];
+  let from = fromBlock;
+  while (from <= toBlock) {
+    const end = from + chunkSize - 1n < toBlock ? from + chunkSize - 1n : toBlock;
+    try {
+      const chunk = await publicClient.getLogs({ ...params, fromBlock: from, toBlock: end });
+      all.push(...chunk);
+    } catch (err: unknown) {
+      const msg = String(err);
+      // Halve chunk size on range-too-large errors and retry this window
+      if (chunkSize > 100n && (msg.includes("range") || msg.includes("limit") || msg.includes("exceed"))) {
+        console.warn(`[Relayer] getLogs range error, retrying with smaller chunks: ${msg.slice(0, 120)}`);
+        const half = await getLogsChunked(params, from, end, chunkSize / 2n);
+        all.push(...half);
+      } else {
+        throw err;
+      }
+    }
+    from = end + 1n;
+  }
+  return all;
+}
+
 // Scans BatchClosed events from the last ~70 h and finds any that never emitted
 // BatchSettled. For each one, reconstructs the MarketState and retriggers
 // processBatch() so users' USDC isn't stuck after a Railway redeploy.
@@ -603,11 +636,12 @@ async function recoverSettlingBatches() {
   try {
     const toBlock  = await publicClient.getBlockNumber();
     // ~50 000 blocks ≈ 70 h on Amoy (5 s/block) / 28 h on Polygon mainnet (2 s/block)
+    // Scanned in 3 000-block chunks to stay within public-RPC getLogs limits.
     const scanFrom = toBlock > 50_000n ? toBlock - 50_000n : 0n;
 
     const [closedLogs, settledLogs] = await Promise.all([
-      publicClient.getLogs({ address: baseConfig.vaultAddress, event: BATCH_CLOSED_EVENT,  fromBlock: scanFrom, toBlock }),
-      publicClient.getLogs({ address: baseConfig.vaultAddress, event: BATCH_SETTLED_EVENT, fromBlock: scanFrom, toBlock }),
+      getLogsChunked({ address: baseConfig.vaultAddress, event: BATCH_CLOSED_EVENT  }, scanFrom, toBlock),
+      getLogsChunked({ address: baseConfig.vaultAddress, event: BATCH_SETTLED_EVENT }, scanFrom, toBlock),
     ]);
 
     const settledIds = new Set(settledLogs.map((l) => (l.args.batchId as bigint).toString()));
@@ -677,8 +711,8 @@ async function recoverOpenBatches() {
     const scanFrom = toBlock > 50_000n ? toBlock - 50_000n : 0n;
 
     const [openedLogs, closedLogs] = await Promise.all([
-      publicClient.getLogs({ address: baseConfig.vaultAddress, event: BATCH_OPENED_EVENT, fromBlock: scanFrom, toBlock }),
-      publicClient.getLogs({ address: baseConfig.vaultAddress, event: BATCH_CLOSED_EVENT, fromBlock: scanFrom, toBlock }),
+      getLogsChunked({ address: baseConfig.vaultAddress, event: BATCH_OPENED_EVENT }, scanFrom, toBlock),
+      getLogsChunked({ address: baseConfig.vaultAddress, event: BATCH_CLOSED_EVENT }, scanFrom, toBlock),
     ]);
 
     const closedIds = new Set(closedLogs.map((l) => (l.args.batchId as bigint).toString()));
@@ -732,6 +766,46 @@ async function recoverOpenBatches() {
 
   await recoverSettlingBatches();
   await recoverOpenBatches();
+
+  // Escape hatch: RECOVER_BATCH_ID=26 forces a specific stuck SETTLING batch to be
+  // retried, bypassing the event-scan (useful when the RPC silently dropped the log).
+  const RECOVER_BATCH_ID_ENV = process.env.RECOVER_BATCH_ID;
+  if (missingVars.length === 0 && RECOVER_BATCH_ID_ENV) {
+    const forceBatchId = BigInt(RECOVER_BATCH_ID_ENV);
+    console.log(`[Relayer] RECOVER_BATCH_ID=${forceBatchId} — force-recovering batch...`);
+    try {
+      const batchInfo = await publicClient.readContract({
+        address:      baseConfig.vaultAddress,
+        abi:          BATCH_VAULT_ABI,
+        functionName: "getBatch",
+        args:         [forceBatchId],
+      }) as { marketId: `0x${string}`; status: number };
+
+      if (batchInfo.status !== 1) {
+        console.log(`[Relayer] RECOVER_BATCH_ID: batch ${forceBatchId} status=${batchInfo.status} (not SETTLING) — skipping`);
+      } else {
+        const marketId = batchInfo.marketId;
+        const key      = marketId.toLowerCase();
+        if (!activeMarkets.has(key)) {
+          const state = createMarketState(marketId);
+          state.currentBatchId  = forceBatchId;
+          state.settlingBatchId = forceBatchId;
+          state.processingBatch = true;
+          activeMarkets.set(key, state);
+          batchToMarket.set(forceBatchId.toString(), key);
+          console.log(`[Relayer] RECOVER_BATCH_ID: recovering SETTLING batch ${forceBatchId} for market ${marketId}`);
+          state.processor.processBatch(forceBatchId)
+            .then(() => { console.log(`[Relayer] RECOVER_BATCH_ID: settled batch ${forceBatchId}`); })
+            .catch(async (err) => { await onSettleFail(state, key, forceBatchId, err); })
+            .finally(() => { state.processingBatch = false; state.settlingBatchId = null; });
+        } else {
+          console.log(`[Relayer] RECOVER_BATCH_ID: batch ${forceBatchId} already tracked`);
+        }
+      }
+    } catch (err) {
+      console.error(`[Relayer] RECOVER_BATCH_ID: failed to recover batch ${forceBatchId}:`, err);
+    }
+  }
 
   if (missingVars.length === 0 && PRE_WARM_MARKET_ID) {
     console.log(`[Relayer] Pre-warming market ${PRE_WARM_MARKET_ID} (MARKET_ID env var)`);
