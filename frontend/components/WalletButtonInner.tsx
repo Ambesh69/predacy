@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
 import { clsx } from "clsx";
 
@@ -17,23 +18,41 @@ export default function WalletButtonInner({ compact = false }: Props) {
   // Privy not yet initialised (e.g. no App ID configured)
   if (!ready) {
     return (
-      <div className={clsx("bg-border animate-pulse", compact ? "w-28 h-6" : "w-24 h-7")} />
+      <div className={clsx("bg-border animate-pulse", compact ? "w-32 h-6" : "w-32 h-7")} />
     );
   }
 
   if (authenticated && short) {
     return (
-      <button
-        onClick={logout}
+      <div
         className={clsx(
-          "group flex items-center gap-2 border transition-colors tracking-widest uppercase",
-          compact ? "border-border px-2.5 py-1 text-[10px]" : "border-border-bright px-3 py-1.5 text-xs",
-          "text-text hover:border-danger/40 hover:text-danger",
+          "flex items-center border divide-x transition-colors",
+          compact ? "border-border divide-border" : "border-border-bright divide-border",
         )}
       >
-        <div className="w-1.5 h-1.5 rounded-full bg-accent group-hover:bg-danger transition-colors flex-shrink-0" />
-        {short}
-      </button>
+        {/* Address → profile */}
+        <Link
+          href="/profile"
+          className={clsx(
+            "flex items-center gap-2 tracking-widest uppercase text-text hover:bg-surface/50 transition-colors",
+            compact ? "px-2.5 py-1 text-[10px]" : "px-3 py-1.5 text-xs",
+          )}
+        >
+          <div className="w-1.5 h-1.5 rounded-full bg-accent flex-shrink-0" />
+          {short}
+        </Link>
+        {/* Disconnect */}
+        <button
+          onClick={logout}
+          title="Disconnect wallet"
+          className={clsx(
+            "text-muted hover:text-danger hover:bg-surface/50 transition-colors",
+            compact ? "px-2 py-1 text-[10px]" : "px-2.5 py-1.5 text-[11px]",
+          )}
+        >
+          ×
+        </button>
+      </div>
     );
   }
 
