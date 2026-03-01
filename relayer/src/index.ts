@@ -233,6 +233,21 @@ const server = createServer((req, res) => {
               data.signature    as `0x${string}`,
             );
           } else {
+            // Buy order: parse EIP-3009 TransferAuth (required for EIP-3009 settlement)
+            let transferAuth = undefined;
+            if (data.transferAuth) {
+              const ta = data.transferAuth;
+              transferAuth = {
+                validAfter:  BigInt(ta.validAfter  ?? "0"),
+                validBefore: BigInt(ta.validBefore ?? "0"),
+                nonce:       (ta.nonce ?? ("0x" + "0".repeat(64))) as `0x${string}`,
+                v:           Number(ta.v ?? 0),
+                r:           (ta.r ?? ("0x" + "0".repeat(64))) as `0x${string}`,
+                s:           (ta.s ?? ("0x" + "0".repeat(64))) as `0x${string}`,
+              };
+            } else {
+              console.warn(`[Relayer] Buy order from ${signer} has no transferAuth — settlement will fail if this order fills`);
+            }
             await processor.submitCommitmentFor(
               BigInt(batchId),
               order,
@@ -241,6 +256,7 @@ const server = createServer((req, res) => {
               BigInt(nonce),
               BigInt(deadline),
               data.signature    as `0x${string}`,
+              transferAuth,
             );
           }
         } else {
@@ -647,7 +663,10 @@ async function recoverSettlingBatches() {
     const [closedLogs, settledLogs] = await Promise.all([
       getLogsChunked({ address: baseConfig.vaultAddress, event: BATCH_CLOSED_EVENT  }, scanFrom, toBlock),
       getLogsChunked({ address: baseConfig.vaultAddress, event: BATCH_SETTLED_EVENT }, scanFrom, toBlock),
-    ]);
+    ]) as [
+      Array<{ args: { batchId?: bigint; commitmentCount?: bigint } }>,
+      Array<{ args: { batchId?: bigint } }>,
+    ];
 
     const settledIds = new Set(settledLogs.map((l) => (l.args.batchId as bigint).toString()));
     // Sort descending so newest batch wins when multiple SETTLING batches share a market key.
@@ -722,7 +741,10 @@ async function recoverOpenBatches() {
     const [openedLogs, closedLogs] = await Promise.all([
       getLogsChunked({ address: baseConfig.vaultAddress, event: BATCH_OPENED_EVENT }, scanFrom, toBlock),
       getLogsChunked({ address: baseConfig.vaultAddress, event: BATCH_CLOSED_EVENT }, scanFrom, toBlock),
-    ]);
+    ]) as [
+      Array<{ args: { batchId?: bigint; marketId?: `0x${string}`; openedAt?: bigint } }>,
+      Array<{ args: { batchId?: bigint; commitmentCount?: bigint } }>,
+    ];
 
     const closedIds = new Set(closedLogs.map((l) => (l.args.batchId as bigint).toString()));
     // Keep only batches that were opened but never closed = still OPEN

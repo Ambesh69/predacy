@@ -5,8 +5,8 @@ import { clsx } from "clsx";
 
 interface CommitmentEntry {
   hash: `0x${string}`;
-  amount: bigint;
-  trader: `0x${string}`;
+  amount?: bigint;   // undefined for on-chain entries (not in event after privacy fix)
+  trader?: `0x${string}`; // undefined for on-chain entries (not in event after privacy fix)
   timestamp: number;
   isBuy?: boolean; // undefined = unknown (on-chain fetch without side info)
 }
@@ -58,7 +58,9 @@ function useScramble(value: string, duration = 600): string {
 
 function HashEntry({ entry, isMe }: { entry: CommitmentEntry; isMe: boolean }) {
   const shortHash = entry.hash.slice(0, 18) + "…" + entry.hash.slice(-6);
-  const shortTrader = entry.trader.slice(0, 6) + "…" + entry.trader.slice(-4);
+  const shortTrader = entry.trader
+    ? entry.trader.slice(0, 6) + "…" + entry.trader.slice(-4)
+    : "0x???…????"; // relayer or unknown — trader not in on-chain event
   const scrambledHash = useScramble(shortHash, 800);
   const [hovered, setHovered] = useState(false);
 
@@ -95,9 +97,9 @@ function HashEntry({ entry, isMe }: { entry: CommitmentEntry; isMe: boolean }) {
         )}
       </div>
 
-      {/* Amount — always obscured for others */}
+      {/* Amount — hidden for others; shown to owner from local state */}
       <div className="text-right flex-shrink-0">
-        {isMe ? (
+        {isMe && entry.amount != null ? (
           <span className="text-xs text-accent/80 tabular-nums">
             {entry.isBuy === false
               ? `${(Number(entry.amount) / 1_000_000).toFixed(2)} YES`
@@ -110,7 +112,7 @@ function HashEntry({ entry, isMe }: { entry: CommitmentEntry; isMe: boolean }) {
         )}
       </div>
 
-      {/* Trader */}
+      {/* Trader — hidden for on-chain entries (not in event) */}
       <div className="text-right flex-shrink-0 w-20 hidden sm:block">
         {isMe ? (
           <span className="text-[10px] text-muted">{shortTrader}</span>
@@ -168,7 +170,7 @@ export default function CommitmentFeed({ entries, myAddress }: CommitmentFeedPro
               <HashEntry
                 key={entry.hash}
                 entry={entry}
-                isMe={myAddress?.toLowerCase() === entry.trader.toLowerCase()}
+                isMe={!!myAddress && !!entry.trader && myAddress.toLowerCase() === entry.trader.toLowerCase()}
               />
             ))}
           </div>
@@ -176,7 +178,7 @@ export default function CommitmentFeed({ entries, myAddress }: CommitmentFeedPro
       </div>
 
       {/* What others see vs what you see */}
-      {myAddress && entries.find((e) => e.trader.toLowerCase() === myAddress.toLowerCase()) && (
+      {myAddress && entries.find((e) => e.trader && e.trader.toLowerCase() === myAddress.toLowerCase()) && (
         <div className="border-t border-border p-3 space-y-1.5">
           <span className="text-[10px] text-muted-dim tracking-widest uppercase">Privacy Status</span>
           <div className="grid grid-cols-2 gap-2">

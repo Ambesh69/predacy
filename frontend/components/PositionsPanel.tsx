@@ -28,13 +28,12 @@ interface PositionsPanelProps {
   currentBatchId: bigint;
   currentBatchStatus: BatchStatus;
   /** Commitments the user has sealed in the current batch this session */
-  currentBatchCommitments: Array<{ hash: `0x${string}`; amount: bigint }>;
+  currentBatchCommitments: Array<{ hash: `0x${string}`; amount?: bigint }>;
   onClaim: (batchId: bigint) => Promise<void>;
   /** Called after scanning history — provides unique market IDs seen across all batches */
   onMarketIdsFound?: (ids: `0x${string}`[]) => void;
 }
 
-const MAX_SCAN = 500; // scan all the way back to batch 1 (capped for safety)
 
 function BatchStatusBadge({ status }: { status: BatchStatus }) {
   if (status === BatchStatus.OPEN)
@@ -79,6 +78,7 @@ export default function PositionsPanel({
   } | null>(null);
 
   // ── Fetch current batch position when it settles ─────────────────────────────
+  // Position is keyed by commitment hash — look up from localStorage.
   useEffect(() => {
     if (currentBatchStatus !== BatchStatus.SETTLED || currentBatchId === 0n) {
       setCurrentPosition(null);
@@ -87,12 +87,18 @@ export default function PositionsPanel({
     let cancelled = false;
     const fetch = async () => {
       try {
+        const storageKey = `predacy:orders:${walletAddress.toLowerCase()}`;
+        const storedOrders: Array<{ commitment: string; batchId: string }> =
+          JSON.parse(localStorage.getItem(storageKey) ?? "[]");
+        const myOrder = storedOrders.find((o) => o.batchId === currentBatchId.toString());
+        if (!myOrder) return; // no order in this batch
+
         const contracts = getContracts(ACTIVE_CHAIN.id);
         const pos = await publicClient.readContract({
           address: contracts.batchVault,
           abi: BATCH_VAULT_ABI,
           functionName: "getPosition",
-          args: [currentBatchId, walletAddress],
+          args: [currentBatchId, myOrder.commitment as `0x${string}`],
         }) as { filledAmount: bigint; refundAmount: bigint; isBuy: boolean; claimed: boolean };
         if (!cancelled) setCurrentPosition(pos);
       } catch { /* RPC hiccup */ }
@@ -101,46 +107,61 @@ export default function PositionsPanel({
     return () => { cancelled = true; };
   }, [currentBatchStatus, currentBatchId, walletAddress]);
 
-  // ── Scan historical batches ──────────────────────────────────────────────────
+  // ── Scan historical batches from localStorage ─────────────────────────────────
+  // Positions are keyed by commitment hash — look up from localStorage instead of
+  // scanning all batches by address (which is no longer possible after the privacy fix).
   const scanHistory = useCallback(async () => {
-    if (currentBatchId <= 1n) return;
     setScanning(true);
     const contracts = getContracts(ACTIVE_CHAIN.id);
     const results: HistoricalPosition[] = [];
-    const startId = currentBatchId - 1n;
-    const endId = startId - BigInt(MAX_SCAN) > 0n ? startId - BigInt(MAX_SCAN) : 1n;
 
-    for (let id = startId; id >= endId; id--) {
-      try {
-        const [batchRaw, posRaw] = await Promise.all([
-          publicClient.readContract({
-            address: contracts.batchVault,
-            abi: BATCH_VAULT_ABI,
-            functionName: "getBatch",
-            args: [id],
-          }) as Promise<{ status: number; marketId: `0x${string}` }>,
-          publicClient.readContract({
-            address: contracts.batchVault,
-            abi: BATCH_VAULT_ABI,
-            functionName: "getPosition",
-            args: [id, walletAddress],
-          }) as Promise<{ filledAmount: bigint; refundAmount: bigint; isBuy: boolean; claimed: boolean }>,
-        ]);
+    // Load all stored orders for this wallet
+    let storedOrders: Array<{
+      commitment: string; batchId: string;
+    }> = [];
+    try {
+      const storageKey = `predacy:orders:${walletAddress.toLowerCase()}`;
+      storedOrders = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
+    } catch { /* ignore */ }
 
-        // Skip batches with no position
-        if (posRaw.filledAmount === 0n && posRaw.refundAmount === 0n) continue;
+    // Only look at historical batches (exclude current batch — handled separately)
+    const historicalOrders = storedOrders.filter(
+      (o) => o.batchId !== currentBatchId.toString()
+    );
 
-        results.push({
-          batchId: id,
-          batchMarketId: batchRaw.marketId,
-          batchStatus: batchRaw.status as BatchStatus,
-          position: posRaw,
-        });
-      } catch {
-        // batch doesn't exist or RPC hiccup — stop scanning backwards
-        break;
-      }
-    }
+    await Promise.allSettled(
+      historicalOrders.map(async (order) => {
+        try {
+          const id = BigInt(order.batchId);
+          const [batchRaw, posRaw] = await Promise.all([
+            publicClient.readContract({
+              address: contracts.batchVault,
+              abi: BATCH_VAULT_ABI,
+              functionName: "getBatch",
+              args: [id],
+            }) as Promise<{ status: number; marketId: `0x${string}` }>,
+            publicClient.readContract({
+              address: contracts.batchVault,
+              abi: BATCH_VAULT_ABI,
+              functionName: "getPosition",
+              args: [id, order.commitment as `0x${string}`],
+            }) as Promise<{ filledAmount: bigint; refundAmount: bigint; isBuy: boolean; claimed: boolean }>,
+          ]);
+
+          if (posRaw.filledAmount === 0n && posRaw.refundAmount === 0n) return;
+
+          results.push({
+            batchId: id,
+            batchMarketId: batchRaw.marketId,
+            batchStatus: batchRaw.status as BatchStatus,
+            position: posRaw,
+          });
+        } catch { /* batch doesn't exist or RPC hiccup — skip */ }
+      })
+    );
+
+    // Sort descending by batchId
+    results.sort((a, b) => (a.batchId > b.batchId ? -1 : 1));
     setHistoricalPositions(results);
     setScanning(false);
     // Bubble up all unique market IDs so the sell form can check balance for each
@@ -206,7 +227,7 @@ export default function PositionsPanel({
               {currentBatchCommitments.map((c) => (
                 <div key={c.hash} className="space-y-0.5">
                   <p className="text-[10px] text-muted-dim">
-                    Amount: <span className="text-text">{formatUsdc(c.amount)}</span>
+                    Amount: <span className="text-text">{c.amount != null ? formatUsdc(c.amount) : "—"}</span>
                   </p>
                   <p className="hash-text text-[10px] text-muted-dim break-all">{c.hash}</p>
                 </div>
@@ -257,7 +278,7 @@ export default function PositionsPanel({
           </div>
         ) : historicalPositions.length === 0 ? (
           <div className="border border-border p-3 text-center">
-            <p className="text-[11px] text-muted-dim">No positions in the last {MAX_SCAN} batches.</p>
+            <p className="text-[11px] text-muted-dim">No historical positions found.</p>
           </div>
         ) : (
           <div className="space-y-2">

@@ -34,6 +34,23 @@ contract MockUSDC {
         allowance[msg.sender][spender] = amount;
         return true;
     }
+
+    /// @notice EIP-3009 stub — skips all signature/time validation for testing.
+    ///         Mirrors MockBatchVerifier philosophy: crypto verification is skipped in tests.
+    function transferWithAuthorization(
+        address from,
+        address to,
+        uint256 value,
+        uint256, /*validAfter*/
+        uint256, /*validBefore*/
+        bytes32, /*nonce*/
+        uint8,   /*v*/
+        bytes32, /*r*/
+        bytes32  /*s*/
+    ) external {
+        balanceOf[from] -= value;
+        balanceOf[to]   += value;
+    }
 }
 
 /// @notice Minimal CTF mock — uses real token ID computation matching BatchVault._getYesTokenId
@@ -173,6 +190,11 @@ contract BatchVaultTest is Test {
         usdc.approve(address(vault), type(uint256).max);
         vm.prank(carol);
         usdc.approve(address(vault), type(uint256).max);
+
+        // Fund relayer for gas (USDC no longer paid upfront with EIP-3009 model)
+        usdc.mint(relayer, 10_000e6);
+        vm.prank(relayer);
+        usdc.approve(address(vault), type(uint256).max); // kept for backward compat; not used
     }
 
     // ─── Helpers ───────────────────────────────────────────────────────────
@@ -215,6 +237,29 @@ contract BatchVaultTest is Test {
     function _approveVaultCTF(address trader) internal {
         vm.prank(trader);
         ctf.setApprovalForAll(address(vault), true);
+    }
+
+    /// @dev Zero-value EIP-3009 auth — used for sell orders and unfilled buy orders
+    ///      (the vault never calls transferWithAuthorization for these).
+    function _zeroAuth() internal pure returns (BatchVault.TransferAuth memory) {
+        return BatchVault.TransferAuth({
+            validAfter:  0,
+            validBefore: 0,
+            nonce:       bytes32(0),
+            v:           0,
+            r:           bytes32(0),
+            s:           bytes32(0)
+        });
+    }
+
+    /// @dev Build an auths array of `count` zero-value structs.
+    ///      TestMockUSDC.transferWithAuthorization skips all validation, so zero-value
+    ///      auths work for filled buy orders in tests (real USDC requires non-zero validBefore).
+    function _buildAuths(uint256 count) internal pure returns (BatchVault.TransferAuth[] memory auths) {
+        auths = new BatchVault.TransferAuth[](count);
+        for (uint256 i = 0; i < count; i++) {
+            auths[i] = _zeroAuth();
+        }
     }
 
     function _buildSettleParams(BatchVault.RevealedOrder[] memory orders, uint256 clearingPrice)
@@ -290,9 +335,10 @@ contract BatchVaultTest is Test {
         vm.prank(alice);
         vault.commitOrder(commitment, amount, MARKET_ID);
 
-        assertEq(usdc.balanceOf(address(vault)), amount);
+        // EIP-3009: no USDC deposited at commit time — funds stay in user wallet until settlement
+        assertEq(usdc.balanceOf(address(vault)), 0);
         assertEq(vault.getBatch(1).commitmentCount, 1);
-        assertEq(vault.getBatch(1).totalDeposited, amount);
+        assertEq(vault.getBatch(1).totalDeposited, amount); // tracks authorized volume
     }
 
     function test_commitOrder_emitsEvent() public {
@@ -301,8 +347,8 @@ contract BatchVaultTest is Test {
         uint256 amount = 50e6;
         bytes32 commitment = _makeCommitment(MARKET_ID, true, amount, 600000, salt, alice);
 
-        vm.expectEmit(true, true, false, true);
-        emit BatchVault.OrderCommitted(1, alice, commitment, amount);
+        vm.expectEmit(true, true, false, false);
+        emit BatchVault.OrderCommitted(1, commitment);
 
         vm.prank(alice);
         vault.commitOrder(commitment, amount, MARKET_ID);
@@ -315,7 +361,7 @@ contract BatchVaultTest is Test {
         vm.prank(alice);
         vault.commitOrder(commitment, 100e6, MARKET_ID);
 
-        vm.expectRevert(BatchVault.AlreadyCommitted.selector);
+        vm.expectRevert(BatchVault.DuplicateCommitment.selector);
         vm.prank(alice);
         vault.commitOrder(commitment, 100e6, MARKET_ID);
     }
@@ -436,7 +482,7 @@ contract BatchVaultTest is Test {
         (uint256 buyVol, uint256 sellVol, uint256 netBuy, uint256 netSell) = _buildSettleParams(orders, clearingPrice);
 
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, clearingPrice, buyVol, sellVol, netBuy, netSell, "");
+        vault.settleBatch(batchId, orders, _buildAuths(orders.length), clearingPrice, buyVol, sellVol, netBuy, netSell, "");
 
         BatchVault.Batch memory b = vault.getBatch(batchId);
         assertEq(uint256(b.status), uint256(BatchVault.BatchStatus.SETTLED));
@@ -462,7 +508,7 @@ contract BatchVaultTest is Test {
 
         vm.expectRevert(BatchVault.CommitmentMismatch.selector);
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, 650000, 100e6, 0, 100e6, 0, "");
+        vault.settleBatch(batchId, orders, _buildAuths(orders.length), 650000, 100e6, 0, 100e6, 0, "");
     }
 
     function test_settleBatch_invalidClearingPrice_reverts() public {
@@ -479,15 +525,17 @@ contract BatchVaultTest is Test {
 
         vm.expectRevert(BatchVault.InvalidClearingPrice.selector);
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, 0, 100e6, 0, 100e6, 0, "");
+        vault.settleBatch(batchId, orders, _buildAuths(orders.length), 0, 100e6, 0, 100e6, 0, "");
     }
 
     // ─── Tests: claim position — buy orders ───────────────────────────────
 
-    function test_claimPosition_refundOnUnfilled() public {
+    function test_claimPosition_unfilled_buy_nothingToClaim() public {
         uint256 batchId = _openBatch();
 
         // Alice bids too low to fill (limit 0.40, clearing will be 0.65)
+        // With EIP-3009: Alice's USDC was never deposited — it stays in her wallet.
+        // After settlement, claimPosition returns NothingToClaim (no refund needed).
         bytes32 salt = bytes32(uint256(1));
         uint256 amount = 100e6;
         uint256 limitAlice = 400000; // 0.40 — won't fill
@@ -495,43 +543,66 @@ contract BatchVaultTest is Test {
         bytes32 commitment = _makeCommitment(MARKET_ID, true, amount, limitAlice, salt, alice);
         vm.prank(alice);
         vault.commitOrder(commitment, amount, MARKET_ID);
+
+        // Alice's USDC never left her wallet
+        assertEq(usdc.balanceOf(alice), 1000e6);
+        assertEq(usdc.balanceOf(address(vault)), 0);
+
         _closeBatch(batchId);
 
         BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
         orders[0] = BatchVault.RevealedOrder(alice, true, amount, limitAlice, salt);
 
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, 650000, 0, 0, 0, 0, "");
+        vault.settleBatch(batchId, orders, _buildAuths(orders.length), 650000, 0, 0, 0, 0, "");
 
-        uint256 balanceBefore = usdc.balanceOf(alice);
+        // Alice still has all her USDC (never deposited)
+        assertEq(usdc.balanceOf(alice), 1000e6);
 
+        // claimPosition reverts — unfilled buy orders have nothing to claim
+        vm.expectRevert(BatchVault.NothingToClaim.selector);
         vm.prank(alice);
-        vault.claimPosition(batchId);
-
-        // Full USDC refund since order didn't fill
-        assertEq(usdc.balanceOf(alice), balanceBefore + amount);
+        vault.claimPosition(batchId, true, amount, limitAlice, salt);
     }
 
     function test_claimPosition_doubleClaim_reverts() public {
+        // Use a filled sell order to test AlreadyClaimed (sell orders always have a position to claim).
+        // Unfilled buy orders have NothingToClaim with EIP-3009 (USDC was never deposited).
         uint256 batchId = _openBatch();
 
-        bytes32 salt = bytes32(uint256(1));
-        bytes32 commitment = _makeCommitment(MARKET_ID, true, 100e6, 400000, salt, alice);
+        uint256 yesCarol  = 100e6;
+        uint256 amtAlice  = 100e6;
+        bytes32 saltCarol = bytes32(uint256(1));
+        bytes32 saltAlice = bytes32(uint256(2));
+
+        bytes32 cCarol = _makeCommitment(MARKET_ID, false, yesCarol, 600000, saltCarol, carol);
+        bytes32 cAlice = _makeCommitment(MARKET_ID, true,  amtAlice, 700000, saltAlice, alice);
+
+        _mintYes(carol, yesCarol);
+        _approveVaultCTF(carol);
+        vm.prank(carol);
+        vault.commitSellOrder(cCarol, yesCarol, MARKET_ID);
         vm.prank(alice);
-        vault.commitOrder(commitment, 100e6, MARKET_ID);
+        vault.commitOrder(cAlice, amtAlice, MARKET_ID);
+
         _closeBatch(batchId);
 
-        BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
-        orders[0] = BatchVault.RevealedOrder(alice, true, 100e6, 400000, salt);
+        BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](2);
+        orders[0] = BatchVault.RevealedOrder(carol, false, yesCarol, 600000, saltCarol);
+        orders[1] = BatchVault.RevealedOrder(alice, true,  amtAlice, 700000, saltAlice);
+
+        (uint256 buyVol, uint256 sellVol, uint256 netBuy, uint256 netSell) = _buildSettleParams(orders, 650000);
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, 650000, 0, 0, 0, 0, "");
+        vault.settleBatch(batchId, orders, _buildAuths(orders.length), 650000, buyVol, sellVol, netBuy, netSell, "");
 
-        vm.prank(alice);
-        vault.claimPosition(batchId);
+        // Carol claims her USDC from filled sell order
+        vm.prank(carol);
+        vault.claimPosition(batchId, false, yesCarol, 600000, saltCarol);
 
+        // Second claim reverts AlreadyClaimed
         vm.expectRevert(BatchVault.AlreadyClaimed.selector);
-        vm.prank(alice);
-        vault.claimPosition(batchId);
+        vm.prank(carol);
+        vault.claimPosition(batchId, false, yesCarol, 600000, saltCarol);
     }
 
     // ─── Tests: claim position — sell orders ──────────────────────────────
@@ -566,10 +637,10 @@ contract BatchVaultTest is Test {
 
         (uint256 buyVol, uint256 sellVol, uint256 netBuy, uint256 netSell) = _buildSettleParams(orders, clearingPrice);
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, clearingPrice, buyVol, sellVol, netBuy, netSell, "");
+        vault.settleBatch(batchId, orders, _buildAuths(orders.length), clearingPrice, buyVol, sellVol, netBuy, netSell, "");
 
         // Carol's position: filledAmount = 80 * 0.65 = 52 USDC
-        BatchVault.Position memory pos = vault.getPosition(batchId, carol);
+        BatchVault.Position memory pos = vault.getPosition(batchId, cCarol);
         uint256 expectedUSDC = yesCarol * clearingPrice / 1e6; // 52e6
         assertEq(pos.filledAmount, expectedUSDC);
         assertEq(pos.refundAmount, 0);
@@ -577,7 +648,7 @@ contract BatchVaultTest is Test {
 
         uint256 carolUSDCBefore = usdc.balanceOf(carol);
         vm.prank(carol);
-        vault.claimPosition(batchId);
+        vault.claimPosition(batchId, false, yesCarol, 600000, saltCarol);
 
         // Carol receives USDC for her sold YES tokens
         assertEq(usdc.balanceOf(carol), carolUSDCBefore + expectedUSDC);
@@ -603,16 +674,16 @@ contract BatchVaultTest is Test {
 
         // Settlement with no buy orders — just need clearing price for the verify
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, 650000, 0, 0, 0, 0, "");
+        vault.settleBatch(batchId, orders, _buildAuths(orders.length), 650000, 0, 0, 0, 0, "");
 
         // Carol's position: no fill, full refund of YES tokens
-        BatchVault.Position memory pos = vault.getPosition(batchId, carol);
+        BatchVault.Position memory pos = vault.getPosition(batchId, cCarol);
         assertEq(pos.filledAmount, 0);
         assertEq(pos.refundAmount, yesCarol); // YES tokens back
 
         uint256 carolYesBefore = ctf.balanceOf(carol, _yesTokenId());
         vm.prank(carol);
-        vault.claimPosition(batchId);
+        vault.claimPosition(batchId, false, yesCarol, 800000, saltCarol);
 
         // Carol gets her YES tokens back
         assertEq(ctf.balanceOf(carol, _yesTokenId()), carolYesBefore + yesCarol);
@@ -650,7 +721,7 @@ contract BatchVaultTest is Test {
 
         (uint256 buyVol, uint256 sellVol, uint256 netBuy, uint256 netSell) = _buildSettleParams(orders, clearingPrice);
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, clearingPrice, buyVol, sellVol, netBuy, netSell, "");
+        vault.settleBatch(batchId, orders, _buildAuths(orders.length), clearingPrice, buyVol, sellVol, netBuy, netSell, "");
 
         BatchVault.Batch memory b = vault.getBatch(batchId);
         // netBuyAmount = 130 - 80*0.65 = 130 - 52 = 78 USDC
@@ -661,13 +732,13 @@ contract BatchVaultTest is Test {
         assertEq(b.totalFilledBuyVol, amtAlice);
 
         // Alice claims: (130/130) * (120 + 80) = 200 YES tokens
-        BatchVault.Position memory alicePos = vault.getPosition(batchId, alice);
+        BatchVault.Position memory alicePos = vault.getPosition(batchId, cAlice);
         uint256 expectedYes = (alicePos.filledAmount * (b.yesTokensReceived + b.filledSellYes)) / b.totalFilledBuyVol;
         assertEq(expectedYes, 200e6);
 
         uint256 aliceYesBefore = ctf.balanceOf(alice, _yesTokenId());
         vm.prank(alice);
-        vault.claimPosition(batchId);
+        vault.claimPosition(batchId, true, amtAlice, 700000, bytes32(uint256(1)));
         assertEq(ctf.balanceOf(alice, _yesTokenId()), aliceYesBefore + expectedYes);
     }
 
@@ -686,12 +757,11 @@ contract BatchVaultTest is Test {
         vm.prank(alice);
         vault.commitOrder(commitment, amount, MARKET_ID);
 
-        // On-chain commitment reveals only the hash — not direction, price, or salt
+        // On-chain commitment reveals ONLY the hash — no trader address, direction, price, or salt
         BatchVault.Commitment memory c = vault.getCommitment(1, 0);
-        assertEq(c.hash, commitment);   // hash is visible
+        assertEq(c.hash, commitment);   // hash is visible (commitment itself)
         assertEq(c.amount, amount);     // amount locked is visible
-        assertEq(c.trader, alice);      // trader address is visible
-        // But isBuy, limitPrice, and salt are NOT stored — they only exist in the hash
+        // trader address, isBuy, limitPrice, and salt are NOT stored — hidden from on-chain observers
     }
 
     // ─── Tests: commitOrderFor (EIP-712 meta-transactions) ────────────────
@@ -723,8 +793,7 @@ contract BatchVaultTest is Test {
         uint256 daveKey = 0xDA7E;
         address dave = vm.addr(daveKey);
         usdc.mint(dave, 1000e6);
-        vm.prank(dave);
-        usdc.approve(address(vault), type(uint256).max);
+        // Note: dave no longer needs to approve vault — EIP-3009 pull happens at settlement only
 
         uint256 amount = 100e6;
         uint256 limitPrice = 650000;
@@ -734,14 +803,16 @@ contract BatchVaultTest is Test {
         bytes32 commitment = _makeCommitment(MARKET_ID, true, amount, limitPrice, salt, dave);
         bytes memory sig = _signCommitOrder(daveKey, commitment, amount, batchId, 0, deadline);
 
+        uint256 relayerBefore = usdc.balanceOf(relayer);
         vm.prank(relayer);
         vault.commitOrderFor(commitment, amount, dave, 0, deadline, sig, MARKET_ID);
 
-        assertEq(usdc.balanceOf(dave), 900e6);
-        assertEq(usdc.balanceOf(address(vault)), amount);
+        // EIP-3009: no USDC moves at commit time — dave's funds stay in his wallet
+        assertEq(usdc.balanceOf(dave), 1000e6);           // dave's USDC unchanged
+        assertEq(usdc.balanceOf(address(vault)), 0);       // vault gets USDC only at settlement
+        assertEq(usdc.balanceOf(relayer), relayerBefore);  // relayer doesn't pay upfront
 
         BatchVault.Commitment memory c = vault.getCommitment(batchId, 0);
-        assertEq(c.trader, dave);
         assertEq(c.amount, amount);
         assertEq(vault.nonces(dave), 1);
     }
@@ -757,8 +828,8 @@ contract BatchVaultTest is Test {
         bytes32 commitment = _makeCommitment(MARKET_ID, true, 50e6, 600000, bytes32(uint256(7)), dave);
         bytes memory sig = _signCommitOrder(daveKey, commitment, 50e6, batchId, 0, block.timestamp + 1 hours);
 
-        vm.expectEmit(true, true, false, true);
-        emit BatchVault.OrderCommitted(batchId, dave, commitment, 50e6);
+        vm.expectEmit(true, true, false, false);
+        emit BatchVault.OrderCommitted(batchId, commitment);
 
         vm.prank(relayer);
         vault.commitOrderFor(commitment, 50e6, dave, 0, block.timestamp + 1 hours, sig, MARKET_ID);
@@ -858,11 +929,11 @@ contract BatchVaultTest is Test {
         orders[0] = BatchVault.RevealedOrder(dave, true, amount, limitPrice, salt);
 
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, 650000, amount, 0, amount, 0, "");
+        vault.settleBatch(batchId, orders, _buildAuths(orders.length), 650000, amount, 0, amount, 0, "");
 
         assertEq(uint256(vault.getBatch(batchId).status), uint256(BatchVault.BatchStatus.SETTLED));
 
-        BatchVault.Position memory pos = vault.getPosition(batchId, dave);
+        BatchVault.Position memory pos = vault.getPosition(batchId, commitment);
         assertEq(pos.filledAmount, amount);
     }
 
@@ -892,13 +963,13 @@ contract BatchVaultTest is Test {
         uint256 netSellYes = yesCarol;
 
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, clearingPrice, 0, yesCarol, 0, netSellYes, "");
+        vault.settleBatch(batchId, orders, _buildAuths(orders.length), clearingPrice, 0, yesCarol, 0, netSellYes, "");
 
         // mockSellYes burned 50 YES from vault, minted 50 * 0.65 = 32.5 USDC to vault
         // Carol's filledAmount = 50e6 * 0.65 = 32_500_000 USDC
         uint256 expectedUSDC = yesCarol * clearingPrice / 1e6; // 32_500_000
 
-        BatchVault.Position memory pos = vault.getPosition(batchId, carol);
+        BatchVault.Position memory pos = vault.getPosition(batchId, cCarol);
         assertEq(pos.filledAmount, expectedUSDC);
         assertEq(pos.refundAmount, 0);
         assertFalse(pos.isBuy);
@@ -909,7 +980,7 @@ contract BatchVaultTest is Test {
         // Carol claims: receives USDC from vault
         uint256 carolUSDCBefore = usdc.balanceOf(carol);
         vm.prank(carol);
-        vault.claimPosition(batchId);
+        vault.claimPosition(batchId, false, yesCarol, 600_000, saltCarol);
 
         assertEq(usdc.balanceOf(carol), carolUSDCBefore + expectedUSDC);
         assertEq(usdc.balanceOf(address(vault)), 0);
@@ -930,7 +1001,7 @@ contract BatchVaultTest is Test {
 
         vm.expectRevert(BatchVault.OnlyRelayer.selector);
         vm.prank(alice);
-        vault.settleBatch(batchId, orders, 650000, 100e6, 0, 100e6, 0, "");
+        vault.settleBatch(batchId, orders, _buildAuths(orders.length), 650000, 100e6, 0, 100e6, 0, "");
     }
 
     // ─── Tests: concurrent multi-market ────────────────────────────────────
@@ -981,7 +1052,7 @@ contract BatchVaultTest is Test {
         BatchVault.RevealedOrder[] memory orders1 = new BatchVault.RevealedOrder[](1);
         orders1[0] = BatchVault.RevealedOrder(alice, true, amtAlice, 650000, saltAlice);
         vm.prank(relayer);
-        vault.settleBatch(batchId1, orders1, 650000, amtAlice, 0, amtAlice, 0, "");
+        vault.settleBatch(batchId1, orders1, _buildAuths(orders1.length), 650000, amtAlice, 0, amtAlice, 0, "");
         assertEq(uint256(vault.getBatch(1).status), uint256(BatchVault.BatchStatus.SETTLED));
 
         // Market 2 batch is still OPEN after market 1 settles
@@ -994,18 +1065,21 @@ contract BatchVaultTest is Test {
         BatchVault.RevealedOrder[] memory orders2 = new BatchVault.RevealedOrder[](1);
         orders2[0] = BatchVault.RevealedOrder(bob, true, amtBob, 700000, saltBob);
         vm.prank(relayer);
-        vault.settleBatch(batchId2, orders2, 700000, amtBob, 0, amtBob, 0, "");
+        vault.settleBatch(batchId2, orders2, _buildAuths(orders2.length), 700000, amtBob, 0, amtBob, 0, "");
         assertEq(uint256(vault.getBatch(2).status), uint256(BatchVault.BatchStatus.SETTLED));
 
-        // Each trader's position is in the correct batch
-        BatchVault.Position memory alicePos = vault.getPosition(batchId1, alice);
-        BatchVault.Position memory bobPos   = vault.getPosition(batchId2, bob);
+        // Each trader's position is in the correct batch (keyed by commitment hash)
+        BatchVault.Position memory alicePos = vault.getPosition(batchId1, cAlice);
+        BatchVault.Position memory bobPos   = vault.getPosition(batchId2, cBob);
         assertEq(alicePos.filledAmount, amtAlice);
         assertEq(bobPos.filledAmount,   amtBob);
 
         // Cross-check: alice has no position in batch 2, bob has none in batch 1
-        BatchVault.Position memory aliceInBatch2 = vault.getPosition(batchId2, alice);
-        BatchVault.Position memory bobInBatch1   = vault.getPosition(batchId1, bob);
+        // (use commitment hashes that were never submitted to those batches)
+        bytes32 aliceForBatch2 = _makeCommitment(MARKET_ID_2, true, amtAlice, 650000, saltAlice, alice);
+        bytes32 bobForBatch1   = _makeCommitment(MARKET_ID,   true, amtBob,   700000, saltBob,   bob);
+        BatchVault.Position memory aliceInBatch2 = vault.getPosition(batchId2, aliceForBatch2);
+        BatchVault.Position memory bobInBatch1   = vault.getPosition(batchId1, bobForBatch1);
         assertEq(aliceInBatch2.filledAmount, 0);
         assertEq(bobInBatch1.filledAmount,   0);
     }

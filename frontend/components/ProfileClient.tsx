@@ -17,28 +17,38 @@ const EXPLORER =
   ACTIVE_CHAIN.blockExplorers?.default.url ?? "https://amoy.polygonscan.com";
 
 const ORDER_COMMITTED_EVENT = parseAbiItem(
-  "event OrderCommitted(uint256 indexed batchId, address indexed trader, bytes32 commitment, uint256 amount)"
+  "event OrderCommitted(uint256 indexed batchId, bytes32 indexed commitment)"
 );
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
+/** Persisted locally when the user submits an order (MarketPageClient writes this) */
+interface StoredOrder {
+  commitment:      string;
+  salt?:           string;   // preimage needed at claim time; undefined in older cached orders
+  amount:          string;
+  isBuy:           boolean;
+  limitPrice:      string;
+  batchId:         string;
+  marketId:        string | null;
+  marketQuestion:  string | null;
+  timestamp:       number;
+}
+
 interface OrderEntry {
-  txHash: `0x${string}`;
-  blockNumber: bigint;
-  batchId: bigint;
-  commitment: `0x${string}`;
-  rawAmount: bigint; // USDC (6 dec) for buys, YES tokens (18 dec) for sells
-  // Enriched after getBatch + getPosition:
-  marketId?: `0x${string}`;
-  batchStatus?: BatchStatus;
-  clearingPrice?: bigint;
-  position?: {
-    filledAmount: bigint;
-    refundAmount: bigint;
-    isBuy: boolean;
-    claimed: boolean;
-  };
+  // from localStorage
+  commitment:      `0x${string}`;
+  rawAmount:       bigint;
+  isBuy:           boolean;
+  limitPrice:      bigint;
+  batchId:         bigint;
+  marketId?:       `0x${string}`;
   marketQuestion?: string;
+  timestamp:       number;
+  // enriched from chain
+  txHash?:         `0x${string}`;
+  batchStatus?:    BatchStatus;
+  clearingPrice?:  bigint;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -71,17 +81,9 @@ function CopyButton({ value, label }: { value: string; label?: string }) {
 
 function StatusBadge({
   status,
-  claimed,
 }: {
   status?: BatchStatus;
-  claimed?: boolean;
 }) {
-  if (claimed)
-    return (
-      <span className="text-[9px] tracking-widest uppercase text-accent/70 border border-accent/20 px-1.5 py-0.5">
-        CLAIMED ✓
-      </span>
-    );
   if (status === BatchStatus.SETTLED)
     return (
       <span className="text-[9px] tracking-widest uppercase text-yellow-400/70 border border-yellow-400/20 px-1.5 py-0.5">
@@ -112,20 +114,19 @@ function StatusBadge({
 function OrderRow({ order }: { order: OrderEntry }) {
   const [expanded, setExpanded] = useState(false);
 
-  const isSettled = order.batchStatus === BatchStatus.SETTLED;
-  const isClaimed = order.position?.claimed ?? false;
-  const isBuy = order.position?.isBuy ?? true;
-  const hasResult =
-    order.position &&
-    (order.position.filledAmount > 0n || order.position.refundAmount > 0n);
+  const amountDisplay = order.isBuy
+    ? fUsdc(order.rawAmount)
+    : `${(Number(order.rawAmount) / 1e18).toFixed(4)} YES`;
 
-  // Format deposit amount — use position.isBuy once available
-  const amountDisplay =
-    order.position != null
-      ? order.position.isBuy
-        ? fUsdc(order.rawAmount)
-        : `${(Number(order.rawAmount) / 1e18).toFixed(4)} YES`
-      : fUsdc(order.rawAmount);
+  const timeAgo = (() => {
+    const diff = Date.now() - order.timestamp;
+    const mins = Math.floor(diff / 60_000);
+    if (mins < 1) return "just now";
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `${hrs}h ago`;
+    return `${Math.floor(hrs / 24)}d ago`;
+  })();
 
   return (
     <div className="bg-bg hover:bg-surface/20 transition-colors border-b border-border last:border-b-0">
@@ -141,7 +142,8 @@ function OrderRow({ order }: { order: OrderEntry }) {
               <span className="text-[10px] text-muted-dim font-mono">
                 #{order.batchId.toString()}
               </span>
-              <StatusBadge status={order.batchStatus} claimed={isClaimed} />
+              <StatusBadge status={order.batchStatus} />
+              <span className="text-[10px] text-muted-dim">{timeAgo}</span>
             </div>
             {order.marketQuestion ? (
               <p className="text-[12px] text-text leading-snug line-clamp-2">
@@ -156,55 +158,31 @@ function OrderRow({ order }: { order: OrderEntry }) {
             )}
           </div>
 
-          {/* Right: amount + direction */}
+          {/* Right: amount + direction (always visible — user knows their own order) */}
           <div className="text-right flex-shrink-0 space-y-1">
             <p className="text-[13px] font-medium text-text tabular-nums">
               {amountDisplay}
             </p>
-            {isSettled && order.position ? (
-              <p
-                className={clsx(
-                  "text-[10px] tracking-widest uppercase",
-                  order.position.isBuy ? "text-accent" : "text-danger"
-                )}
-              >
-                {order.position.isBuy ? "BUY YES" : "SELL YES"}
-              </p>
-            ) : (
-              <p className="text-[10px] text-muted-dim tracking-widest">
-                SEALED ■
-              </p>
-            )}
+            <p
+              className={clsx(
+                "text-[10px] tracking-widest uppercase",
+                order.isBuy ? "text-accent" : "text-danger"
+              )}
+            >
+              {order.isBuy ? "BUY YES" : "SELL YES"}
+            </p>
           </div>
         </div>
 
-        {/* Fill / refund details */}
-        {isSettled && hasResult && (
+        {/* Fill details after settlement */}
+        {order.batchStatus === BatchStatus.SETTLED && order.clearingPrice != null && order.clearingPrice > 0n && (
           <div className="mt-2.5 flex items-center gap-4 flex-wrap">
-            {order.position!.filledAmount > 0n && (
-              <span className="text-[11px] text-muted">
-                Filled{" "}
-                <span className="text-text">
-                  {fUsdc(order.position!.filledAmount)}
-                </span>
+            <span className="text-[11px] text-muted">
+              Cleared @{" "}
+              <span className="text-text">
+                {(Number(order.clearingPrice) / 10000).toFixed(1)}¢
               </span>
-            )}
-            {order.position!.refundAmount > 0n && (
-              <span className="text-[11px] text-muted">
-                Refund{" "}
-                <span className="text-text">
-                  {fUsdc(order.position!.refundAmount)}
-                </span>
-              </span>
-            )}
-            {order.clearingPrice != null && order.clearingPrice > 0n && (
-              <span className="text-[11px] text-muted">
-                Cleared @{" "}
-                <span className="text-text">
-                  {(Number(order.clearingPrice) / 10000).toFixed(1)}¢
-                </span>
-              </span>
-            )}
+            </span>
           </div>
         )}
 
@@ -238,35 +216,50 @@ function OrderRow({ order }: { order: OrderEntry }) {
           </div>
 
           {/* Transaction */}
-          <div>
-            <p className="text-[10px] text-muted tracking-widest uppercase mb-1.5">
-              On-Chain Transaction
-            </p>
-            <div className="flex items-center gap-2 flex-wrap">
-              <code className="hash-text text-[10px] text-muted-dim break-all flex-1">
-                {order.txHash}
-              </code>
-              <CopyButton value={order.txHash} />
-              <a
-                href={`${EXPLORER}/tx/${order.txHash}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                onClick={(e) => e.stopPropagation()}
-                className="flex-shrink-0 text-[10px] text-accent/70 hover:text-accent transition-colors border border-accent/20 hover:border-accent/40 px-2 py-1 tracking-wider"
-              >
-                VIEW TX ↗
-              </a>
+          {order.txHash && !/^0x0+$/.test(order.txHash) ? (
+            <div>
+              <p className="text-[10px] text-muted tracking-widest uppercase mb-1.5">
+                On-Chain Transaction
+              </p>
+              <div className="flex items-center gap-2 flex-wrap">
+                <code className="hash-text text-[10px] text-muted-dim break-all flex-1">
+                  {order.txHash}
+                </code>
+                <CopyButton value={order.txHash} />
+                <a
+                  href={`${EXPLORER}/tx/${order.txHash}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                  className="flex-shrink-0 text-[10px] text-accent/70 hover:text-accent transition-colors border border-accent/20 hover:border-accent/40 px-2 py-1 tracking-wider"
+                >
+                  VIEW TX ↗
+                </a>
+              </div>
+              <p className="text-[9px] text-muted-dim mt-1">
+                <span className="text-accent/40">// </span>
+                Submitted by relayer — your address is not visible in this tx
+              </p>
             </div>
-          </div>
+          ) : (
+            <div>
+              <p className="text-[10px] text-muted tracking-widest uppercase mb-1.5">
+                On-Chain Transaction
+              </p>
+              <p className="text-[10px] text-muted-dim italic">
+                Searching for tx on-chain…
+              </p>
+            </div>
+          )}
 
           {/* Privacy note */}
           <div className="bg-accent/5 border border-accent/10 px-3 py-2">
             <p className="text-[10px] text-accent/60 leading-relaxed">
               <span className="text-accent/40">▸ </span>
-              Your wallet address and deposited amount are visible on-chain.
-              Your buy/sell direction, limit price, and salt cannot be derived
-              from the commitment hash — they are not stored anywhere on-chain
-              and cannot be backtracked.
+              Your wallet address never appears in order events — the relayer
+              submits on-chain on your behalf. Only your buy/sell direction,
+              limit price, and salt are sealed inside the commitment and cannot
+              be backtracked.
             </p>
           </div>
         </div>
@@ -312,152 +305,106 @@ export default function ProfileClient() {
     try {
       const contracts = getContracts(ACTIVE_CHAIN.id);
 
-      // 1. USDC balance + OrderCommitted logs — in parallel
-      const [balance, logs] = await Promise.all([
-        publicClient.readContract({
-          address: contracts.usdc,
-          abi: ERC20_ABI,
-          functionName: "balanceOf",
-          args: [walletAddress],
-        }) as Promise<bigint>,
-
-        // Try full history; fall back to last 200k blocks on range errors
-        publicClient
-          .getLogs({
-            address: contracts.batchVault,
-            event: ORDER_COMMITTED_EVENT,
-            args: { trader: walletAddress },
-            fromBlock: 0n,
-            toBlock: "latest",
-          })
-          .catch(async () => {
-            const tip = await publicClient.getBlockNumber();
-            return publicClient.getLogs({
-              address: contracts.batchVault,
-              event: ORDER_COMMITTED_EVENT,
-              args: { trader: walletAddress },
-              fromBlock: tip > 200000n ? tip - 200000n : 0n,
-              toBlock: "latest",
-            });
-          }),
-      ]);
+      // 1. USDC balance
+      const balance = await publicClient.readContract({
+        address: contracts.usdc,
+        abi: ERC20_ABI,
+        functionName: "balanceOf",
+        args: [walletAddress],
+      }) as bigint;
 
       setUsdcBalance(balance);
 
-      if (logs.length === 0) {
+      // 2. Load orders from localStorage
+      // Orders are stored here by MarketPageClient when the user submits an order.
+      // The relayer submits commitOrderFor on-chain, so the user's wallet address
+      // never appears as `trader` in OrderCommitted events — only the relayer address
+      // is visible. We therefore track history locally rather than via chain scanning.
+      let storedOrders: StoredOrder[] = [];
+      try {
+        const key = `predacy:orders:${walletAddress.toLowerCase()}`;
+        storedOrders = JSON.parse(localStorage.getItem(key) ?? "[]");
+      } catch { /* ignore quota / parse errors */ }
+
+      if (storedOrders.length === 0) {
         setOrders([]);
         setLoading(false);
         return;
       }
 
-      // Build initial entries (newest first)
-      const entries: OrderEntry[] = logs
-        .filter((l) => l.transactionHash && l.blockNumber !== null)
-        .sort((a, b) => (b.blockNumber! > a.blockNumber! ? 1 : -1))
-        .map((log) => ({
-          txHash: log.transactionHash!,
-          blockNumber: log.blockNumber!,
-          batchId: log.args.batchId as bigint,
-          commitment: log.args.commitment as `0x${string}`,
-          rawAmount: log.args.amount as bigint,
-        }));
+      // Build initial entries from localStorage (newest first)
+      const entries: OrderEntry[] = storedOrders.map((o) => ({
+        commitment:     o.commitment as `0x${string}`,
+        rawAmount:      BigInt(o.amount),
+        isBuy:          o.isBuy,
+        limitPrice:     BigInt(o.limitPrice),
+        batchId:        BigInt(o.batchId),
+        marketId:       (o.marketId ?? undefined) as `0x${string}` | undefined,
+        marketQuestion: o.marketQuestion ?? undefined,
+        timestamp:      o.timestamp,
+      }));
 
       setOrders(entries);
       setLoading(false);
       setEnriching(true);
 
-      // 2. Enrich: getBatch + getPosition for each unique batch
+      // 3. Enrich: getBatch status + find tx hash per unique batch
       const uniqueBatchIds = [...new Set(entries.map((e) => e.batchId))];
 
-      const batchMap = new Map<
-        bigint,
-        {
-          marketId: `0x${string}`;
-          status: number;
-          clearingPrice: bigint;
-        }
-      >();
-      const posMap = new Map<
-        bigint,
-        {
-          filledAmount: bigint;
-          refundAmount: bigint;
-          isBuy: boolean;
-          claimed: boolean;
-        }
-      >();
+      const batchMap = new Map<bigint, { status: number; clearingPrice: bigint }>();
+      const txHashMap = new Map<string, `0x${string}`>(); // commitment.toLowerCase() → txHash
 
       await Promise.allSettled(
         uniqueBatchIds.map(async (batchId) => {
-          const [batch, pos] = await Promise.all([
-            publicClient.readContract({
+          try {
+            // getBatch for status + clearing price
+            const batch = await publicClient.readContract({
               address: contracts.batchVault,
               abi: BATCH_VAULT_ABI,
               functionName: "getBatch",
               args: [batchId],
-            }) as Promise<{
-              marketId: `0x${string}`;
-              status: number;
-              clearingPrice: bigint;
-            }>,
-            publicClient.readContract({
-              address: contracts.batchVault,
-              abi: BATCH_VAULT_ABI,
-              functionName: "getPosition",
-              args: [batchId, walletAddress],
-            }) as Promise<{
-              filledAmount: bigint;
-              refundAmount: bigint;
-              isBuy: boolean;
-              claimed: boolean;
-            }>,
-          ]);
-          batchMap.set(batchId, batch);
-          posMap.set(batchId, pos);
+            }) as { marketId: `0x${string}`; status: number; clearingPrice: bigint };
+            batchMap.set(batchId, { status: batch.status, clearingPrice: batch.clearingPrice });
+
+            // Scan OrderCommitted events for this batch to find tx hashes
+            // (filter by batchId which is indexed — efficient)
+            const logs = await publicClient
+              .getLogs({
+                address: contracts.batchVault,
+                event: ORDER_COMMITTED_EVENT,
+                args: { batchId },
+                fromBlock: 0n,
+                toBlock: "latest",
+              })
+              .catch(async () => {
+                const tip = await publicClient.getBlockNumber();
+                return publicClient.getLogs({
+                  address: contracts.batchVault,
+                  event: ORDER_COMMITTED_EVENT,
+                  args: { batchId },
+                  fromBlock: tip > 200000n ? tip - 200000n : 0n,
+                  toBlock: "latest",
+                });
+              });
+
+            for (const log of logs) {
+              const c = (log.args.commitment as string | undefined)?.toLowerCase();
+              if (c && log.transactionHash) {
+                txHashMap.set(c, log.transactionHash);
+              }
+            }
+          } catch { /* non-fatal — show order without chain enrichment */ }
         })
       );
 
       const enriched = entries.map((e) => ({
         ...e,
-        marketId: batchMap.get(e.batchId)?.marketId,
-        batchStatus: batchMap.get(e.batchId)?.status as BatchStatus | undefined,
+        txHash:       txHashMap.get(e.commitment.toLowerCase()),
+        batchStatus:  batchMap.get(e.batchId)?.status as BatchStatus | undefined,
         clearingPrice: batchMap.get(e.batchId)?.clearingPrice,
-        position: posMap.get(e.batchId),
       }));
 
       setOrders(enriched);
-
-      // 3. Fetch market names for unique marketIds
-      const uniqueMarketIds = [
-        ...new Set(
-          enriched.filter((e) => e.marketId).map((e) => e.marketId!)
-        ),
-      ];
-
-      const nameMap = new Map<string, string>();
-      await Promise.allSettled(
-        uniqueMarketIds.map(async (mId) => {
-          try {
-            const res = await fetch(`/api/markets?condition_id=${mId}&limit=1`);
-            if (!res.ok) return;
-            const data = await res.json();
-            if (data[0]?.question)
-              nameMap.set(mId.toLowerCase(), data[0].question);
-          } catch {
-            /* non-fatal */
-          }
-        })
-      );
-
-      setOrders((prev) =>
-        prev.map((e) => ({
-          ...e,
-          marketQuestion: e.marketId
-            ? nameMap.get(e.marketId.toLowerCase())
-            : undefined,
-        }))
-      );
-
       setEnriching(false);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Failed to load profile";
@@ -490,7 +437,7 @@ export default function ProfileClient() {
             Connect wallet to view profile
           </p>
           <p className="text-muted-dim text-[10px]">
-            Your order history is read from on-chain events
+            Your order history is stored locally on this device
           </p>
         </div>
         <button
@@ -513,10 +460,7 @@ export default function ProfileClient() {
   const settledOrders = orders.filter(
     (o) => o.batchStatus === BatchStatus.SETTLED
   );
-  const totalFilled = settledOrders.reduce(
-    (s, o) => (o.position?.filledAmount ? s + o.position.filledAmount : s),
-    0n
-  );
+  const totalVolume = orders.reduce((s, o) => s + o.rawAmount, 0n);
   const totalOrders = orders.length;
   const shortAddr = walletAddress
     ? `${walletAddress.slice(0, 6)}…${walletAddress.slice(-4)}`
@@ -611,15 +555,15 @@ export default function ProfileClient() {
 
           <div className="bg-bg p-4">
             <p className="text-[10px] text-muted tracking-widest uppercase mb-1">
-              Total Filled
+              Settled
             </p>
             <p
               className="text-2xl font-black text-text leading-tight"
               style={{ fontFamily: "var(--font-display)" }}
             >
-              {loading ? "—" : fUsdc(totalFilled)}
+              {loading ? "—" : settledOrders.length}
             </p>
-            <p className="text-[10px] text-muted-dim mt-0.5">USDC filled</p>
+            <p className="text-[10px] text-muted-dim mt-0.5">batches filled</p>
           </div>
 
           <div className="bg-bg p-4">
@@ -648,16 +592,14 @@ export default function ProfileClient() {
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {/* Public column */}
+            {/* Public column — visible on-chain */}
             <div className="space-y-2">
-              <p className="text-[9px] text-danger/60 uppercase tracking-widest mb-2">
+              <p className="text-[9px] text-muted/60 uppercase tracking-widest mb-2">
                 ◆ Visible on-chain (public)
               </p>
               {[
-                ["Your wallet address", shortAddr],
-                ["Amount deposited", "USDC / YES tokens"],
                 ["Commitment hash", "sealed keccak256"],
-                ["Batch ID", "sequential integer"],
+                ["Batch ID",        "sequential integer"],
               ].map(([label, sub]) => (
                 <div
                   key={label}
@@ -674,13 +616,15 @@ export default function ProfileClient() {
             {/* Hidden column */}
             <div className="space-y-2">
               <p className="text-[9px] text-accent/60 uppercase tracking-widest mb-2">
-                ◆ Cryptographically hidden (private)
+                ✓ Cryptographically hidden (private)
               </p>
               {[
-                ["Buy / Sell direction", "not stored on-chain"],
-                ["Your limit price", "not stored on-chain"],
-                ["Random salt", "blinding factor"],
-                ["Clearing price", "hidden until settlement"],
+                ["Your wallet address", "never in any event"],
+                ["Amount deposited",    "relayer pays on-chain"],
+                ["Buy / Sell direction","sealed in commitment"],
+                ["Your limit price",   "sealed in commitment"],
+                ["Random salt",        "blinding factor"],
+                ["Clearing price",     "hidden until settlement"],
               ].map(([label, sub]) => (
                 <div
                   key={label}
@@ -695,16 +639,23 @@ export default function ProfileClient() {
             </div>
           </div>
 
-          <div className="border-t border-border/40 pt-3">
+          <div className="border-t border-border/40 pt-3 space-y-2">
             <p className="text-[10px] text-muted-dim leading-relaxed">
               <span className="text-accent/50">// </span>
-              Each order hashes to{" "}
+              No wallet address or amount ever appears on-chain when you place
+              an order. The relayer holds USDC and calls{" "}
+              <code className="hash-text">commitOrderFor()</code> on your
+              behalf — only the relayer&apos;s address is visible in the{" "}
+              <code className="hash-text">OrderCommitted</code> event.
+            </p>
+            <p className="text-[10px] text-muted-dim leading-relaxed">
+              <span className="text-accent/50">// </span>
+              Order details are sealed inside{" "}
               <code className="hash-text">
-                keccak256(direction · limitPrice · amount · salt · address)
+                keccak256(marketId · direction · amount · limitPrice · salt · address)
               </code>
-              . The pre-image (your order details) is never stored on-chain.
-              Even knowing your wallet address, no one can determine whether you
-              bought or sold, at what price, or why.
+              . To claim after settlement you reveal this preimage — safe
+              post-settlement since the batch is already closed.
             </p>
           </div>
         </div>
@@ -718,13 +669,18 @@ export default function ProfileClient() {
               </p>
               {enriching && (
                 <span className="text-[9px] text-muted-dim tracking-widest">
-                  (loading details…)
+                  (enriching from chain…)
                 </span>
               )}
             </div>
-            <span className="text-[10px] text-muted-dim">
-              {loading ? "…" : `${totalOrders} orders`}
-            </span>
+            <div className="flex items-center gap-3">
+              <span className="text-[10px] text-muted-dim">
+                {loading ? "…" : `${totalOrders} orders`}
+              </span>
+              <span className="text-[9px] text-muted-dim border border-border px-2 py-0.5">
+                stored locally
+              </span>
+            </div>
           </div>
 
           {loading ? (
@@ -752,7 +708,7 @@ export default function ProfileClient() {
                 No orders yet
               </p>
               <p className="text-muted-dim text-[10px]">
-                Place a sealed-bid order on any market to get started
+                Place a sealed-bid order on any market — it will appear here
               </p>
               <Link
                 href="/"
@@ -765,7 +721,7 @@ export default function ProfileClient() {
             <div className="border border-border divide-y divide-border">
               {orders.map((order) => (
                 <OrderRow
-                  key={`${order.txHash}-${order.batchId}`}
+                  key={`${order.commitment}-${order.batchId}`}
                   order={order}
                 />
               ))}
@@ -780,8 +736,7 @@ export default function ProfileClient() {
           Predacy · Private Prediction Markets
         </span>
         <span className="text-[10px] text-muted-dim">
-          <span className="text-accent/30">●</span> Order details never stored
-          on-chain
+          <span className="text-accent/30">●</span> No address or amount in any order event
         </span>
       </footer>
     </div>

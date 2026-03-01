@@ -11,9 +11,9 @@ export const CONTRACTS = {
   },
   // Polygon Amoy testnet
   [polygonAmoy.id]: {
-    batchVault: "0x704314474E34C01F99b98e5A4C956B7748e34e44" as `0x${string}`,
-    usdc:       "0xf8C8788b16C04C1330d31c98837B34Ca3BDc0D6d" as `0x${string}`, // MockUSDC
-    ctf:        "0x524980c7d25da2aD65BBD2f6EB137785F8Da134f" as `0x${string}`, // MockCTF
+    batchVault: "0x77E5C769d2892D08Def225c4344147e720cAb056" as `0x${string}`,
+    usdc:       "0x665636F6F0b7B4E63B200e255BFb96C3c37c7305" as `0x${string}`, // MockUSDC (EIP-3009)
+    ctf:        "0xB8628c08E258C9cEcd33de3ACdB2080c0821e875" as `0x${string}`, // MockCTF
   },
 } as const;
 
@@ -112,7 +112,13 @@ export const BATCH_VAULT_ABI = [
   {
     name: "claimPosition",
     type: "function",
-    inputs: [{ name: "batchId", type: "uint256" }],
+    inputs: [
+      { name: "batchId",    type: "uint256" },
+      { name: "isBuy",      type: "bool"    },
+      { name: "amount",     type: "uint256" },
+      { name: "limitPrice", type: "uint256" },
+      { name: "salt",       type: "bytes32" },
+    ],
     outputs: [],
     stateMutability: "nonpayable",
   },
@@ -147,8 +153,8 @@ export const BATCH_VAULT_ABI = [
     name: "getPosition",
     type: "function",
     inputs: [
-      { name: "batchId", type: "uint256" },
-      { name: "trader",  type: "address" },
+      { name: "batchId",    type: "uint256" },
+      { name: "commitment", type: "bytes32" },
     ],
     outputs: [
       {
@@ -190,10 +196,8 @@ export const BATCH_VAULT_ABI = [
     name: "OrderCommitted",
     type: "event",
     inputs: [
-      { name: "batchId",    type: "uint256", indexed: true  },
-      { name: "trader",     type: "address", indexed: true  },
-      { name: "commitment", type: "bytes32", indexed: false },
-      { name: "amount",     type: "uint256", indexed: false },
+      { name: "batchId",    type: "uint256", indexed: true },
+      { name: "commitment", type: "bytes32", indexed: true },
     ],
   },
   {

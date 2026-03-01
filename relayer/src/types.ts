@@ -1,16 +1,29 @@
+/// @notice EIP-3009 TransferWithAuthorization components.
+///         Signed off-chain by the user at order time; submitted by the relayer
+///         at settlement for filled buy orders only.
+export interface TransferAuth {
+  validAfter:  bigint;         // 0 = valid immediately
+  validBefore: bigint;         // expiry unix timestamp
+  nonce:       `0x${string}`; // random bytes32 chosen by user
+  v:           number;        // ECDSA component (27 or 28)
+  r:           `0x${string}`; // ECDSA component
+  s:           `0x${string}`; // ECDSA component
+}
+
 export interface Order {
-  trader: `0x${string}`;
-  isBuy: boolean;
-  amount: bigint;        // USDC, 6 decimals
-  limitPrice: bigint;    // 6-decimal fixed point (e.g. 650000n = $0.65)
-  salt: `0x${string}`;
+  trader:       `0x${string}`;
+  isBuy:        boolean;
+  amount:       bigint;        // USDC, 6 decimals
+  limitPrice:   bigint;        // 6-decimal fixed point (e.g. 650000n = $0.65)
+  salt:         `0x${string}`;
+  transferAuth?: TransferAuth; // EIP-3009 auth for buy orders — collected at settlement
 }
 
 export interface Commitment {
-  hash: `0x${string}`;
+  hash:   `0x${string}`;
   amount: bigint;
-  trader: `0x${string}`;
-  index: number;
+  index:  number;
+  // Note: no `trader` field — the new Commitment struct does not store trader address
 }
 
 export interface BatchInfo {

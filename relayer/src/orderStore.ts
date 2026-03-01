@@ -1,28 +1,57 @@
-import type { Order } from "./types.js";
+import type { Order, TransferAuth } from "./types.js";
 
 // ── Interface ─────────────────────────────────────────────────────────────────
 
 export interface OrderStore {
-  save(batchId: string, trader: string, order: Order): Promise<void>;
+  save(batchId: string, key: string, order: Order): Promise<void>;
   load(batchId: string): Promise<Map<string, Order>>;
   count(batchId: string): Promise<number>;
   delete(batchId: string): Promise<void>;
 }
 
 // ── Serialization helpers ─────────────────────────────────────────────────────
-// bigint fields (amount, limitPrice) cannot be JSON.stringify'd directly.
+// bigint fields (amount, limitPrice, transferAuth.validAfter, transferAuth.validBefore)
+// cannot be JSON.stringify'd directly — convert to strings.
+
+function serializeAuth(auth: TransferAuth): object {
+  return {
+    validAfter:  auth.validAfter.toString(),
+    validBefore: auth.validBefore.toString(),
+    nonce:       auth.nonce,
+    v:           auth.v,
+    r:           auth.r,
+    s:           auth.s,
+  };
+}
+
+function deserializeAuth(raw: any): TransferAuth {
+  return {
+    validAfter:  BigInt(raw.validAfter),
+    validBefore: BigInt(raw.validBefore),
+    nonce:       raw.nonce       as `0x${string}`,
+    v:           raw.v           as number,
+    r:           raw.r           as `0x${string}`,
+    s:           raw.s           as `0x${string}`,
+  };
+}
 
 function serialize(order: Order): string {
   return JSON.stringify({
     ...order,
-    amount:     order.amount.toString(),
-    limitPrice: order.limitPrice.toString(),
+    amount:      order.amount.toString(),
+    limitPrice:  order.limitPrice.toString(),
+    transferAuth: order.transferAuth ? serializeAuth(order.transferAuth) : undefined,
   });
 }
 
 function deserialize(raw: string): Order {
   const o = JSON.parse(raw);
-  return { ...o, amount: BigInt(o.amount), limitPrice: BigInt(o.limitPrice) };
+  return {
+    ...o,
+    amount:      BigInt(o.amount),
+    limitPrice:  BigInt(o.limitPrice),
+    transferAuth: o.transferAuth ? deserializeAuth(o.transferAuth) : undefined,
+  };
 }
 
 // ── In-memory store (dev / fallback when REDIS_URL is not set) ────────────────
@@ -30,9 +59,9 @@ function deserialize(raw: string): Order {
 export class InMemoryOrderStore implements OrderStore {
   private store = new Map<string, Map<string, Order>>();
 
-  async save(batchId: string, trader: string, order: Order): Promise<void> {
+  async save(batchId: string, key: string, order: Order): Promise<void> {
     if (!this.store.has(batchId)) this.store.set(batchId, new Map());
-    this.store.get(batchId)!.set(trader, order);
+    this.store.get(batchId)!.set(key, order);
   }
 
   async load(batchId: string): Promise<Map<string, Order>> {
@@ -76,9 +105,9 @@ export class RedisOrderStore implements OrderStore {
     return `predacy:orders:${batchId}`;
   }
 
-  async save(batchId: string, trader: string, order: Order): Promise<void> {
+  async save(batchId: string, key: string, order: Order): Promise<void> {
     const r = await this.client();
-    await r.hset(this.key(batchId), trader, serialize(order));
+    await r.hset(this.key(batchId), key, serialize(order));
     await r.expire(this.key(batchId), 604_800); // 7-day TTL — survives extended outages/OOM loops
   }
 
@@ -87,8 +116,8 @@ export class RedisOrderStore implements OrderStore {
     const raw = (await r.hgetall(this.key(batchId))) as Record<string, string> | null;
     const map = new Map<string, Order>();
     if (!raw) return map;
-    for (const [trader, json] of Object.entries(raw)) {
-      map.set(trader, deserialize(json));
+    for (const [key, json] of Object.entries(raw)) {
+      map.set(key, deserialize(json));
     }
     return map;
   }

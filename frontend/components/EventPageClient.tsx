@@ -19,7 +19,7 @@ import {
   fmtCents,
 } from "@/lib/marketUtils";
 import {
-  BATCH_VAULT_ABI, CTF_ABI, ERC20_ABI, MOCK_USDC_ABI,
+  BATCH_VAULT_ABI, CTF_ABI, MOCK_USDC_ABI,
   BatchStatus, getContracts,
 } from "@/lib/contracts";
 import {
@@ -425,7 +425,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   const [selectedMarket, setSelectedMarket] = useState<Market | null>(null);
   const [batch, setBatch]         = useState(MOCK_BATCH);
   const [commitments, setCommitments] = useState<Array<{
-    hash: `0x${string}`; amount: bigint; trader: `0x${string}`; timestamp: number;
+    hash: `0x${string}`; amount?: bigint; trader?: `0x${string}`; timestamp: number;
   }>>([]);
   const [submitStep, setSubmitStep] = useState<"approving" | "signing" | null>(null);
   const [chainError, setChainError] = useState<string | null>(null);
@@ -584,17 +584,34 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   };
 
   // ── Claim position ───────────────────────────────────────────────────────────
+  // Reveals the preimage (isBuy, amount, limitPrice, salt) stored in localStorage.
   const handleClaimPosition = async (batchId: bigint) => {
     setClaimLoading(true);
     setChainError(null);
     try {
+      if (!walletAddress) throw new Error("Wallet not connected");
+      // Look up preimage from localStorage
+      const storageKey = `predacy:orders:${walletAddress.toLowerCase()}`;
+      const storedOrders: Array<{
+        commitment: string; salt: string; isBuy: boolean;
+        amount: string; limitPrice: string; batchId: string;
+      }> = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
+      const myOrder = storedOrders.find((o) => o.batchId === batchId.toString());
+      if (!myOrder) throw new Error("Order preimage not found in local storage — cannot claim");
+
       const walletClient = await ensureAmoy();
       const contracts = getContracts(ACTIVE_CHAIN.id);
       const tx = await walletClient.writeContract({
         address: contracts.batchVault,
         abi: BATCH_VAULT_ABI,
         functionName: "claimPosition",
-        args: [batchId],
+        args: [
+          batchId,
+          myOrder.isBuy,
+          BigInt(myOrder.amount),
+          BigInt(myOrder.limitPrice),
+          myOrder.salt as `0x${string}`,
+        ],
         ...CHAIN_GAS,
         gas: 400_000n,
       });
@@ -612,6 +629,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   };
 
   // ── Submit order ─────────────────────────────────────────────────────────────
+  // EIP-3009 privacy flow — see MarketPageClient.tsx for full comment.
   const handleOrderSubmit = async (params: {
     commitment: `0x${string}`; amount: bigint; salt: `0x${string}`; isBuy: boolean; limitPrice: bigint;
   }) => {
@@ -622,19 +640,8 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     setSubmitStep("approving");
     const walletClient = await ensureAmoy();
 
-    if (params.isBuy) {
-      const allowance = await publicClient.readContract({
-        address: contracts.usdc, abi: ERC20_ABI, functionName: "allowance",
-        args: [walletAddress!, contracts.batchVault],
-      }) as bigint;
-      if (allowance < params.amount) {
-        const tx = await walletClient.writeContract({
-          address: contracts.usdc, abi: ERC20_ABI, functionName: "approve",
-          args: [contracts.batchVault, params.amount], ...CHAIN_GAS,
-        });
-        await publicClient.waitForTransactionReceipt({ hash: tx });
-      }
-    } else {
+    // Step 1 — sell orders only: CTF operator approval for YES token transfer
+    if (!params.isBuy) {
       let isApproved = false;
       try {
         isApproved = await publicClient.readContract({
@@ -651,12 +658,15 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       }
     }
 
+    // Step 2 — read current EIP-712 nonce
     const nonce = await publicClient.readContract({
       address: contracts.batchVault, abi: BATCH_VAULT_ABI, functionName: "nonces",
       args: [walletAddress!],
     }) as bigint;
 
     setSubmitStep("signing");
+
+    // Step 3 — sign CommitOrder EIP-712 (wallet "Sign" popup #1)
     const deadline = BigInt(Math.floor(Date.now() / 1000) + 600);
     const signature = await walletClient.signTypedData({
       account: walletAddress!,
@@ -670,18 +680,63 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       message: { commitment: params.commitment, amount: params.amount, batchId: batch.batchId, nonce, deadline },
     });
 
+    // Step 4 — buy orders only: sign EIP-3009 TransferWithAuthorization (wallet "Sign" popup #2)
+    // Authorises the vault to pull USDC at settlement (only if the order fills).
+    let transferAuth: {
+      validAfter: string; validBefore: string; nonce: string; v: number; r: string; s: string;
+    } | undefined;
+
+    if (params.isBuy) {
+      const nonceBytes = new Uint8Array(32);
+      crypto.getRandomValues(nonceBytes);
+      const transferNonce = ("0x" + Array.from(nonceBytes).map((b) => b.toString(16).padStart(2, "0")).join("")) as `0x${string}`;
+
+      const validAfter  = 0n;
+      const validBefore = BigInt(Math.floor(Date.now() / 1000) + 7200); // 2 hours
+
+      const transferSig = await walletClient.signTypedData({
+        account: walletAddress!,
+        domain: {
+          name: "USD Coin (Test)", version: "1",
+          chainId: BigInt(ACTIVE_CHAIN.id), verifyingContract: contracts.usdc,
+        },
+        types: {
+          TransferWithAuthorization: [
+            { name: "from",        type: "address" },
+            { name: "to",          type: "address" },
+            { name: "value",       type: "uint256" },
+            { name: "validAfter",  type: "uint256" },
+            { name: "validBefore", type: "uint256" },
+            { name: "nonce",       type: "bytes32" },
+          ],
+        },
+        primaryType: "TransferWithAuthorization",
+        message: {
+          from: walletAddress!, to: contracts.batchVault,
+          value: params.amount, validAfter, validBefore, nonce: transferNonce,
+        },
+      });
+
+      const r = transferSig.slice(0, 66) as `0x${string}`;
+      const s = ("0x" + transferSig.slice(66, 130)) as `0x${string}`;
+      const v = parseInt(transferSig.slice(130, 132), 16);
+      transferAuth = { validAfter: validAfter.toString(), validBefore: validBefore.toString(), nonce: transferNonce, v, r, s };
+    }
+
+    // Step 5 — POST to relayer
     const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
     if (!relayerUrl) throw new Error("NEXT_PUBLIC_RELAYER_URL is not set");
     const resp = await fetch(`${relayerUrl}/order`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        marketId:   selectedMarket.conditionId,
-        batchId:    batch.batchId.toString(),
-        signer:     walletAddress, isBuy: params.isBuy, isSell: !params.isBuy,
-        amount:     params.amount.toString(), limitPrice: params.limitPrice.toString(),
-        salt:       params.salt, commitment: params.commitment, signature,
-        nonce:      nonce.toString(), deadline: deadline.toString(),
+        marketId:     selectedMarket.conditionId,
+        batchId:      batch.batchId.toString(),
+        signer:       walletAddress, isBuy: params.isBuy, isSell: !params.isBuy,
+        amount:       params.amount.toString(), limitPrice: params.limitPrice.toString(),
+        salt:         params.salt, commitment: params.commitment, signature,
+        nonce:        nonce.toString(), deadline: deadline.toString(),
+        transferAuth, // EIP-3009 auth for buy orders
       }),
     });
     if (!resp.ok) {
@@ -695,6 +750,24 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         commitmentCount: prev.commitmentCount + 1,
         totalDeposited: params.isBuy ? prev.totalDeposited + params.amount : prev.totalDeposited,
       }));
+      // Persist order locally so claimPosition can reconstruct the preimage,
+      // and so the profile page can show history
+      try {
+        const key = `predacy:orders:${walletAddress.toLowerCase()}`;
+        const existing: unknown[] = JSON.parse(localStorage.getItem(key) ?? "[]");
+        existing.unshift({
+          commitment:     params.commitment,
+          salt:           params.salt,           // preimage needed at claim time
+          amount:         params.amount.toString(),
+          isBuy:          params.isBuy,
+          limitPrice:     params.limitPrice.toString(),
+          batchId:        batch.batchId.toString(),
+          marketId:       selectedMarket?.conditionId ?? null,
+          marketQuestion: selectedMarket?.question ?? null,
+          timestamp:      Date.now(),
+        });
+        localStorage.setItem(key, JSON.stringify(existing.slice(0, 200)));
+      } catch { /* ignore quota / SSR errors */ }
     }
     setOrderSealed(true);
     setActiveTab("positions"); // Auto-switch so user can track and claim
