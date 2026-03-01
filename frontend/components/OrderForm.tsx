@@ -504,7 +504,7 @@ export default function OrderForm({
               <p className="text-center text-[10px] text-muted-dim mt-2">
                 {yesBalance === 0n
                   ? "No YES tokens in wallet — buy YES first."
-                  : "1 tx (CTF approve, if needed) + 1 signature — no commitment gas"}
+                  : "1 tx (CTF approve, if needed) + 1 signature"}
               </p>
             )}
           </div>
@@ -634,7 +634,7 @@ export default function OrderForm({
               </div>
             )}
 
-            {/* Commitment hash */}
+            {/* Commitment hash + privacy panel */}
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <label className="text-[11px] text-muted tracking-widest uppercase">Sealed Commitment</label>
@@ -649,6 +649,18 @@ export default function OrderForm({
               <p className="text-[10px] text-muted-dim">
                 This hash — not your order details — is what gets recorded on-chain.
               </p>
+              {/* Privacy panel — buy orders only */}
+              <div className="border border-accent/20 bg-accent/5 px-3 py-2.5 space-y-1.5">
+                <p className="text-[10px] text-accent tracking-widest uppercase font-medium">Privacy</p>
+                <div className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-[10px]">
+                  <span className="text-accent">✓</span>
+                  <span className="text-muted-dim">Wallet address hidden from settlement events</span>
+                  <span className="text-accent">✓</span>
+                  <span className="text-muted-dim">USDC amount hidden until claim</span>
+                  <span className="text-accent">✓</span>
+                  <span className="text-muted-dim">Ephemeral address used for on-chain commit</span>
+                </div>
+              </div>
             </div>
 
             {error && (
@@ -690,7 +702,7 @@ export default function OrderForm({
                 {isSubmitting ? (
                   <span className="flex items-center justify-center gap-2">
                     <span className="w-3 h-3 border border-current border-t-transparent rounded-full animate-spin" />
-                    {submitStep === "approving" ? "APPROVING…" : "SIGNING ORDER…"}
+                    {submitStep === "approving" ? "FUNDING EPHEMERAL…" : "SIGNING ORDER…"}
                   </span>
                 ) : (
                   `SEAL ${orderType === "market" ? "MKT" : "LMT"} ${isBuy ? "BUY YES" : "BUY NO"} — $${amountDisplay || "0"}`
@@ -699,7 +711,7 @@ export default function OrderForm({
             )}
             {isConnected && batchOpen && (
               <p className="text-center text-[10px] text-muted-dim mt-2">
-                1 tx (USDC approve) + 1 signature — no commitment gas
+                1 tx (fund ephemeral) + 3 in-browser sigs — no MetaMask popups
               </p>
             )}
           </div>

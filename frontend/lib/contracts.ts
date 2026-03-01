@@ -11,9 +11,9 @@ export const CONTRACTS = {
   },
   // Polygon Amoy testnet
   [polygonAmoy.id]: {
-    batchVault: "0x77E5C769d2892D08Def225c4344147e720cAb056" as `0x${string}`,
-    usdc:       "0x665636F6F0b7B4E63B200e255BFb96C3c37c7305" as `0x${string}`, // MockUSDC (EIP-3009)
-    ctf:        "0xB8628c08E258C9cEcd33de3ACdB2080c0821e875" as `0x${string}`, // MockCTF
+    batchVault: "0x7f84faD424AA9D1Bd4B934fB32d41b35b367cfE2" as `0x${string}`, // v3: +claimPositionFor
+    usdc:       "0xd4464B105932D4D0783B5eF6fEF9cd3AEb8C28D3" as `0x${string}`, // MockUSDC (EIP-3009)
+    ctf:        "0xdb0CF4b4C4aaC9f8046B69Fae0c1F30805A7e9aE" as `0x${string}`, // MockCTF
   },
 } as const;
 
@@ -123,6 +123,24 @@ export const BATCH_VAULT_ABI = [
     stateMutability: "nonpayable",
   },
   {
+    // Ephemeral wallet pattern: trader = ephemeral address, recipient = real wallet.
+    // traderSig = ephemeral key's EIP-712 ClaimAuth signature authorizing recipient to claim.
+    name: "claimPositionFor",
+    type: "function",
+    inputs: [
+      { name: "batchId",    type: "uint256" },
+      { name: "isBuy",      type: "bool"    },
+      { name: "amount",     type: "uint256" },
+      { name: "limitPrice", type: "uint256" },
+      { name: "salt",       type: "bytes32" },
+      { name: "trader",     type: "address" },
+      { name: "recipient",  type: "address" },
+      { name: "traderSig",  type: "bytes"   },
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+  {
     name: "getBatch",
     type: "function",
     inputs: [{ name: "batchId", type: "uint256" }],
@@ -221,6 +239,16 @@ export const ERC20_ABI = [
     inputs: [
       { name: "spender", type: "address" },
       { name: "amount",  type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "bool" }],
+    stateMutability: "nonpayable",
+  },
+  {
+    name: "transfer",
+    type: "function",
+    inputs: [
+      { name: "to",    type: "address" },
+      { name: "value", type: "uint256" },
     ],
     outputs: [{ name: "", type: "bool" }],
     stateMutability: "nonpayable",

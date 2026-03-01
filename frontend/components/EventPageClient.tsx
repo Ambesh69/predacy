@@ -6,6 +6,7 @@ import { clsx } from "clsx";
 import {
   createPublicClient, createWalletClient, custom, http, parseAbiItem,
 } from "viem";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
 import WalletButton from "@/components/WalletButton";
 import BatchTimer from "@/components/BatchTimer";
@@ -19,9 +20,10 @@ import {
   fmtCents,
 } from "@/lib/marketUtils";
 import {
-  BATCH_VAULT_ABI, CTF_ABI, MOCK_USDC_ABI,
+  BATCH_VAULT_ABI, CTF_ABI, ERC20_ABI, MOCK_USDC_ABI,
   BatchStatus, getContracts,
 } from "@/lib/contracts";
+import { computeCommitment } from "@/lib/commitmentHash";
 import {
   ACTIVE_CHAIN, ACTIVE_CHAIN_ID_HEX, ACTIVE_CHAIN_NAME,
   CHAIN_GAS, IS_MAINNET,
@@ -583,38 +585,61 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     return createWalletClient({ account: walletAddress, chain: ACTIVE_CHAIN, transport: custom(provider) });
   };
 
-  // ── Claim position ───────────────────────────────────────────────────────────
-  // Reveals the preimage (isBuy, amount, limitPrice, salt) stored in localStorage.
+  // ── Claim position (ephemeral wallet pattern or legacy) ─────────────────────
   const handleClaimPosition = async (batchId: bigint) => {
     setClaimLoading(true);
     setChainError(null);
     try {
       if (!walletAddress) throw new Error("Wallet not connected");
-      // Look up preimage from localStorage
       const storageKey = `predacy:orders:${walletAddress.toLowerCase()}`;
       const storedOrders: Array<{
         commitment: string; salt: string; isBuy: boolean;
         amount: string; limitPrice: string; batchId: string;
+        ephemeralTrader?: string; claimAuthSig?: string;
       }> = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
       const myOrder = storedOrders.find((o) => o.batchId === batchId.toString());
       if (!myOrder) throw new Error("Order preimage not found in local storage — cannot claim");
 
       const walletClient = await ensureAmoy();
       const contracts = getContracts(ACTIVE_CHAIN.id);
-      const tx = await walletClient.writeContract({
-        address: contracts.batchVault,
-        abi: BATCH_VAULT_ABI,
-        functionName: "claimPosition",
-        args: [
-          batchId,
-          myOrder.isBuy,
-          BigInt(myOrder.amount),
-          BigInt(myOrder.limitPrice),
-          myOrder.salt as `0x${string}`,
-        ],
-        ...CHAIN_GAS,
-        gas: 400_000n,
-      });
+
+      let tx: `0x${string}`;
+
+      if (myOrder.ephemeralTrader && myOrder.claimAuthSig) {
+        tx = await walletClient.writeContract({
+          address: contracts.batchVault,
+          abi:     BATCH_VAULT_ABI,
+          functionName: "claimPositionFor",
+          args: [
+            batchId,
+            myOrder.isBuy,
+            BigInt(myOrder.amount),
+            BigInt(myOrder.limitPrice),
+            myOrder.salt as `0x${string}`,
+            myOrder.ephemeralTrader as `0x${string}`,
+            walletAddress,
+            myOrder.claimAuthSig as `0x${string}`,
+          ],
+          ...CHAIN_GAS,
+          gas: 400_000n,
+        });
+      } else {
+        tx = await walletClient.writeContract({
+          address: contracts.batchVault,
+          abi:     BATCH_VAULT_ABI,
+          functionName: "claimPosition",
+          args: [
+            batchId,
+            myOrder.isBuy,
+            BigInt(myOrder.amount),
+            BigInt(myOrder.limitPrice),
+            myOrder.salt as `0x${string}`,
+          ],
+          ...CHAIN_GAS,
+          gas: 400_000n,
+        });
+      }
+
       const receipt = await publicClient.waitForTransactionReceipt({ hash: tx });
       if (receipt.status === "reverted") {
         throw new Error("Transaction reverted — the batch may not be fully settled yet. Try again in a few seconds.");
@@ -628,37 +653,170 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     }
   };
 
-  // ── Submit order ─────────────────────────────────────────────────────────────
-  // EIP-3009 privacy flow — see MarketPageClient.tsx for full comment.
+  // ── Submit order (ephemeral wallet privacy pattern) ───────────────────────────
+  // BUY: ephemeral keypair → fund → sign all 3 sigs in-browser → no settlement leak
+  // SELL: unchanged — YES tokens must come from real wallet
   const handleOrderSubmit = async (params: {
     commitment: `0x${string}`; amount: bigint; salt: `0x${string}`; isBuy: boolean; limitPrice: bigint;
   }) => {
     if (!selectedMarket) return;
     setChainError(null);
     const contracts = getContracts(ACTIVE_CHAIN.id);
+    const deadline  = BigInt(Math.floor(Date.now() / 1000) + 600);
 
     setSubmitStep("approving");
     const walletClient = await ensureAmoy();
 
-    // Step 1 — sell orders only: CTF operator approval for YES token transfer
-    if (!params.isBuy) {
-      let isApproved = false;
-      try {
-        isApproved = await publicClient.readContract({
-          address: contracts.ctf, abi: CTF_ABI, functionName: "isApprovedForAll",
-          args: [walletAddress!, contracts.batchVault],
-        }) as boolean;
-      } catch { isApproved = false; }
-      if (!isApproved) {
-        const tx = await walletClient.writeContract({
-          address: contracts.ctf, abi: CTF_ABI, functionName: "setApprovalForAll",
-          args: [contracts.batchVault, true], ...CHAIN_GAS,
-        });
-        await publicClient.waitForTransactionReceipt({ hash: tx });
+    if (params.isBuy) {
+      // ── BUY: ephemeral wallet pattern ──────────────────────────────────────
+      const ephemeralPrivateKey = generatePrivateKey();
+      const ephemeralAccount    = privateKeyToAccount(ephemeralPrivateKey);
+      const ephemeralAddress    = ephemeralAccount.address;
+
+      // Fund ephemeral with USDC from real wallet (1 MetaMask tx)
+      const fundTx = await walletClient.writeContract({
+        address: contracts.usdc, abi: ERC20_ABI, functionName: "transfer",
+        args: [ephemeralAddress, params.amount], ...CHAIN_GAS,
+      });
+      await publicClient.waitForTransactionReceipt({ hash: fundTx });
+
+      const ephemeralWalletClient = createWalletClient({
+        account: ephemeralAccount, chain: ACTIVE_CHAIN, transport: http(),
+      });
+
+      const actualCommitment = computeCommitment({
+        marketId:   batch.batchMarketId,
+        isBuy:      true,
+        amount:     params.amount,
+        limitPrice: params.limitPrice,
+        salt:       params.salt,
+        trader:     ephemeralAddress,
+      });
+
+      const ephemeralNonce = await publicClient.readContract({
+        address: contracts.batchVault, abi: BATCH_VAULT_ABI, functionName: "nonces",
+        args: [ephemeralAddress],
+      }) as bigint;
+
+      setSubmitStep("signing");
+
+      const signature = await ephemeralWalletClient.signTypedData({
+        account: ephemeralAccount,
+        domain: { name: "BatchVault", version: "1", chainId: BigInt(ACTIVE_CHAIN.id), verifyingContract: contracts.batchVault },
+        types: { CommitOrder: [
+          { name: "commitment", type: "bytes32" }, { name: "amount",  type: "uint256" },
+          { name: "batchId",    type: "uint256" }, { name: "nonce",   type: "uint256" },
+          { name: "deadline",   type: "uint256" },
+        ]},
+        primaryType: "CommitOrder",
+        message: { commitment: actualCommitment, amount: params.amount, batchId: batch.batchId, nonce: ephemeralNonce, deadline },
+      });
+
+      const nonceBytes = new Uint8Array(32);
+      crypto.getRandomValues(nonceBytes);
+      const transferNonce = ("0x" + Array.from(nonceBytes).map((b) => b.toString(16).padStart(2, "0")).join("")) as `0x${string}`;
+      const validAfter  = 0n;
+      const validBefore = BigInt(Math.floor(Date.now() / 1000) + 7200);
+
+      const transferSig = await ephemeralWalletClient.signTypedData({
+        account: ephemeralAccount,
+        domain: { name: "USD Coin (Test)", version: "1", chainId: BigInt(ACTIVE_CHAIN.id), verifyingContract: contracts.usdc },
+        types: {
+          TransferWithAuthorization: [
+            { name: "from", type: "address" }, { name: "to",          type: "address" },
+            { name: "value", type: "uint256"}, { name: "validAfter",  type: "uint256" },
+            { name: "validBefore", type: "uint256" }, { name: "nonce", type: "bytes32" },
+          ],
+        },
+        primaryType: "TransferWithAuthorization",
+        message: { from: ephemeralAddress, to: contracts.batchVault, value: params.amount, validAfter, validBefore, nonce: transferNonce },
+      });
+
+      const r = transferSig.slice(0, 66) as `0x${string}`;
+      const s = ("0x" + transferSig.slice(66, 130)) as `0x${string}`;
+      const v = parseInt(transferSig.slice(130, 132), 16);
+      const transferAuth = { validAfter: validAfter.toString(), validBefore: validBefore.toString(), nonce: transferNonce, v, r, s };
+
+      const claimAuthSig = await ephemeralWalletClient.signTypedData({
+        account: ephemeralAccount,
+        domain: { name: "BatchVault", version: "1", chainId: BigInt(ACTIVE_CHAIN.id), verifyingContract: contracts.batchVault },
+        types: { ClaimAuth: [
+          { name: "batchId",    type: "uint256" },
+          { name: "commitment", type: "bytes32" },
+          { name: "recipient",  type: "address" },
+        ]},
+        primaryType: "ClaimAuth",
+        message: { batchId: batch.batchId, commitment: actualCommitment, recipient: walletAddress! },
+      });
+
+      const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
+      if (!relayerUrl) throw new Error("NEXT_PUBLIC_RELAYER_URL is not set");
+      const resp = await fetch(`${relayerUrl}/order`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          marketId:   selectedMarket.conditionId,
+          batchId:    batch.batchId.toString(),
+          signer:     ephemeralAddress,
+          isBuy: true, isSell: false,
+          amount:     params.amount.toString(),
+          limitPrice: params.limitPrice.toString(),
+          salt:       params.salt,
+          commitment: actualCommitment,
+          signature,
+          nonce:      ephemeralNonce.toString(),
+          deadline:   deadline.toString(),
+          transferAuth,
+        }),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ error: "Relayer error" }));
+        throw new Error(err.error ?? `Relayer returned ${resp.status}`);
       }
+
+      if (walletAddress) {
+        setCommitments((prev) => [...prev, { hash: actualCommitment, amount: params.amount, trader: walletAddress, timestamp: Date.now() }]);
+        setBatch((prev) => ({ ...prev, commitmentCount: prev.commitmentCount + 1, totalDeposited: prev.totalDeposited + params.amount }));
+        try {
+          const key = `predacy:orders:${walletAddress.toLowerCase()}`;
+          const existing: unknown[] = JSON.parse(localStorage.getItem(key) ?? "[]");
+          existing.unshift({
+            commitment:      actualCommitment,
+            salt:            params.salt,
+            amount:          params.amount.toString(),
+            isBuy:           true,
+            limitPrice:      params.limitPrice.toString(),
+            batchId:         batch.batchId.toString(),
+            marketId:        selectedMarket.conditionId,
+            marketQuestion:  selectedMarket.question ?? null,
+            timestamp:       Date.now(),
+            ephemeralTrader: ephemeralAddress,
+            claimAuthSig,
+          });
+          localStorage.setItem(key, JSON.stringify(existing.slice(0, 200)));
+        } catch { /* ignore */ }
+      }
+      setOrderSealed(true);
+      setActiveTab("positions");
+      return;
     }
 
-    // Step 2 — read current EIP-712 nonce
+    // ── SELL: real wallet signs (unchanged) ───────────────────────────────────
+    let isApproved = false;
+    try {
+      isApproved = await publicClient.readContract({
+        address: contracts.ctf, abi: CTF_ABI, functionName: "isApprovedForAll",
+        args: [walletAddress!, contracts.batchVault],
+      }) as boolean;
+    } catch { isApproved = false; }
+    if (!isApproved) {
+      const tx = await walletClient.writeContract({
+        address: contracts.ctf, abi: CTF_ABI, functionName: "setApprovalForAll",
+        args: [contracts.batchVault, true], ...CHAIN_GAS,
+      });
+      await publicClient.waitForTransactionReceipt({ hash: tx });
+    }
+
     const nonce = await publicClient.readContract({
       address: contracts.batchVault, abi: BATCH_VAULT_ABI, functionName: "nonces",
       args: [walletAddress!],
@@ -666,77 +824,36 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
 
     setSubmitStep("signing");
 
-    // Step 3 — sign CommitOrder EIP-712 (wallet "Sign" popup #1)
-    const deadline = BigInt(Math.floor(Date.now() / 1000) + 600);
     const signature = await walletClient.signTypedData({
       account: walletAddress!,
       domain: { name: "BatchVault", version: "1", chainId: BigInt(ACTIVE_CHAIN.id), verifyingContract: contracts.batchVault },
       types: { CommitOrder: [
-        { name: "commitment", type: "bytes32" }, { name: "amount",     type: "uint256" },
-        { name: "batchId",    type: "uint256" }, { name: "nonce",      type: "uint256" },
+        { name: "commitment", type: "bytes32" }, { name: "amount",  type: "uint256" },
+        { name: "batchId",    type: "uint256" }, { name: "nonce",   type: "uint256" },
         { name: "deadline",   type: "uint256" },
       ]},
       primaryType: "CommitOrder",
       message: { commitment: params.commitment, amount: params.amount, batchId: batch.batchId, nonce, deadline },
     });
 
-    // Step 4 — buy orders only: sign EIP-3009 TransferWithAuthorization (wallet "Sign" popup #2)
-    // Authorises the vault to pull USDC at settlement (only if the order fills).
-    let transferAuth: {
-      validAfter: string; validBefore: string; nonce: string; v: number; r: string; s: string;
-    } | undefined;
-
-    if (params.isBuy) {
-      const nonceBytes = new Uint8Array(32);
-      crypto.getRandomValues(nonceBytes);
-      const transferNonce = ("0x" + Array.from(nonceBytes).map((b) => b.toString(16).padStart(2, "0")).join("")) as `0x${string}`;
-
-      const validAfter  = 0n;
-      const validBefore = BigInt(Math.floor(Date.now() / 1000) + 7200); // 2 hours
-
-      const transferSig = await walletClient.signTypedData({
-        account: walletAddress!,
-        domain: {
-          name: "USD Coin (Test)", version: "1",
-          chainId: BigInt(ACTIVE_CHAIN.id), verifyingContract: contracts.usdc,
-        },
-        types: {
-          TransferWithAuthorization: [
-            { name: "from",        type: "address" },
-            { name: "to",          type: "address" },
-            { name: "value",       type: "uint256" },
-            { name: "validAfter",  type: "uint256" },
-            { name: "validBefore", type: "uint256" },
-            { name: "nonce",       type: "bytes32" },
-          ],
-        },
-        primaryType: "TransferWithAuthorization",
-        message: {
-          from: walletAddress!, to: contracts.batchVault,
-          value: params.amount, validAfter, validBefore, nonce: transferNonce,
-        },
-      });
-
-      const r = transferSig.slice(0, 66) as `0x${string}`;
-      const s = ("0x" + transferSig.slice(66, 130)) as `0x${string}`;
-      const v = parseInt(transferSig.slice(130, 132), 16);
-      transferAuth = { validAfter: validAfter.toString(), validBefore: validBefore.toString(), nonce: transferNonce, v, r, s };
-    }
-
-    // Step 5 — POST to relayer
     const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
     if (!relayerUrl) throw new Error("NEXT_PUBLIC_RELAYER_URL is not set");
     const resp = await fetch(`${relayerUrl}/order`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        marketId:     selectedMarket.conditionId,
-        batchId:      batch.batchId.toString(),
-        signer:       walletAddress, isBuy: params.isBuy, isSell: !params.isBuy,
-        amount:       params.amount.toString(), limitPrice: params.limitPrice.toString(),
-        salt:         params.salt, commitment: params.commitment, signature,
-        nonce:        nonce.toString(), deadline: deadline.toString(),
-        transferAuth, // EIP-3009 auth for buy orders
+        marketId:   selectedMarket.conditionId,
+        batchId:    batch.batchId.toString(),
+        signer:     walletAddress,
+        isBuy: false, isSell: true,
+        amount:     params.amount.toString(),
+        limitPrice: params.limitPrice.toString(),
+        salt:       params.salt,
+        commitment: params.commitment,
+        signature,
+        nonce:      nonce.toString(),
+        deadline:   deadline.toString(),
+        transferAuth: undefined,
       }),
     });
     if (!resp.ok) {
@@ -745,32 +862,26 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     }
     if (walletAddress) {
       setCommitments((prev) => [...prev, { hash: params.commitment, amount: params.amount, trader: walletAddress, timestamp: Date.now() }]);
-      setBatch((prev) => ({
-        ...prev,
-        commitmentCount: prev.commitmentCount + 1,
-        totalDeposited: params.isBuy ? prev.totalDeposited + params.amount : prev.totalDeposited,
-      }));
-      // Persist order locally so claimPosition can reconstruct the preimage,
-      // and so the profile page can show history
+      setBatch((prev) => ({ ...prev, commitmentCount: prev.commitmentCount + 1 }));
       try {
         const key = `predacy:orders:${walletAddress.toLowerCase()}`;
         const existing: unknown[] = JSON.parse(localStorage.getItem(key) ?? "[]");
         existing.unshift({
           commitment:     params.commitment,
-          salt:           params.salt,           // preimage needed at claim time
+          salt:           params.salt,
           amount:         params.amount.toString(),
-          isBuy:          params.isBuy,
+          isBuy:          false,
           limitPrice:     params.limitPrice.toString(),
           batchId:        batch.batchId.toString(),
-          marketId:       selectedMarket?.conditionId ?? null,
-          marketQuestion: selectedMarket?.question ?? null,
+          marketId:       selectedMarket.conditionId,
+          marketQuestion: selectedMarket.question ?? null,
           timestamp:      Date.now(),
         });
         localStorage.setItem(key, JSON.stringify(existing.slice(0, 200)));
-      } catch { /* ignore quota / SSR errors */ }
+      } catch { /* ignore */ }
     }
     setOrderSealed(true);
-    setActiveTab("positions"); // Auto-switch so user can track and claim
+    setActiveTab("positions");
   };
 
   // ── Faucet ───────────────────────────────────────────────────────────────────

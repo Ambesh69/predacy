@@ -132,6 +132,13 @@ contract BatchVault {
         "CommitOrder(bytes32 commitment,uint256 amount,uint256 batchId,uint256 nonce,uint256 deadline)"
     );
 
+    /// @notice Ephemeral traders sign this struct to authorize a recipient (real wallet) to
+    ///         claim their position via claimPositionFor. This enables the ephemeral wallet
+    ///         privacy pattern: trader = ephemeral address (no gas), recipient = real wallet.
+    bytes32 public constant CLAIM_AUTH_TYPEHASH = keccak256(
+        "ClaimAuth(uint256 batchId,bytes32 commitment,address recipient)"
+    );
+
     address public immutable usdc;
     address public immutable ctf;          // ConditionalTokens
     address public immutable relayer;      // Trusted batch processor address
@@ -610,6 +617,83 @@ contract BatchVault {
         }
 
         emit PositionClaimed(batchId, msg.sender, yesShares, pos.refundAmount);
+    }
+
+    /// @notice Claim a position on behalf of an ephemeral trader (the ephemeral wallet pattern).
+    ///
+    ///         Privacy model:
+    ///           - trader = ephemeral address (was used as `trader` in the commitment hash)
+    ///           - recipient = real wallet (receives YES tokens / USDC, pays gas for this call)
+    ///           - traderSig = ephemeral key's EIP-712 ClaimAuth signature authorizing recipient
+    ///
+    ///         The ephemeral key never needs POL for gas — only the recipient wallet does.
+    ///         The ephemeral private key can be discarded after signing the ClaimAuth at order time.
+    ///
+    /// @param batchId    The settled batch to claim from
+    /// @param isBuy      Order direction (true = buy YES, false = sell YES)
+    /// @param amount     Collateral (USDC for buys, YES tokens for sells), 6 decimals
+    /// @param limitPrice Limit price (6-decimal fixed point)
+    /// @param salt       Random blinding factor chosen at order creation
+    /// @param trader     The ephemeral address used as `trader` in the commitment hash
+    /// @param recipient  The real wallet that receives the payout (msg.sender, pays gas)
+    /// @param traderSig  EIP-712 signature from trader: ClaimAuth(batchId, commitment, recipient)
+    function claimPositionFor(
+        uint256 batchId,
+        bool isBuy,
+        uint256 amount,
+        uint256 limitPrice,
+        bytes32 salt,
+        address trader,
+        address recipient,
+        bytes calldata traderSig
+    ) external {
+        Batch storage batch = batches[batchId];
+        if (batch.status != BatchStatus.SETTLED) revert BatchNotSettled();
+
+        // Reconstruct commitment using the ephemeral trader address
+        bytes32 commitment = keccak256(
+            abi.encode(batch.marketId, isBuy, amount, limitPrice, salt, trader)
+        );
+
+        // Verify that the ephemeral trader signed a ClaimAuth authorizing this specific recipient
+        bytes32 structHash = keccak256(abi.encode(CLAIM_AUTH_TYPEHASH, batchId, commitment, recipient));
+        bytes32 digest      = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
+        address recovered   = _recoverSigner(digest, traderSig);
+        if (recovered == address(0) || recovered != trader) revert InvalidSignature();
+
+        Position storage pos = positionsByCommitment[batchId][commitment];
+        if (pos.filledAmount == 0 && pos.refundAmount == 0) revert NothingToClaim();
+        if (pos.claimed) revert AlreadyClaimed();
+
+        pos.claimed = true;
+
+        uint256 yesShares = 0;
+
+        if (pos.filledAmount > 0) {
+            if (pos.isBuy) {
+                uint256 totalYes = batch.yesTokensReceived + batch.filledSellYes;
+                if (batch.totalFilledBuyVol > 0 && totalYes > 0) {
+                    yesShares = (pos.filledAmount * totalYes) / batch.totalFilledBuyVol;
+                }
+                if (yesShares > 0) {
+                    uint256 yesTokenId = _getYesTokenId(batch.marketId);
+                    IConditionalTokens(ctf).safeTransferFrom(address(this), recipient, yesTokenId, yesShares, "");
+                }
+            } else {
+                IERC20(usdc).transfer(recipient, pos.filledAmount);
+            }
+        }
+
+        if (pos.refundAmount > 0) {
+            if (pos.isBuy) {
+                IERC20(usdc).transfer(recipient, pos.refundAmount);
+            } else {
+                uint256 yesTokenId = _getYesTokenId(batch.marketId);
+                IConditionalTokens(ctf).safeTransferFrom(address(this), recipient, yesTokenId, pos.refundAmount, "");
+            }
+        }
+
+        emit PositionClaimed(batchId, recipient, yesShares, pos.refundAmount);
     }
 
     // ═══════════════════════════════════════════════════════════════════════

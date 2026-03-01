@@ -1083,4 +1083,143 @@ contract BatchVaultTest is Test {
         assertEq(aliceInBatch2.filledAmount, 0);
         assertEq(bobInBatch1.filledAmount,   0);
     }
+
+    // ─── Tests: claimPositionFor (ephemeral wallet pattern) ───────────────
+
+    /// @dev Sign a ClaimAuth struct — mirrors claimPositionFor's EIP-712 verification.
+    function _signClaimAuth(
+        uint256 signerKey,
+        uint256 batchId,
+        bytes32 commitment,
+        address recipient
+    ) internal view returns (bytes memory sig) {
+        bytes32 structHash = keccak256(abi.encode(
+            vault.CLAIM_AUTH_TYPEHASH(),
+            batchId,
+            commitment,
+            recipient
+        ));
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", vault.DOMAIN_SEPARATOR(), structHash));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerKey, digest);
+        return abi.encodePacked(r, s, v);
+    }
+
+    /// @notice Full ephemeral wallet buy order flow:
+    ///   1. Ephemeral keypair used as `trader` in commitment hash.
+    ///   2. USDC funded into ephemeral address (simulates real wallet sending USDC to ephemeral).
+    ///   3. EIP-3009 pulls from ephemeral at settlement (not real wallet).
+    ///   4. ClaimAuth from ephemeral authorizes alice (real wallet) to claim.
+    ///   5. Alice calls claimPositionFor — YES tokens land in alice's wallet.
+    function test_claimPositionFor_ephemeral_buy_order() public {
+        uint256 ephemeralKey = 0xEEEEEEEE;
+        address ephemeral    = vm.addr(ephemeralKey);
+
+        uint256 amount     = 100e6;
+        uint256 limitPrice = 650000;
+        bytes32 salt       = bytes32(uint256(42));
+
+        // Fund ephemeral address with USDC (simulates real wallet → ephemeral transfer)
+        usdc.mint(ephemeral, amount);
+
+        uint256 batchId = _openBatch();
+
+        // Commitment hash uses ephemeral as trader
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, amount, limitPrice, salt, ephemeral);
+
+        // Ephemeral commits order (via commitOrder directly for simplicity)
+        vm.prank(ephemeral);
+        vault.commitOrder(commitment, amount, MARKET_ID);
+
+        _closeBatch(batchId);
+
+        // Build settlement: ephemeral is the trader, EIP-3009 pulls from ephemeral
+        BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
+        orders[0] = BatchVault.RevealedOrder(ephemeral, true, amount, limitPrice, salt);
+
+        BatchVault.TransferAuth[] memory auths = _buildAuths(1);
+        // EIP-3009 auth: from = ephemeral (not alice!). MockUSDC skips sig validation.
+        // Pre-fund vault with ephemeral's USDC (simulates transferWithAuthorization moving it)
+        // MockUSDC.transferWithAuthorization reduces ephemeral's balance:
+        // auths[0] is zero-value — MockUSDC doesn't validate, just executes transfer.
+
+        uint256 clearingPrice = 650000;
+        vm.prank(relayer);
+        vault.settleBatch(batchId, orders, auths, clearingPrice, amount, 0, amount, 0, "");
+
+        // Sign ClaimAuth: ephemeral authorizes alice (real wallet) to receive payout
+        bytes memory claimAuthSig = _signClaimAuth(ephemeralKey, batchId, commitment, alice);
+
+        // Alice (real wallet) calls claimPositionFor — pays gas, receives YES tokens
+        uint256 aliceYesBefore = ctf.balanceOf(alice, _yesTokenId());
+        vm.prank(alice);
+        vault.claimPositionFor(batchId, true, amount, limitPrice, salt, ephemeral, alice, claimAuthSig);
+
+        // Alice receives YES tokens — payout goes to recipient (alice), not ephemeral
+        uint256 aliceYesAfter = ctf.balanceOf(alice, _yesTokenId());
+        assertGt(aliceYesAfter, aliceYesBefore, "alice should have received YES tokens");
+        assertEq(ctf.balanceOf(ephemeral, _yesTokenId()), 0, "ephemeral should receive nothing");
+
+        // Position is marked claimed
+        BatchVault.Position memory pos = vault.getPosition(batchId, commitment);
+        assertTrue(pos.claimed);
+    }
+
+    function test_claimPositionFor_wrongRecipient_reverts() public {
+        uint256 ephemeralKey = 0xEEEEEEEE;
+        address ephemeral    = vm.addr(ephemeralKey);
+        address attacker     = address(0xBAD);
+
+        uint256 amount     = 100e6;
+        uint256 limitPrice = 650000;
+        bytes32 salt       = bytes32(uint256(42));
+
+        usdc.mint(ephemeral, amount);
+        uint256 batchId    = _openBatch();
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, amount, limitPrice, salt, ephemeral);
+        vm.prank(ephemeral);
+        vault.commitOrder(commitment, amount, MARKET_ID);
+        _closeBatch(batchId);
+
+        BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
+        orders[0] = BatchVault.RevealedOrder(ephemeral, true, amount, limitPrice, salt);
+        vm.prank(relayer);
+        vault.settleBatch(batchId, orders, _buildAuths(1), 650000, amount, 0, amount, 0, "");
+
+        // ClaimAuth signed for alice — attacker tries to redirect to themselves
+        bytes memory sig = _signClaimAuth(ephemeralKey, batchId, commitment, alice);
+
+        vm.expectRevert(BatchVault.InvalidSignature.selector);
+        vm.prank(attacker);
+        vault.claimPositionFor(batchId, true, amount, limitPrice, salt, ephemeral, attacker, sig);
+    }
+
+    function test_claimPositionFor_doubleClaim_reverts() public {
+        uint256 ephemeralKey = 0xEEEEEEEE;
+        address ephemeral    = vm.addr(ephemeralKey);
+
+        uint256 amount     = 100e6;
+        uint256 limitPrice = 650000;
+        bytes32 salt       = bytes32(uint256(42));
+
+        usdc.mint(ephemeral, amount);
+        uint256 batchId    = _openBatch();
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, amount, limitPrice, salt, ephemeral);
+        vm.prank(ephemeral);
+        vault.commitOrder(commitment, amount, MARKET_ID);
+        _closeBatch(batchId);
+
+        BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
+        orders[0] = BatchVault.RevealedOrder(ephemeral, true, amount, limitPrice, salt);
+        vm.prank(relayer);
+        vault.settleBatch(batchId, orders, _buildAuths(1), 650000, amount, 0, amount, 0, "");
+
+        bytes memory sig = _signClaimAuth(ephemeralKey, batchId, commitment, alice);
+
+        vm.prank(alice);
+        vault.claimPositionFor(batchId, true, amount, limitPrice, salt, ephemeral, alice, sig);
+
+        vm.expectRevert(BatchVault.AlreadyClaimed.selector);
+        vm.prank(alice);
+        vault.claimPositionFor(batchId, true, amount, limitPrice, salt, ephemeral, alice, sig);
+    }
 }

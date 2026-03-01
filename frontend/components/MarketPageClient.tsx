@@ -3,6 +3,7 @@
 import { useState, useEffect, use } from "react";
 import Link from "next/link";
 import { createPublicClient, createWalletClient, custom, http, parseAbiItem } from "viem";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
 import BatchTimer from "@/components/BatchTimer";
 import CommitmentFeed from "@/components/CommitmentFeed";
@@ -14,10 +15,12 @@ import { getMarket, MOCK_MARKETS, type Market } from "@/lib/polymarket";
 import {
   BATCH_VAULT_ABI,
   CTF_ABI,
+  ERC20_ABI,
   MOCK_USDC_ABI,
   BatchStatus,
   getContracts,
 } from "@/lib/contracts";
+import { computeCommitment } from "@/lib/commitmentHash";
 import {
   ACTIVE_CHAIN,
   ACTIVE_CHAIN_ID_HEX,
@@ -397,11 +400,14 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   //      (authorises vault to pull USDC at settlement — only if the order fills)
   //   5. POST both sigs to relayer → relayer calls commitOrderFor() on-chain
   //
-  // Privacy guarantees:
-  //   - OrderCommitted: only commitment hash + batchId (no wallet, no amount)
-  //   - EIP-3009 Transfer fires at settlement: address + amount visible then
-  //   - Claim time: msg.sender + preimage revealed (unavoidable)
-  //   - Zero relayer capital needed — relayer only spends gas
+  // ── Ephemeral wallet privacy model ─────────────────────────────────────────
+  //   BUY orders:
+  //     1. Fresh keypair generated in-browser (never persisted)
+  //     2. Real wallet sends USDC to ephemeral address (1 MetaMask tx)
+  //     3. Ephemeral key signs CommitOrder + EIP-3009 + ClaimAuth (0 MetaMask popups!)
+  //     4. On-chain: Transfer(ephemeralAddress → vault) — NOT realWallet!
+  //     5. Claim: real wallet calls claimPositionFor with stored ClaimAuth sig
+  //   SELL orders: unchanged (real wallet signs everything; YES tokens must come from real wallet)
   const handleOrderSubmit = async (params: {
     commitment: `0x${string}`;
     amount: bigint;
@@ -411,38 +417,255 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   }) => {
     setChainError(null);
     const contracts = getContracts(ACTIVE_CHAIN.id);
+    const deadline  = BigInt(Math.floor(Date.now() / 1000) + 600); // 10 min from now
 
     setSubmitStep("approving");
     const walletClient = await ensureAmoy();
 
-    // Step 1 — sell orders only: CTF operator approval for YES token transfer.
-    // Buy orders need no on-chain approval at order time (EIP-3009 handles USDC at settlement).
-    if (!params.isBuy) {
-      let isApproved = false;
-      try {
-        isApproved = await publicClient.readContract({
-          address: contracts.ctf,
-          abi: CTF_ABI,
-          functionName: "isApprovedForAll",
-          args: [walletAddress!, contracts.batchVault],
-        }) as boolean;
-      } catch {
-        isApproved = false;
+    // ── BUY ORDER: ephemeral wallet pattern ──────────────────────────────────
+    if (params.isBuy) {
+      // 1. Generate fresh ephemeral keypair (in-memory only)
+      const ephemeralPrivateKey = generatePrivateKey();
+      const ephemeralAccount    = privateKeyToAccount(ephemeralPrivateKey);
+      const ephemeralAddress    = ephemeralAccount.address;
+
+      // 2. Fund ephemeral with USDC from real wallet (1 MetaMask tx)
+      //    "FUNDING EPHEMERAL WALLET…" shown here — submitStep = "approving"
+      const fundTx = await walletClient.writeContract({
+        address: contracts.usdc,
+        abi:     ERC20_ABI,
+        functionName: "transfer",
+        args:    [ephemeralAddress, params.amount],
+        ...CHAIN_GAS,
+      });
+      await publicClient.waitForTransactionReceipt({ hash: fundTx });
+
+      // 3. In-browser wallet client for ephemeral key — no MetaMask popups from here on
+      const ephemeralWalletClient = createWalletClient({
+        account:   ephemeralAccount,
+        chain:     ACTIVE_CHAIN,
+        transport: http(),
+      });
+
+      // 4. Recompute commitment with ephemeral address as trader
+      //    (commitment hash includes trader; ephemeral address is trader on-chain)
+      const actualCommitment = computeCommitment({
+        marketId:   batch.batchMarketId,
+        isBuy:      params.isBuy,
+        amount:     params.amount,
+        limitPrice: params.limitPrice,
+        salt:       params.salt,
+        trader:     ephemeralAddress,
+      });
+
+      // 5. Ephemeral nonce (fresh address, always 0 on first use)
+      const ephemeralNonce = await publicClient.readContract({
+        address: contracts.batchVault,
+        abi:     BATCH_VAULT_ABI,
+        functionName: "nonces",
+        args:    [ephemeralAddress],
+      }) as bigint;
+
+      setSubmitStep("signing");
+
+      // 6. Sign CommitOrder EIP-712 from ephemeral key — no MetaMask popup!
+      const signature = await ephemeralWalletClient.signTypedData({
+        account: ephemeralAccount,
+        domain: {
+          name:              "BatchVault",
+          version:           "1",
+          chainId:           BigInt(ACTIVE_CHAIN.id),
+          verifyingContract: contracts.batchVault,
+        },
+        types: {
+          CommitOrder: [
+            { name: "commitment", type: "bytes32" },
+            { name: "amount",     type: "uint256" },
+            { name: "batchId",    type: "uint256" },
+            { name: "nonce",      type: "uint256" },
+            { name: "deadline",   type: "uint256" },
+          ],
+        },
+        primaryType: "CommitOrder",
+        message: {
+          commitment: actualCommitment,
+          amount:     params.amount,
+          batchId:    batch.batchId,
+          nonce:      ephemeralNonce,
+          deadline,
+        },
+      });
+
+      // 7. Sign EIP-3009 TransferWithAuthorization from ephemeral key — no MetaMask popup!
+      //    from = ephemeralAddress: USDC moves ephemeral → vault at settlement (NOT realWallet!)
+      const nonceBytes = new Uint8Array(32);
+      crypto.getRandomValues(nonceBytes);
+      const transferNonce = ("0x" + Array.from(nonceBytes).map((b) => b.toString(16).padStart(2, "0")).join("")) as `0x${string}`;
+
+      const validAfter  = 0n;
+      const validBefore = BigInt(Math.floor(Date.now() / 1000) + 7200);
+
+      const transferSig = await ephemeralWalletClient.signTypedData({
+        account: ephemeralAccount,
+        domain: {
+          name:              "USD Coin (Test)",
+          version:           "1",
+          chainId:           BigInt(ACTIVE_CHAIN.id),
+          verifyingContract: contracts.usdc,
+        },
+        types: {
+          TransferWithAuthorization: [
+            { name: "from",        type: "address" },
+            { name: "to",          type: "address" },
+            { name: "value",       type: "uint256" },
+            { name: "validAfter",  type: "uint256" },
+            { name: "validBefore", type: "uint256" },
+            { name: "nonce",       type: "bytes32" },
+          ],
+        },
+        primaryType: "TransferWithAuthorization",
+        message: {
+          from:        ephemeralAddress,  // ← ephemeral, NOT realWallet — privacy!
+          to:          contracts.batchVault,
+          value:       params.amount,
+          validAfter,
+          validBefore,
+          nonce:       transferNonce,
+        },
+      });
+
+      const r = transferSig.slice(0, 66) as `0x${string}`;
+      const s = ("0x" + transferSig.slice(66, 130)) as `0x${string}`;
+      const v = parseInt(transferSig.slice(130, 132), 16);
+      const transferAuth = {
+        validAfter:  validAfter.toString(),
+        validBefore: validBefore.toString(),
+        nonce:       transferNonce,
+        v, r, s,
+      };
+
+      // 8. Sign ClaimAuth EIP-712 from ephemeral key — authorizes real wallet to claim
+      //    This is stored locally. Ephemeral private key is discarded after this block.
+      const claimAuthSig = await ephemeralWalletClient.signTypedData({
+        account: ephemeralAccount,
+        domain: {
+          name:              "BatchVault",
+          version:           "1",
+          chainId:           BigInt(ACTIVE_CHAIN.id),
+          verifyingContract: contracts.batchVault,
+        },
+        types: {
+          ClaimAuth: [
+            { name: "batchId",    type: "uint256" },
+            { name: "commitment", type: "bytes32" },
+            { name: "recipient",  type: "address" },
+          ],
+        },
+        primaryType: "ClaimAuth",
+        message: {
+          batchId:    batch.batchId,
+          commitment: actualCommitment,
+          recipient:  walletAddress!,  // real wallet receives payout at claim time
+        },
+      });
+      // Ephemeral private key goes out of scope here — it's gone from memory.
+
+      // 9. POST to relayer
+      const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
+      if (!relayerUrl) throw new Error("NEXT_PUBLIC_RELAYER_URL is not set");
+
+      const resp = await fetch(`${relayerUrl}/order`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          marketId:     id,
+          batchId:      batch.batchId.toString(),
+          signer:       ephemeralAddress,  // ← ephemeral, NOT realWallet
+          isBuy:        true,
+          isSell:       false,
+          amount:       params.amount.toString(),
+          limitPrice:   params.limitPrice.toString(),
+          salt:         params.salt,
+          commitment:   actualCommitment,
+          signature,
+          nonce:        ephemeralNonce.toString(),
+          deadline:     deadline.toString(),
+          transferAuth,
+        }),
+      });
+
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ error: "Relayer error" }));
+        throw new Error(err.error ?? `Relayer returned ${resp.status}`);
       }
 
-      if (!isApproved) {
-        const approveTx = await walletClient.writeContract({
-          address: contracts.ctf,
-          abi: CTF_ABI,
-          functionName: "setApprovalForAll",
-          args: [contracts.batchVault, true],
-          ...CHAIN_GAS,
-        });
-        await publicClient.waitForTransactionReceipt({ hash: approveTx });
+      // Update local state optimistically
+      if (walletAddress) {
+        setCommitments((prev) => [
+          ...prev,
+          { hash: actualCommitment, amount: params.amount, trader: walletAddress, timestamp: Date.now() },
+        ]);
+        setBatch((prev) => ({
+          ...prev,
+          commitmentCount: prev.commitmentCount + 1,
+          totalDeposited:  prev.totalDeposited + params.amount,
+        }));
       }
+
+      setActiveTab("positions");
+
+      // Persist locally — store ClaimAuth sig (NOT private key!) for claim time
+      try {
+        const key = `predacy:orders:${walletAddress!.toLowerCase()}`;
+        const existing: unknown[] = JSON.parse(localStorage.getItem(key) ?? "[]");
+        existing.unshift({
+          commitment:      actualCommitment,
+          salt:            params.salt,
+          amount:          params.amount.toString(),
+          isBuy:           true,
+          limitPrice:      params.limitPrice.toString(),
+          batchId:         batch.batchId.toString(),
+          marketId:        id,
+          marketQuestion:  market?.question ?? null,
+          timestamp:       Date.now(),
+          // Ephemeral wallet fields (enables claimPositionFor at claim time)
+          ephemeralTrader: ephemeralAddress,
+          claimAuthSig,
+        });
+        localStorage.setItem(key, JSON.stringify(existing.slice(0, 200)));
+      } catch { /* ignore quota / SSR errors */ }
+
+      return; // ← buy order done
     }
 
-    // Step 2 — read current EIP-712 nonce for this signer
+    // ── SELL ORDER: real wallet signs everything (unchanged) ─────────────────
+    // Sell orders cannot use ephemeral wallets — YES tokens must come from the real wallet.
+
+    // Step 1 — CTF operator approval for YES token transfer (if not already approved)
+    let isApproved = false;
+    try {
+      isApproved = await publicClient.readContract({
+        address: contracts.ctf,
+        abi: CTF_ABI,
+        functionName: "isApprovedForAll",
+        args: [walletAddress!, contracts.batchVault],
+      }) as boolean;
+    } catch {
+      isApproved = false;
+    }
+
+    if (!isApproved) {
+      const approveTx = await walletClient.writeContract({
+        address: contracts.ctf,
+        abi: CTF_ABI,
+        functionName: "setApprovalForAll",
+        args: [contracts.batchVault, true],
+        ...CHAIN_GAS,
+      });
+      await publicClient.waitForTransactionReceipt({ hash: approveTx });
+    }
+
+    // Step 2 — read nonce for real wallet
     const nonce = await publicClient.readContract({
       address: contracts.batchVault,
       abi: BATCH_VAULT_ABI,
@@ -452,9 +675,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
 
     setSubmitStep("signing");
 
-    // Step 3 — sign CommitOrder EIP-712 (no tx, no gas — wallet "Sign" popup #1)
-    const deadline = BigInt(Math.floor(Date.now() / 1000) + 600); // 10 min from now
-
+    // Step 3 — sign CommitOrder EIP-712 from real wallet (MetaMask popup)
     const signature = await walletClient.signTypedData({
       account: walletAddress!,
       domain: {
@@ -482,68 +703,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       },
     });
 
-    // Step 4 — buy orders only: sign EIP-3009 TransferWithAuthorization (wallet "Sign" popup #2)
-    // Authorises the vault to pull USDC from the user's wallet at settlement,
-    // but ONLY if the order fills (relayer only submits the auth for filled orders).
-    // The auth expires after 2 hours — more than enough for any batch to settle.
-    let transferAuth: {
-      validAfter: string; validBefore: string; nonce: string; v: number; r: string; s: string;
-    } | undefined;
-
-    if (params.isBuy) {
-      // Random 32-byte nonce for the EIP-3009 auth (prevents replay attacks)
-      const nonceBytes = new Uint8Array(32);
-      crypto.getRandomValues(nonceBytes);
-      const transferNonce = ("0x" + Array.from(nonceBytes).map((b) => b.toString(16).padStart(2, "0")).join("")) as `0x${string}`;
-
-      const validAfter  = 0n; // valid immediately
-      const validBefore = BigInt(Math.floor(Date.now() / 1000) + 7200); // 2 hours
-
-      const transferSig = await walletClient.signTypedData({
-        account: walletAddress!,
-        domain: {
-          name:              "USD Coin (Test)", // must match MockUSDC.name constant
-          version:           "1",
-          chainId:           BigInt(ACTIVE_CHAIN.id),
-          verifyingContract: contracts.usdc,
-        },
-        types: {
-          TransferWithAuthorization: [
-            { name: "from",        type: "address" },
-            { name: "to",          type: "address" },
-            { name: "value",       type: "uint256" },
-            { name: "validAfter",  type: "uint256" },
-            { name: "validBefore", type: "uint256" },
-            { name: "nonce",       type: "bytes32" },
-          ],
-        },
-        primaryType: "TransferWithAuthorization",
-        message: {
-          from:        walletAddress!,
-          to:          contracts.batchVault,
-          value:       params.amount,
-          validAfter,
-          validBefore,
-          nonce:       transferNonce,
-        },
-      });
-
-      // Split 65-byte hex signature into v, r, s
-      const r = transferSig.slice(0, 66) as `0x${string}`;           // 0x + 64 hex = 32 bytes
-      const s = ("0x" + transferSig.slice(66, 130)) as `0x${string}`; // next 32 bytes
-      const v = parseInt(transferSig.slice(130, 132), 16);             // last byte (27 or 28)
-
-      transferAuth = {
-        validAfter:  validAfter.toString(),
-        validBefore: validBefore.toString(),
-        nonce:       transferNonce,
-        v,
-        r,
-        s,
-      };
-    }
-
-    // Step 5 — POST to relayer (relayer calls commitOrderFor on-chain)
+    // Step 4 — POST to relayer (no transferAuth for sell orders)
     const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
     if (!relayerUrl) throw new Error("NEXT_PUBLIC_RELAYER_URL is not set");
 
@@ -551,19 +711,19 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       method:  "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        marketId:     id,
-        batchId:      batch.batchId.toString(),
-        signer:       walletAddress,
-        isBuy:        params.isBuy,
-        isSell:       !params.isBuy,
-        amount:       params.amount.toString(),
-        limitPrice:   params.limitPrice.toString(),
-        salt:         params.salt,
-        commitment:   params.commitment,
+        marketId:   id,
+        batchId:    batch.batchId.toString(),
+        signer:     walletAddress,
+        isBuy:      false,
+        isSell:     true,
+        amount:     params.amount.toString(),
+        limitPrice: params.limitPrice.toString(),
+        salt:       params.salt,
+        commitment: params.commitment,
         signature,
-        nonce:        nonce.toString(),
-        deadline:     deadline.toString(),
-        transferAuth, // EIP-3009 auth (buy orders only — undefined for sell orders)
+        nonce:      nonce.toString(),
+        deadline:   deadline.toString(),
+        transferAuth: undefined,
       }),
     });
 
@@ -572,44 +732,37 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       throw new Error(err.error ?? `Relayer returned ${resp.status}`);
     }
 
-    // Update local state optimistically (relayer will also emit OrderCommitted soon)
     if (walletAddress) {
       setCommitments((prev) => [
         ...prev,
-        // trader/amount intentionally omitted (not in on-chain event); trader stored
-        // locally so we can label this user's own orders in CommitmentFeed
         { hash: params.commitment, amount: params.amount, trader: walletAddress, timestamp: Date.now() },
       ]);
       setBatch((prev) => ({
         ...prev,
         commitmentCount: prev.commitmentCount + 1,
-        // Only USDC buy orders contribute to totalDeposited; sell orders deposit YES tokens
-        totalDeposited: params.isBuy ? prev.totalDeposited + params.amount : prev.totalDeposited,
+        totalDeposited:  prev.totalDeposited, // sell orders don't add USDC
       }));
     }
 
-    // Auto-switch to "My Positions" tab so user can track their sealed order
     setActiveTab("positions");
 
-    // Persist order locally so the profile page can show history
-    // (wallet address never appears as `trader` in on-chain events — the relayer
-    // submits commitOrderFor on-chain, so only the relayer address is visible)
     try {
       const key = `predacy:orders:${walletAddress!.toLowerCase()}`;
       const existing: unknown[] = JSON.parse(localStorage.getItem(key) ?? "[]");
       existing.unshift({
-        commitment:      params.commitment,
-        salt:            params.salt,            // needed to reveal preimage at claim time
-        amount:          params.amount.toString(),
-        isBuy:           params.isBuy,
-        limitPrice:      params.limitPrice.toString(),
-        batchId:         batch.batchId.toString(),
-        marketId:        id,
-        marketQuestion:  market?.question ?? null,
-        timestamp:       Date.now(),
+        commitment:     params.commitment,
+        salt:           params.salt,
+        amount:         params.amount.toString(),
+        isBuy:          false,
+        limitPrice:     params.limitPrice.toString(),
+        batchId:        batch.batchId.toString(),
+        marketId:       id,
+        marketQuestion: market?.question ?? null,
+        timestamp:      Date.now(),
+        // No ephemeralTrader / claimAuthSig — sell orders use claimPosition directly
       });
       localStorage.setItem(key, JSON.stringify(existing.slice(0, 200)));
-    } catch { /* ignore storage quota / SSR errors */ }
+    } catch { /* ignore quota / SSR errors */ }
   };
 
   // ── USDC faucet (Amoy only) ──────────────────────────────────────────────────
@@ -638,51 +791,75 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   };
 
   // ── Claim position (parameterized — works for current or historical batches) ──
-  // User reveals the preimage (isBuy, amount, limitPrice, salt) stored in localStorage.
-  // Contract reconstructs the commitment hash and verifies msg.sender to release funds.
+  // For buy orders with ephemeral wallet: uses claimPositionFor (ephemeral pattern).
+  // For sell orders / legacy buy orders: uses claimPosition (real wallet = trader).
   const handleClaimPosition = async (batchId: bigint) => {
     setClaimLoading(true);
     setChainError(null);
     try {
-      // Look up preimage from localStorage
       if (!walletAddress) throw new Error("Wallet not connected");
       const storageKey = `predacy:orders:${walletAddress.toLowerCase()}`;
       const storedOrders: Array<{
         commitment: string; salt: string; isBuy: boolean;
         amount: string; limitPrice: string; batchId: string;
+        ephemeralTrader?: string; claimAuthSig?: string;
       }> = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
       const myOrder = storedOrders.find((o) => o.batchId === batchId.toString());
       if (!myOrder) throw new Error("Order preimage not found in local storage — cannot claim");
 
       const walletClient = await ensureAmoy();
       const contracts = getContracts(ACTIVE_CHAIN.id);
-      const tx = await walletClient.writeContract({
-        address: contracts.batchVault,
-        abi: BATCH_VAULT_ABI,
-        functionName: "claimPosition",
-        args: [
-          batchId,
-          myOrder.isBuy,
-          BigInt(myOrder.amount),
-          BigInt(myOrder.limitPrice),
-          myOrder.salt as `0x${string}`,
-        ],
-        ...CHAIN_GAS,
-        gas: 400_000n,  // skip eth_estimateGas — Amoy RPC returns junk values for this call
-      });
+
+      let tx: `0x${string}`;
+
+      if (myOrder.ephemeralTrader && myOrder.claimAuthSig) {
+        // Ephemeral wallet pattern — real wallet calls claimPositionFor with ClaimAuth sig
+        tx = await walletClient.writeContract({
+          address: contracts.batchVault,
+          abi:     BATCH_VAULT_ABI,
+          functionName: "claimPositionFor",
+          args: [
+            batchId,
+            myOrder.isBuy,
+            BigInt(myOrder.amount),
+            BigInt(myOrder.limitPrice),
+            myOrder.salt as `0x${string}`,
+            myOrder.ephemeralTrader as `0x${string}`,
+            walletAddress,
+            myOrder.claimAuthSig as `0x${string}`,
+          ],
+          ...CHAIN_GAS,
+          gas: 400_000n,
+        });
+      } else {
+        // Legacy / sell order path — real wallet is trader, msg.sender must match
+        tx = await walletClient.writeContract({
+          address: contracts.batchVault,
+          abi:     BATCH_VAULT_ABI,
+          functionName: "claimPosition",
+          args: [
+            batchId,
+            myOrder.isBuy,
+            BigInt(myOrder.amount),
+            BigInt(myOrder.limitPrice),
+            myOrder.salt as `0x${string}`,
+          ],
+          ...CHAIN_GAS,
+          gas: 400_000n,
+        });
+      }
+
       const receipt = await publicClient.waitForTransactionReceipt({ hash: tx });
       if (receipt.status === "reverted") {
         throw new Error("Transaction reverted — the batch may not be fully settled yet. Try again in a few seconds.");
       }
-      // If claiming current batch, update current position state too
       if (batchId === batch.batchId) {
         setPosition((p) => p ? { ...p, claimed: true } : p);
       }
-      // Signal OrderForm to re-fetch YES balance (tokens now in user's wallet)
       setBalanceVersion(v => v + 1);
     } catch (e: any) {
       if (e?.code !== 4001) setChainError(e.message ?? "Claim failed");
-      throw e; // re-throw so PositionsPanel can handle per-card error state
+      throw e;
     } finally {
       setClaimLoading(false);
     }
