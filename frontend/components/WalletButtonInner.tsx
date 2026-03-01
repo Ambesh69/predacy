@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
 import { clsx } from "clsx";
 
@@ -11,6 +11,7 @@ interface Props {
 export default function WalletButtonInner({ compact = false }: Props) {
   const { ready, authenticated, login, logout } = usePrivy();
   const { wallets } = useWallets();
+  const router = useRouter();
 
   const address = wallets[0]?.address as `0x${string}` | undefined;
   const short = address ? `${address.slice(0, 6)}…${address.slice(-4)}` : null;
@@ -31,8 +32,8 @@ export default function WalletButtonInner({ compact = false }: Props) {
         )}
       >
         {/* Address → profile */}
-        <Link
-          href="/profile"
+        <button
+          onClick={() => router.push("/profile")}
           className={clsx(
             "flex items-center gap-2 tracking-widest uppercase text-text hover:bg-surface/50 transition-colors",
             compact ? "px-2.5 py-1 text-[10px]" : "px-3 py-1.5 text-xs",
@@ -40,10 +41,10 @@ export default function WalletButtonInner({ compact = false }: Props) {
         >
           <div className="w-1.5 h-1.5 rounded-full bg-accent flex-shrink-0" />
           {short}
-        </Link>
+        </button>
         {/* Disconnect */}
         <button
-          onClick={logout}
+          onClick={(e) => { e.stopPropagation(); logout(); }}
           title="Disconnect wallet"
           className={clsx(
             "text-muted hover:text-danger hover:bg-surface/50 transition-colors",
