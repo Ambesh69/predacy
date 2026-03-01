@@ -35,7 +35,7 @@ interface OrderFormProps {
 }
 
 const PRICE_STEP = 10_000;
-const MARKET_BUY_LIMIT  = 2n ** 256n - 1n;
+const MARKET_BUY_LIMIT  = 999_999n; // max valid price (99.9999¢) — fills at any clearing price
 const MARKET_SELL_LIMIT = 0n;
 
 /** Compute the YES token ID for a given market (mirrors BatchVault._getYesTokenId).

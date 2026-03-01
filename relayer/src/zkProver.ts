@@ -165,11 +165,7 @@ export class ZKProver {
       trader:      this._hexToBytes(o.trader as `0x${string}`, 20),
       is_buy:      o.isBuy,
       amount:      o.amount.toString(),
-      // Clamp limit_price to PRICE_DECIMALS (1_000_000 = 100¢) — the BN254 field
-      // modulus (~2^254) cannot represent uint256.max, which the frontend uses as
-      // a "no limit / market order" sentinel. Clamping to 100¢ is correct: a buy
-      // with no limit is willing to pay up to 100¢ (the maximum valid price).
-      limit_price: (o.limitPrice > 1_000_000n ? 1_000_000n : o.limitPrice).toString(),
+      limit_price: o.limitPrice.toString(),
       salt:        this._hexToBytes(o.salt as `0x${string}`, 32),
       is_padding:  false,
     }));
