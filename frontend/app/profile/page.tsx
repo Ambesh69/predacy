@@ -1,6 +1,4 @@
-import dynamic from "next/dynamic";
-
-const ProfileClient = dynamic(() => import("@/components/ProfileClient"), { ssr: false });
+import ProfileClient from "@/components/ProfileClient";
 
 export default function ProfilePage() {
   return <ProfileClient />;
