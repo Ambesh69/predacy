@@ -645,7 +645,11 @@ async function recoverSettlingBatches() {
     ]);
 
     const settledIds = new Set(settledLogs.map((l) => (l.args.batchId as bigint).toString()));
-    const unsettled  = closedLogs.filter((l) => !settledIds.has((l.args.batchId as bigint).toString()));
+    // Sort descending so newest batch wins when multiple SETTLING batches share a market key.
+    // Older stuck batches (e.g. batch 25 with expired Redis data) get skipped via activeMarkets.has().
+    const unsettled  = closedLogs
+      .filter((l) => !settledIds.has((l.args.batchId as bigint).toString()))
+      .sort((a, b) => ((b.args.batchId as bigint) > (a.args.batchId as bigint) ? 1 : -1));
 
     if (unsettled.length === 0) {
       console.log("[Relayer] No SETTLING batches found — clean startup");
