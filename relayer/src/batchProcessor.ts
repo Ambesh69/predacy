@@ -152,6 +152,19 @@ export const BATCH_VAULT_ABI = [
   // beyond ~10 entries, causing spurious "chain missing" errors on writeContract).
 ] as const;
 
+// PublicInputAdapter ABI — minimal subset for the relayer
+// Adapter sits between BatchVault (6 public inputs) and HonkVerifier (37 public inputs).
+// Relayer must call setPendingOrderCount(n) before each real-ZK settleBatch call.
+const ADAPTER_ABI = [
+  {
+    name: "setPendingOrderCount",
+    type: "function",
+    inputs: [{ name: "n", type: "uint256" }],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+] as const;
+
 export interface RelayerConfig {
   rpcUrl: string;
   chainId: number;          // 137 = Polygon mainnet, 80002 = Polygon Amoy
@@ -160,6 +173,7 @@ export interface RelayerConfig {
   marketId: `0x${string}`;  // Polymarket condition ID this processor manages
   redisUrl?: string;        // Optional — falls back to in-memory if not set
   useRealZk?: boolean;      // true = generate real UltraHonk proofs via bb; default false (mock)
+  adapterAddress?: `0x${string}`; // PublicInputAdapter address (required when useRealZk=true)
   polymarket: {
     apiKey: string;
     apiSecret: string;
@@ -506,6 +520,22 @@ export class BatchProcessor {
       filledBuyVolume:   fills.filledBuyVolume,
       filledSellVolume:  fills.filledSellYes,
     });
+
+    // 6b. If using real ZK proofs and a PublicInputAdapter is configured, prime the adapter
+    //     with the order count so it can expand the 6 BatchVault inputs into 37 HonkVerifier inputs.
+    //     Must happen in a separate tx before settleBatch so the adapter has the correct count.
+    if (this.config.useRealZk && this.config.adapterAddress) {
+      console.log(`[BatchProcessor] Setting pendingOrderCount=${orders.length} on PublicInputAdapter`);
+      const adapterHash = await this._write({
+        address: this.config.adapterAddress,
+        abi: ADAPTER_ABI,
+        functionName: "setPendingOrderCount",
+        args: [BigInt(orders.length)],
+        ...AMOY_GAS,
+      });
+      await this.publicClient.waitForTransactionReceipt({ hash: adapterHash });
+      console.log(`[BatchProcessor] PublicInputAdapter ready (tx: ${adapterHash})`);
+    }
 
     // 7. Settle on-chain
     const settleHash = await this._write({

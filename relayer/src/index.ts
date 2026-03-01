@@ -24,8 +24,13 @@ const baseConfig = {
     apiSecret:     process.env.POLYMARKET_API_SECRET     ?? "",
     apiPassphrase: process.env.POLYMARKET_API_PASSPHRASE ?? "",
   },
-  batchWindowMs: parseInt(process.env.BATCH_WINDOW_MS ?? "30000"),
-  useRealZk:     process.env.USE_REAL_ZK === "true",
+  batchWindowMs:  parseInt(process.env.BATCH_WINDOW_MS ?? "30000"),
+  useRealZk:      process.env.USE_REAL_ZK === "true",
+  // PublicInputAdapter address — required when USE_REAL_ZK=true.
+  // Adapter converts BatchVault's 6 public inputs to the 37-input HonkVerifier format.
+  adapterAddress: process.env.ADAPTER_ADDRESS
+    ? (process.env.ADAPTER_ADDRESS as `0x${string}`)
+    : undefined,
 };
 
 const PORT = parseInt(process.env.PORT ?? "3001");
