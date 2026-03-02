@@ -274,6 +274,15 @@ const server = createServer((req, res) => {
 
         const actualBatchId = state.currentBatchId ?? BigInt(batchId);
         const orders = await processor.orderCount(actualBatchId);
+
+        // Re-ensure market is tracked after tx confirmation — the poll loop may have
+        // evicted it while we awaited the on-chain tx (commitmentCount was 0 during
+        // the confirmation window, triggering the idle-eviction check).
+        const mktKey = (marketId as string).toLowerCase();
+        if (!activeMarkets.has(mktKey)) {
+          ensureMarket(marketId as `0x${string}`).catch(() => {});
+        }
+
         // Return the ACTUAL on-chain batchId (not the one from the request body,
         // which may be stale/0 when the client submits before its first poll).
         send(200, { ok: true, batchId: actualBatchId.toString(), orders });
