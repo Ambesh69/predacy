@@ -763,17 +763,20 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
           const key = `predacy:orders:${walletAddress.toLowerCase()}`;
           const existing: unknown[] = JSON.parse(localStorage.getItem(key) ?? "[]");
           // Persist order preimage for ZK claim proof at claim time.
-          // Salt is the secret credential — relayer uses it to generate proof.
+          // ephemeralKey stored for USDC recovery: if settlement ever fails, import it
+          // into MetaMask (Account → Import account → Private key) to sweep USDC back.
           existing.unshift({
-            commitment:     actualCommitment,
-            salt:           params.salt,
-            amount:         params.amount.toString(),
-            isBuy:          true,
-            limitPrice:     params.limitPrice.toString(),
-            batchId:        actualBatchId,
-            marketId:       selectedMarket.conditionId,
-            marketQuestion: selectedMarket.question ?? null,
-            timestamp:      Date.now(),
+            commitment:      actualCommitment,
+            salt:            params.salt,
+            amount:          params.amount.toString(),
+            isBuy:           true,
+            limitPrice:      params.limitPrice.toString(),
+            batchId:         actualBatchId,
+            marketId:        selectedMarket.conditionId,
+            marketQuestion:  selectedMarket.question ?? null,
+            timestamp:       Date.now(),
+            ephemeralKey:    ephemeralPrivateKey,   // recovery: import into MetaMask if stuck
+            ephemeralAddress: ephemeralAddress,
           });
           localStorage.setItem(key, JSON.stringify(existing.slice(0, 200)));
         } catch { /* ignore */ }

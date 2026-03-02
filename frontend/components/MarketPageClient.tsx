@@ -545,8 +545,8 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         v, r, s,
       };
 
-      // Ephemeral private key goes out of scope here — it's gone from memory.
-      // Claim will be done via ZK proof (POST /claim-proof to relayer) — no ClaimAuth sig needed.
+      // Ephemeral private key is saved in localStorage below for USDC recovery.
+      // If settlement ever fails, the user can import ephemeralKey into MetaMask and sweep USDC back.
 
       // 8. POST to relayer
       const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
@@ -596,21 +596,24 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       setActiveTab("positions");
 
       // Persist locally — store order preimage for ZK claim proof at claim time.
-      // Note: salt is the secret credential that proves ownership. Never share it.
-      // No private keys, ClaimAuth sigs, or ephemeral addresses are stored.
+      // ephemeralKey stored for USDC recovery: if settlement ever fails, import it
+      // into MetaMask (Account → Import account → Private key) to sweep USDC back.
+      // Privacy note: ephemeralKey is stored locally only — it never appears on-chain.
       try {
         const key = `predacy:orders:${walletAddress!.toLowerCase()}`;
         const existing: unknown[] = JSON.parse(localStorage.getItem(key) ?? "[]");
         existing.unshift({
-          commitment:     actualCommitment,
-          salt:           params.salt,
-          amount:         params.amount.toString(),
-          isBuy:          true,
-          limitPrice:     params.limitPrice.toString(),
-          batchId:        actualBatchId,
-          marketId:       id,
-          marketQuestion: market?.question ?? null,
-          timestamp:      Date.now(),
+          commitment:      actualCommitment,
+          salt:            params.salt,
+          amount:          params.amount.toString(),
+          isBuy:           true,
+          limitPrice:      params.limitPrice.toString(),
+          batchId:         actualBatchId,
+          marketId:        id,
+          marketQuestion:  market?.question ?? null,
+          timestamp:       Date.now(),
+          ephemeralKey:    ephemeralPrivateKey,   // recovery: import into MetaMask if stuck
+          ephemeralAddress: ephemeralAddress,
         });
         localStorage.setItem(key, JSON.stringify(existing.slice(0, 200)));
       } catch { /* ignore quota / SSR errors */ }

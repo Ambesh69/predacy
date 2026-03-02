@@ -319,6 +319,19 @@ export class BatchProcessor {
     signature: `0x${string}`,
     transferAuth?: TransferAuth,
   ): Promise<void> {
+    // Verify commitment hash BEFORE going on-chain.
+    // If the frontend computed the hash with the wrong marketId (or any other wrong param),
+    // we catch it here and reject — preventing USDC from getting stuck in the ephemeral
+    // wallet if this batch later can't be settled.
+    const expected = this._computeCommitmentHash(this.config.marketId, order);
+    if (expected.toLowerCase() !== commitment.toLowerCase()) {
+      throw new Error(
+        `Commitment hash mismatch — order rejected to prevent stuck funds. ` +
+        `Expected: ${expected}, received: ${commitment}. ` +
+        `Ensure the frontend uses the Polymarket conditionId (not bytes32(0)) as marketId.`,
+      );
+    }
+
     console.log(`[BatchProcessor] Submitting commitOrderFor on behalf of ${signer}`);
 
     const hash = await this._write({
@@ -357,6 +370,15 @@ export class BatchProcessor {
     deadline: bigint,
     signature: `0x${string}`,
   ): Promise<void> {
+    // Same hash verification as buy orders — prevent irrecoverable commitment mismatches.
+    const expected = this._computeCommitmentHash(this.config.marketId, order);
+    if (expected.toLowerCase() !== commitment.toLowerCase()) {
+      throw new Error(
+        `Commitment hash mismatch (sell) — order rejected. ` +
+        `Expected: ${expected}, received: ${commitment}.`,
+      );
+    }
+
     console.log(`[BatchProcessor] Submitting commitSellOrderFor on behalf of ${signer}`);
 
     const hash = await this._write({
