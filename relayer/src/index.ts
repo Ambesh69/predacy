@@ -499,14 +499,52 @@ const BATCH_SETTLED_EVENT = parseAbiItem(
 
 let fromBlock = 0n;
 
+// ── Permanent failure tracking ─────────────────────────────────────────────────
+// Batches that can never be settled (e.g. commitment hash computed with wrong
+// marketId). Persisted to Redis so they survive relayer restarts.
+const permanentlyFailedBatches = new Set<string>();
+let _failRedis: any = null;
+
+async function initFailedBatchesStore(): Promise<void> {
+  if (!baseConfig.redisUrl) return;
+  try {
+    const { default: Redis } = await import("ioredis");
+    _failRedis = new Redis(baseConfig.redisUrl, { maxRetriesPerRequest: 3, lazyConnect: true });
+    await _failRedis.connect();
+    const members: string[] = await _failRedis.smembers("predacy:failed_batches");
+    for (const m of members) permanentlyFailedBatches.add(m);
+    if (members.length > 0) {
+      console.log(`[Relayer] Loaded ${members.length} permanently-failed batch(es) from Redis: ${members.join(", ")}`);
+    }
+  } catch (err) {
+    console.warn("[Relayer] Could not load failed-batches from Redis (non-fatal):", (err as any)?.message);
+    _failRedis = null;
+  }
+}
+
+async function markPermanentlyFailed(batchId: bigint): Promise<void> {
+  const id = batchId.toString();
+  permanentlyFailedBatches.add(id);
+  if (_failRedis) {
+    await _failRedis.sadd("predacy:failed_batches", id).catch(() => {});
+  }
+  console.warn(`[Relayer] Batch ${batchId} marked permanently failed — will not retry across restarts`);
+}
+
 async function onSettleFail(state: MarketState, marketKey: string, batchId: bigint, err: unknown) {
   const key = batchId.toString();
+  const msg = (err as any)?.message ?? String(err);
+
+  // UNRESOLVABLE means the order data is irrecoverable (wrong commitment hash,
+  // Redis data lost, etc.). Don't waste retries — mark immediately and skip.
+  const isUnresolvable = msg.includes("UNRESOLVABLE");
   const n   = (state.settleFailures.get(key) ?? 0) + 1;
   state.settleFailures.set(key, n);
-  console.error(`[Relayer] processBatch ${batchId} (market ${marketKey}) failed (attempt ${n}/3):`, (err as any)?.message ?? err);
+  console.error(`[Relayer] processBatch ${batchId} (market ${marketKey}) failed (attempt ${n}/3):`, msg);
 
-  if (n >= 3) {
-    console.warn(`[Relayer] Batch ${batchId} UNRESOLVABLE after ${n} attempts — force-opening next batch`);
+  if (n >= 3 || isUnresolvable) {
+    console.warn(`[Relayer] Batch ${batchId} giving up after ${n} attempt(s) — force-opening next batch`);
+    await markPermanentlyFailed(batchId);
     state.settleFailures.delete(key);
     if (!state.openingBatch) {
       state.openingBatch = true;
@@ -627,6 +665,10 @@ const poll = async () => {
         } else if (batchInfo.status === SETTLING) {
           // Fallback: batch found SETTLING without a background promise (edge case / stale state)
           const settlingId = state.currentBatchId!;
+
+          // Skip permanently failed batches — they can never be settled
+          if (permanentlyFailedBatches.has(settlingId.toString())) continue;
+
           state.processingBatch = true;
           state.settlingBatchId = settlingId;
           console.log(`[Relayer] Batch ${settlingId} (market ${marketKey}) is SETTLING — processing`);
@@ -803,6 +845,12 @@ async function recoverSettlingBatches() {
     for (const log of unsettled) {
       const batchId = log.args.batchId as bigint;
       try {
+        // Skip batches that are known to be unresolvable
+        if (permanentlyFailedBatches.has(batchId.toString())) {
+          console.log(`[Relayer] Batch ${batchId} is permanently failed — skipping recovery`);
+          continue;
+        }
+
         const batchInfo = await publicClient.readContract({
           address:      baseConfig.vaultAddress,
           abi:          BATCH_VAULT_ABI,
@@ -913,6 +961,9 @@ async function recoverOpenBatches() {
   } catch {
     fromBlock = 0n;
   }
+
+  // Load permanently-failed batch IDs from Redis BEFORE scanning for SETTLING batches
+  await initFailedBatchesStore();
 
   await recoverSettlingBatches();
   await recoverOpenBatches();
