@@ -556,6 +556,15 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     }
   }, [batch.status, isConnected]);
 
+  // ── Clear stale per-batch state when batchId advances ───────────────────────
+  // When a new batch opens, commitments from the settled batch must be wiped so
+  // they don't appear as "ORDER SEALED" in PositionsPanel for the new cycle.
+  useEffect(() => {
+    if (batch.batchId === 0n) return; // don't clear on initial load
+    setCommitments([]);
+    setOrderSealed(false);
+  }, [batch.batchId]);
+
   // ── Chain switching ──────────────────────────────────────────────────────────
   const ensureAmoy = async () => {
     if (!walletAddress) throw new Error("Wallet not connected");
