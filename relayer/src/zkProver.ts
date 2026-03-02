@@ -150,7 +150,6 @@ export class ZKProver {
 
     // -- Build witness inputs ------------------------------------------------
     const paddingOrder = {
-      trader:      Array(20).fill(0) as number[],
       is_buy:      false,
       amount:      "0",
       limit_price: "0",
@@ -160,9 +159,8 @@ export class ZKProver {
 
     const orderCount = inputs.orders.length;
 
-    // Pad orders array to MAX_ORDERS=64
+    // Pad orders array to MAX_ORDERS=8
     const circuitOrders: typeof paddingOrder[] = inputs.orders.map((o) => ({
-      trader:      this._hexToBytes(o.trader as `0x${string}`, 20),
       is_buy:      o.isBuy,
       amount:      o.amount.toString(),
       limit_price: o.limitPrice.toString(),

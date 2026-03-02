@@ -34,7 +34,6 @@ global MAX_ORDERS: u32 = 8;
 global PRICE_DECIMALS: u64 = 1_000_000;
 
 struct Order {
-    trader: [u8; 20],       // Ethereum address (20 bytes)
     is_buy: bool,
     amount: u64,            // USDC, 6 decimals
     limit_price: u64,       // 6-decimal fixed point
@@ -44,11 +43,11 @@ struct Order {
 
 /// Compute the keccak256 commitment for an order.
 /// Matches BatchVault._makeCommitment() in Solidity:
-///   keccak256(abi.encode(marketId, isBuy, amount, limitPrice, salt, trader))
+///   keccak256(abi.encode(marketId, isBuy, amount, limitPrice, salt))
 fn compute_commitment(market_id: [u8; 32], order: Order) -> [u8; 32] {
-    // ABI encode: market_id (32) + is_buy (32) + amount (32) + limit_price (32) + salt (32) + trader (32)
-    // Total: 192 bytes
-    let mut encoded: [u8; 192] = [0; 192];
+    // ABI encode: market_id (32) + is_buy (32) + amount (32) + limit_price (32) + salt (32)
+    // Total: 160 bytes
+    let mut encoded: [u8; 160] = [0; 160];
 
     // market_id (bytes32, left-aligned)
     for i in 0..32 {
@@ -77,12 +76,7 @@ fn compute_commitment(market_id: [u8; 32], order: Order) -> [u8; 32] {
         encoded[128 + i] = order.salt[i];
     }
 
-    // trader (address as uint256, right-aligned in 32 bytes -- 12 zero bytes + 20 address bytes)
-    for i in 0..20 {
-        encoded[172 + i] = order.trader[i];
-    }
-
-    keccak256(encoded, 192)
+    keccak256(encoded, 160)
 }
 
 /// Sequential commitment root matching BatchVault._computeCommitmentRoot()
@@ -190,7 +184,6 @@ fn test_basic_batch_clearing() {
     let carol_salt: [u8; 32] = [30; 32];
 
     let alice = Order {
-        trader: [0xAA; 20],
         is_buy: true,
         amount: 100_000_000,  // $100
         limit_price: 700_000, // $0.70
@@ -199,7 +192,6 @@ fn test_basic_batch_clearing() {
     };
 
     let bob = Order {
-        trader: [0xBB; 20],
         is_buy: true,
         amount: 50_000_000,   // $50
         limit_price: 650_000, // $0.65
@@ -208,7 +200,6 @@ fn test_basic_batch_clearing() {
     };
 
     let carol = Order {
-        trader: [0xCC; 20],
         is_buy: false,
         amount: 80_000_000,   // $80
         limit_price: 600_000, // $0.60
@@ -217,7 +208,6 @@ fn test_basic_batch_clearing() {
     };
 
     let padding = Order {
-        trader: [0; 20],
         is_buy: false,
         amount: 0,
         limit_price: 0,
