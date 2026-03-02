@@ -123,19 +123,15 @@ export const BATCH_VAULT_ABI = [
     stateMutability: "nonpayable",
   },
   {
-    // Ephemeral wallet pattern: trader = ephemeral address, recipient = real wallet.
-    // traderSig = ephemeral key's EIP-712 ClaimAuth signature authorizing recipient to claim.
-    name: "claimPositionFor",
+    // ZK claim: prove order membership in Merkle tree without revealing trader address.
+    // Payout goes to recipient derived from publicInputs[4] (chosen by user at claim time).
+    // Relayer submits this on-chain — msg.sender = relayer, not the user.
+    name: "claimWithProof",
     type: "function",
     inputs: [
-      { name: "batchId",    type: "uint256" },
-      { name: "isBuy",      type: "bool"    },
-      { name: "amount",     type: "uint256" },
-      { name: "limitPrice", type: "uint256" },
-      { name: "salt",       type: "bytes32" },
-      { name: "trader",     type: "address" },
-      { name: "recipient",  type: "address" },
-      { name: "traderSig",  type: "bytes"   },
+      { name: "batchId",      type: "uint256"   },
+      { name: "proof",        type: "bytes"     },
+      { name: "publicInputs", type: "bytes32[]" },
     ],
     outputs: [],
     stateMutability: "nonpayable",
@@ -162,6 +158,7 @@ export const BATCH_VAULT_ABI = [
           { name: "totalFilledBuyVol", type: "uint256" },
           { name: "commitmentCount",   type: "uint256" },
           { name: "commitmentRoot",    type: "bytes32" },
+          { name: "claimMerkleRoot",   type: "bytes32" },
         ],
       },
     ],

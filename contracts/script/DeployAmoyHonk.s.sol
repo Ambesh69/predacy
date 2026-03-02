@@ -59,7 +59,8 @@ contract DeployAmoyHonk is Script {
             address(usdc),
             address(ctf),
             deployer,        // relayer = deployer wallet for testing
-            address(verifier)
+            address(verifier),
+            address(verifier) // claimVerifier — same mock for now, update after claim circuit deploy
         );
         console.log("BatchVault:         ", address(vault));
 

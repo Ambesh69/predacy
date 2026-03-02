@@ -176,7 +176,8 @@ contract BatchVaultTest is Test {
         usdc = new MockUSDC();
         ctf = new MockCTF();
         verifier = new MockBatchVerifier();
-        vault = new BatchVault(address(usdc), address(ctf), relayer, address(verifier));
+        // 5-arg constructor: usdc, ctf, relayer, batchVerifier, claimVerifier
+        vault = new BatchVault(address(usdc), address(ctf), relayer, address(verifier), address(verifier));
 
         // Fund traders with USDC
         usdc.mint(alice, 1000e6);
@@ -204,15 +205,15 @@ contract BatchVaultTest is Test {
         batchId = vault.openBatch(MARKET_ID);
     }
 
+    /// @dev Commitment hash — no trader address (salt is the 256-bit secret credential).
     function _makeCommitment(
         bytes32 marketId,
         bool isBuy,
         uint256 amount,
         uint256 limitPrice,
-        bytes32 salt,
-        address trader
+        bytes32 salt
     ) internal pure returns (bytes32) {
-        return keccak256(abi.encode(marketId, isBuy, amount, limitPrice, salt, trader));
+        return keccak256(abi.encode(marketId, isBuy, amount, limitPrice, salt));
     }
 
     function _closeBatch(uint256 batchId) internal {
@@ -243,6 +244,21 @@ contract BatchVaultTest is Test {
     ///      (the vault never calls transferWithAuthorization for these).
     function _zeroAuth() internal pure returns (BatchVault.TransferAuth memory) {
         return BatchVault.TransferAuth({
+            from:        address(0),
+            validAfter:  0,
+            validBefore: 0,
+            nonce:       bytes32(0),
+            v:           0,
+            r:           bytes32(0),
+            s:           bytes32(0)
+        });
+    }
+
+    /// @dev Auth for a filled buy order — sets `from` to the ephemeral wallet address.
+    ///      MockUSDC.transferWithAuthorization skips sig validation; it just deducts from `from`.
+    function _buyAuth(address from) internal pure returns (BatchVault.TransferAuth memory) {
+        return BatchVault.TransferAuth({
+            from:        from,
             validAfter:  0,
             validBefore: 0,
             nonce:       bytes32(0),
@@ -253,8 +269,8 @@ contract BatchVaultTest is Test {
     }
 
     /// @dev Build an auths array of `count` zero-value structs.
-    ///      TestMockUSDC.transferWithAuthorization skips all validation, so zero-value
-    ///      auths work for filled buy orders in tests (real USDC requires non-zero validBefore).
+    ///      Use only for sell-only or unfilled-buy-only settlements.
+    ///      For settlements with filled buys, build the array manually with _buyAuth().
     function _buildAuths(uint256 count) internal pure returns (BatchVault.TransferAuth[] memory auths) {
         auths = new BatchVault.TransferAuth[](count);
         for (uint256 i = 0; i < count; i++) {
@@ -295,6 +311,36 @@ contract BatchVaultTest is Test {
         netSellYes = clearingPrice > 0 ? netSellUSDC * PRICE_DECIMALS / clearingPrice : 0;
     }
 
+    /// @dev Build the 9-element publicInputs array for claimWithProof.
+    ///      Mirrors the circuit's public output layout:
+    ///        [0] batchId, [1] claimMerkleRoot, [2] clearingPrice,
+    ///        [3] nullifier, [4] recipient, [5] fills,
+    ///        [6] fillAmount, [7] refundAmount, [8] isBuy
+    function _buildClaimPublicInputs(
+        uint256 batchId,
+        bytes32 claimMerkleRoot,
+        uint256 clearingPrice,
+        bytes32 commitment,
+        bytes32 salt,
+        address recipient,
+        bool    fills,
+        uint256 fillAmount,
+        uint256 refundAmount,
+        bool    isBuy
+    ) internal pure returns (bytes32[] memory inputs) {
+        bytes32 nullifier = keccak256(abi.encode(commitment, batchId, salt));
+        inputs = new bytes32[](9);
+        inputs[0] = bytes32(batchId);
+        inputs[1] = claimMerkleRoot;
+        inputs[2] = bytes32(clearingPrice);
+        inputs[3] = nullifier;
+        inputs[4] = bytes32(uint256(uint160(recipient)));
+        inputs[5] = bytes32(fills ? uint256(1) : 0);
+        inputs[6] = bytes32(fillAmount);
+        inputs[7] = bytes32(refundAmount);
+        inputs[8] = bytes32(isBuy ? uint256(1) : 0);
+    }
+
     // ─── Tests: batch lifecycle ────────────────────────────────────────────
 
     function test_openBatch() public {
@@ -330,7 +376,7 @@ contract BatchVaultTest is Test {
         uint256 amount = 100e6;
         uint256 limitPrice = 650000; // $0.65
 
-        bytes32 commitment = _makeCommitment(MARKET_ID, true, amount, limitPrice, salt, alice);
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, amount, limitPrice, salt);
 
         vm.prank(alice);
         vault.commitOrder(commitment, amount, MARKET_ID);
@@ -345,7 +391,7 @@ contract BatchVaultTest is Test {
         _openBatch();
         bytes32 salt = bytes32(uint256(1));
         uint256 amount = 50e6;
-        bytes32 commitment = _makeCommitment(MARKET_ID, true, amount, 600000, salt, alice);
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, amount, 600000, salt);
 
         vm.expectEmit(true, true, false, false);
         emit BatchVault.OrderCommitted(1, commitment);
@@ -356,7 +402,7 @@ contract BatchVaultTest is Test {
 
     function test_commitOrder_duplicateReverts() public {
         _openBatch();
-        bytes32 commitment = _makeCommitment(MARKET_ID, true, 100e6, 650000, bytes32(uint256(1)), alice);
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, 100e6, 650000, bytes32(uint256(1)));
 
         vm.prank(alice);
         vault.commitOrder(commitment, 100e6, MARKET_ID);
@@ -370,7 +416,7 @@ contract BatchVaultTest is Test {
         uint256 batchId = _openBatch();
         _closeBatch(batchId);
 
-        bytes32 commitment = _makeCommitment(MARKET_ID, true, 100e6, 650000, bytes32(uint256(1)), alice);
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, 100e6, 650000, bytes32(uint256(1)));
         vm.expectRevert(BatchVault.BatchNotOpen.selector);
         vm.prank(alice);
         vault.commitOrder(commitment, 100e6, MARKET_ID);
@@ -396,7 +442,7 @@ contract BatchVaultTest is Test {
         _mintYes(carol, yesAmount);
         _approveVaultCTF(carol);
 
-        bytes32 commitment = _makeCommitment(MARKET_ID, false, yesAmount, limitPrice, salt, carol);
+        bytes32 commitment = _makeCommitment(MARKET_ID, false, yesAmount, limitPrice, salt);
 
         vm.prank(carol);
         vault.commitSellOrder(commitment, yesAmount, MARKET_ID);
@@ -423,7 +469,7 @@ contract BatchVaultTest is Test {
 
         _mintYes(carol, 50e6);
         _approveVaultCTF(carol);
-        bytes32 commitment = _makeCommitment(MARKET_ID, false, 50e6, 600000, bytes32(uint256(1)), carol);
+        bytes32 commitment = _makeCommitment(MARKET_ID, false, 50e6, 600000, bytes32(uint256(1)));
         vm.expectRevert(BatchVault.BatchNotOpen.selector);
         vm.prank(carol);
         vault.commitSellOrder(commitment, 50e6, MARKET_ID);
@@ -450,10 +496,10 @@ contract BatchVaultTest is Test {
         uint256 limitCarol = 600000; // sell: fill if clearing >= 0.60
 
         // Buy commitments (USDC)
-        bytes32 cAlice = _makeCommitment(MARKET_ID, true, amtAlice, limitAlice, saltAlice, alice);
-        bytes32 cBob   = _makeCommitment(MARKET_ID, true, amtBob,   limitBob,   saltBob,   bob);
+        bytes32 cAlice = _makeCommitment(MARKET_ID, true,  amtAlice, limitAlice, saltAlice);
+        bytes32 cBob   = _makeCommitment(MARKET_ID, true,  amtBob,   limitBob,   saltBob);
         // Sell commitment (YES tokens)
-        bytes32 cCarol = _makeCommitment(MARKET_ID, false, amtCarol, limitCarol, saltCarol, carol);
+        bytes32 cCarol = _makeCommitment(MARKET_ID, false, amtCarol, limitCarol, saltCarol);
 
         vm.prank(alice);
         vault.commitOrder(cAlice, amtAlice, MARKET_ID);
@@ -475,14 +521,21 @@ contract BatchVaultTest is Test {
         uint256 clearingPrice = 650000;
 
         BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](3);
-        orders[0] = BatchVault.RevealedOrder(alice, true,  amtAlice, limitAlice, saltAlice);
-        orders[1] = BatchVault.RevealedOrder(bob,   true,  amtBob,   limitBob,   saltBob);
-        orders[2] = BatchVault.RevealedOrder(carol, false, amtCarol, limitCarol, saltCarol);
+        orders[0] = BatchVault.RevealedOrder(true,  amtAlice, limitAlice, saltAlice);
+        orders[1] = BatchVault.RevealedOrder(true,  amtBob,   limitBob,   saltBob);
+        orders[2] = BatchVault.RevealedOrder(false, amtCarol, limitCarol, saltCarol);
+
+        // Alice and Bob are filled buys — auths must carry the `from` address.
+        // Carol is a sell order — zeroAuth (no EIP-3009 pull needed).
+        BatchVault.TransferAuth[] memory auths = new BatchVault.TransferAuth[](3);
+        auths[0] = _buyAuth(alice);
+        auths[1] = _buyAuth(bob);
+        auths[2] = _zeroAuth();
 
         (uint256 buyVol, uint256 sellVol, uint256 netBuy, uint256 netSell) = _buildSettleParams(orders, clearingPrice);
 
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, _buildAuths(orders.length), clearingPrice, buyVol, sellVol, netBuy, netSell, "");
+        vault.settleBatch(batchId, orders, auths, clearingPrice, buyVol, sellVol, netBuy, netSell, "");
 
         BatchVault.Batch memory b = vault.getBatch(batchId);
         assertEq(uint256(b.status), uint256(BatchVault.BatchStatus.SETTLED));
@@ -496,7 +549,7 @@ contract BatchVaultTest is Test {
         uint256 batchId = _openBatch();
 
         bytes32 salt = bytes32(uint256(1));
-        bytes32 commitment = _makeCommitment(MARKET_ID, true, 100e6, 650000, salt, alice);
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, 100e6, 650000, salt);
 
         vm.prank(alice);
         vault.commitOrder(commitment, 100e6, MARKET_ID);
@@ -504,7 +557,7 @@ contract BatchVaultTest is Test {
 
         // Tampered order: different limit price than committed
         BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
-        orders[0] = BatchVault.RevealedOrder(alice, true, 100e6, 700000, salt); // 700000 != 650000
+        orders[0] = BatchVault.RevealedOrder(true, 100e6, 700000, salt); // 700000 != 650000
 
         vm.expectRevert(BatchVault.CommitmentMismatch.selector);
         vm.prank(relayer);
@@ -515,13 +568,13 @@ contract BatchVaultTest is Test {
         uint256 batchId = _openBatch();
 
         bytes32 salt = bytes32(uint256(1));
-        bytes32 commitment = _makeCommitment(MARKET_ID, true, 100e6, 650000, salt, alice);
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, 100e6, 650000, salt);
         vm.prank(alice);
         vault.commitOrder(commitment, 100e6, MARKET_ID);
         _closeBatch(batchId);
 
         BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
-        orders[0] = BatchVault.RevealedOrder(alice, true, 100e6, 650000, salt);
+        orders[0] = BatchVault.RevealedOrder(true, 100e6, 650000, salt);
 
         vm.expectRevert(BatchVault.InvalidClearingPrice.selector);
         vm.prank(relayer);
@@ -540,7 +593,7 @@ contract BatchVaultTest is Test {
         uint256 amount = 100e6;
         uint256 limitAlice = 400000; // 0.40 — won't fill
 
-        bytes32 commitment = _makeCommitment(MARKET_ID, true, amount, limitAlice, salt, alice);
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, amount, limitAlice, salt);
         vm.prank(alice);
         vault.commitOrder(commitment, amount, MARKET_ID);
 
@@ -551,7 +604,7 @@ contract BatchVaultTest is Test {
         _closeBatch(batchId);
 
         BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
-        orders[0] = BatchVault.RevealedOrder(alice, true, amount, limitAlice, salt);
+        orders[0] = BatchVault.RevealedOrder(true, amount, limitAlice, salt);
 
         vm.prank(relayer);
         vault.settleBatch(batchId, orders, _buildAuths(orders.length), 650000, 0, 0, 0, 0, "");
@@ -575,8 +628,8 @@ contract BatchVaultTest is Test {
         bytes32 saltCarol = bytes32(uint256(1));
         bytes32 saltAlice = bytes32(uint256(2));
 
-        bytes32 cCarol = _makeCommitment(MARKET_ID, false, yesCarol, 600000, saltCarol, carol);
-        bytes32 cAlice = _makeCommitment(MARKET_ID, true,  amtAlice, 700000, saltAlice, alice);
+        bytes32 cCarol = _makeCommitment(MARKET_ID, false, yesCarol, 600000, saltCarol);
+        bytes32 cAlice = _makeCommitment(MARKET_ID, true,  amtAlice, 700000, saltAlice);
 
         _mintYes(carol, yesCarol);
         _approveVaultCTF(carol);
@@ -588,12 +641,17 @@ contract BatchVaultTest is Test {
         _closeBatch(batchId);
 
         BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](2);
-        orders[0] = BatchVault.RevealedOrder(carol, false, yesCarol, 600000, saltCarol);
-        orders[1] = BatchVault.RevealedOrder(alice, true,  amtAlice, 700000, saltAlice);
+        orders[0] = BatchVault.RevealedOrder(false, yesCarol, 600000, saltCarol);
+        orders[1] = BatchVault.RevealedOrder(true,  amtAlice, 700000, saltAlice);
+
+        // Carol=sell (zeroAuth), Alice=filled buy (buyAuth)
+        BatchVault.TransferAuth[] memory auths = new BatchVault.TransferAuth[](2);
+        auths[0] = _zeroAuth();
+        auths[1] = _buyAuth(alice);
 
         (uint256 buyVol, uint256 sellVol, uint256 netBuy, uint256 netSell) = _buildSettleParams(orders, 650000);
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, _buildAuths(orders.length), 650000, buyVol, sellVol, netBuy, netSell, "");
+        vault.settleBatch(batchId, orders, auths, 650000, buyVol, sellVol, netBuy, netSell, "");
 
         // Carol claims her USDC from filled sell order
         vm.prank(carol);
@@ -617,8 +675,8 @@ contract BatchVaultTest is Test {
         bytes32 saltAlice = bytes32(uint256(1));
         bytes32 saltCarol = bytes32(uint256(2));
 
-        bytes32 cAlice = _makeCommitment(MARKET_ID, true, amtAlice, 700000, saltAlice, alice);
-        bytes32 cCarol = _makeCommitment(MARKET_ID, false, yesCarol, 600000, saltCarol, carol);
+        bytes32 cAlice = _makeCommitment(MARKET_ID, true,  amtAlice, 700000, saltAlice);
+        bytes32 cCarol = _makeCommitment(MARKET_ID, false, yesCarol, 600000, saltCarol);
 
         vm.prank(alice);
         vault.commitOrder(cAlice, amtAlice, MARKET_ID);
@@ -632,12 +690,17 @@ contract BatchVaultTest is Test {
 
         uint256 clearingPrice = 650000; // 0.65
         BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](2);
-        orders[0] = BatchVault.RevealedOrder(alice, true,  amtAlice, 700000, saltAlice);
-        orders[1] = BatchVault.RevealedOrder(carol, false, yesCarol, 600000, saltCarol);
+        orders[0] = BatchVault.RevealedOrder(true,  amtAlice, 700000, saltAlice);
+        orders[1] = BatchVault.RevealedOrder(false, yesCarol, 600000, saltCarol);
+
+        // Alice=filled buy (buyAuth), Carol=sell (zeroAuth)
+        BatchVault.TransferAuth[] memory auths = new BatchVault.TransferAuth[](2);
+        auths[0] = _buyAuth(alice);
+        auths[1] = _zeroAuth();
 
         (uint256 buyVol, uint256 sellVol, uint256 netBuy, uint256 netSell) = _buildSettleParams(orders, clearingPrice);
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, _buildAuths(orders.length), clearingPrice, buyVol, sellVol, netBuy, netSell, "");
+        vault.settleBatch(batchId, orders, auths, clearingPrice, buyVol, sellVol, netBuy, netSell, "");
 
         // Carol's position: filledAmount = 80 * 0.65 = 52 USDC
         BatchVault.Position memory pos = vault.getPosition(batchId, cCarol);
@@ -660,7 +723,7 @@ contract BatchVaultTest is Test {
         // Carol tries to sell YES at min 0.80, but clearing price is 0.65 — won't fill
         uint256 yesCarol = 50e6;
         bytes32 saltCarol = bytes32(uint256(1));
-        bytes32 cCarol = _makeCommitment(MARKET_ID, false, yesCarol, 800000, saltCarol, carol);
+        bytes32 cCarol = _makeCommitment(MARKET_ID, false, yesCarol, 800000, saltCarol);
 
         _mintYes(carol, yesCarol);
         _approveVaultCTF(carol);
@@ -670,7 +733,7 @@ contract BatchVaultTest is Test {
         _closeBatch(batchId);
 
         BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
-        orders[0] = BatchVault.RevealedOrder(carol, false, yesCarol, 800000, saltCarol);
+        orders[0] = BatchVault.RevealedOrder(false, yesCarol, 800000, saltCarol);
 
         // Settlement with no buy orders — just need clearing price for the verify
         vm.prank(relayer);
@@ -701,8 +764,8 @@ contract BatchVaultTest is Test {
         uint256 amtAlice = 130e6;
         uint256 yesCarol = 80e6;
 
-        bytes32 cAlice = _makeCommitment(MARKET_ID, true, amtAlice, 700000, bytes32(uint256(1)), alice);
-        bytes32 cCarol = _makeCommitment(MARKET_ID, false, yesCarol, 600000, bytes32(uint256(2)), carol);
+        bytes32 cAlice = _makeCommitment(MARKET_ID, true,  amtAlice, 700000, bytes32(uint256(1)));
+        bytes32 cCarol = _makeCommitment(MARKET_ID, false, yesCarol, 600000, bytes32(uint256(2)));
 
         vm.prank(alice);
         vault.commitOrder(cAlice, amtAlice, MARKET_ID);
@@ -716,12 +779,17 @@ contract BatchVaultTest is Test {
 
         uint256 clearingPrice = 650000;
         BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](2);
-        orders[0] = BatchVault.RevealedOrder(alice, true,  amtAlice, 700000, bytes32(uint256(1)));
-        orders[1] = BatchVault.RevealedOrder(carol, false, yesCarol, 600000, bytes32(uint256(2)));
+        orders[0] = BatchVault.RevealedOrder(true,  amtAlice, 700000, bytes32(uint256(1)));
+        orders[1] = BatchVault.RevealedOrder(false, yesCarol, 600000, bytes32(uint256(2)));
+
+        // Alice=filled buy (buyAuth), Carol=sell (zeroAuth)
+        BatchVault.TransferAuth[] memory auths = new BatchVault.TransferAuth[](2);
+        auths[0] = _buyAuth(alice);
+        auths[1] = _zeroAuth();
 
         (uint256 buyVol, uint256 sellVol, uint256 netBuy, uint256 netSell) = _buildSettleParams(orders, clearingPrice);
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, _buildAuths(orders.length), clearingPrice, buyVol, sellVol, netBuy, netSell, "");
+        vault.settleBatch(batchId, orders, auths, clearingPrice, buyVol, sellVol, netBuy, netSell, "");
 
         BatchVault.Batch memory b = vault.getBatch(batchId);
         // netBuyAmount = 130 - 80*0.65 = 130 - 52 = 78 USDC
@@ -752,7 +820,8 @@ contract BatchVaultTest is Test {
         bool isBuy = true;
         uint256 limitPrice = 720000;
 
-        bytes32 commitment = _makeCommitment(MARKET_ID, isBuy, amount, limitPrice, salt, alice);
+        // Commitment hash: no trader address — salt is the 256-bit secret credential
+        bytes32 commitment = _makeCommitment(MARKET_ID, isBuy, amount, limitPrice, salt);
 
         vm.prank(alice);
         vault.commitOrder(commitment, amount, MARKET_ID);
@@ -800,7 +869,7 @@ contract BatchVaultTest is Test {
         bytes32 salt = bytes32(uint256(99));
         uint256 deadline = block.timestamp + 1 hours;
 
-        bytes32 commitment = _makeCommitment(MARKET_ID, true, amount, limitPrice, salt, dave);
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, amount, limitPrice, salt);
         bytes memory sig = _signCommitOrder(daveKey, commitment, amount, batchId, 0, deadline);
 
         uint256 relayerBefore = usdc.balanceOf(relayer);
@@ -825,7 +894,7 @@ contract BatchVaultTest is Test {
         vm.prank(dave);
         usdc.approve(address(vault), type(uint256).max);
 
-        bytes32 commitment = _makeCommitment(MARKET_ID, true, 50e6, 600000, bytes32(uint256(7)), dave);
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, 50e6, 600000, bytes32(uint256(7)));
         bytes memory sig = _signCommitOrder(daveKey, commitment, 50e6, batchId, 0, block.timestamp + 1 hours);
 
         vm.expectEmit(true, true, false, false);
@@ -844,7 +913,7 @@ contract BatchVaultTest is Test {
         vm.prank(dave);
         usdc.approve(address(vault), type(uint256).max);
 
-        bytes32 commitment = _makeCommitment(MARKET_ID, true, 50e6, 600000, bytes32(uint256(1)), dave);
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, 50e6, 600000, bytes32(uint256(1)));
         bytes memory badSig = _signCommitOrder(eveKey, commitment, 50e6, 1, 0, block.timestamp + 1 hours);
 
         vm.expectRevert(BatchVault.InvalidSignature.selector);
@@ -860,7 +929,7 @@ contract BatchVaultTest is Test {
         vm.prank(dave);
         usdc.approve(address(vault), type(uint256).max);
 
-        bytes32 commitment = _makeCommitment(MARKET_ID, true, 50e6, 600000, bytes32(uint256(1)), dave);
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, 50e6, 600000, bytes32(uint256(1)));
         uint256 deadline = block.timestamp - 1;
         bytes memory sig = _signCommitOrder(daveKey, commitment, 50e6, 1, 0, deadline);
 
@@ -877,7 +946,7 @@ contract BatchVaultTest is Test {
         vm.prank(dave);
         usdc.approve(address(vault), type(uint256).max);
 
-        bytes32 commitment = _makeCommitment(MARKET_ID, true, 50e6, 600000, bytes32(uint256(1)), dave);
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, 50e6, 600000, bytes32(uint256(1)));
         bytes memory sig = _signCommitOrder(daveKey, commitment, 50e6, 1, 1, block.timestamp + 1 hours);
 
         vm.expectRevert(BatchVault.InvalidSignature.selector);
@@ -893,7 +962,7 @@ contract BatchVaultTest is Test {
         vm.prank(dave);
         usdc.approve(address(vault), type(uint256).max);
 
-        bytes32 commitment = _makeCommitment(MARKET_ID, true, 50e6, 600000, bytes32(uint256(1)), dave);
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, 50e6, 600000, bytes32(uint256(1)));
         bytes memory sig = _signCommitOrder(daveKey, commitment, 50e6, batchId, 0, block.timestamp + 1 hours);
 
         vm.prank(relayer);
@@ -917,7 +986,7 @@ contract BatchVaultTest is Test {
         uint256 limitPrice = 650000;
         bytes32 salt = bytes32(uint256(55));
 
-        bytes32 commitment = _makeCommitment(MARKET_ID, true, amount, limitPrice, salt, dave);
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, amount, limitPrice, salt);
         bytes memory sig = _signCommitOrder(daveKey, commitment, amount, batchId, 0, block.timestamp + 1 hours);
 
         vm.prank(relayer);
@@ -926,10 +995,14 @@ contract BatchVaultTest is Test {
         _closeBatch(batchId);
 
         BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
-        orders[0] = BatchVault.RevealedOrder(dave, true, amount, limitPrice, salt);
+        orders[0] = BatchVault.RevealedOrder(true, amount, limitPrice, salt);
+
+        // Dave is a filled buy — auth must carry `from = dave`
+        BatchVault.TransferAuth[] memory auths = new BatchVault.TransferAuth[](1);
+        auths[0] = _buyAuth(dave);
 
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, _buildAuths(orders.length), 650000, amount, 0, amount, 0, "");
+        vault.settleBatch(batchId, orders, auths, 650000, amount, 0, amount, 0, "");
 
         assertEq(uint256(vault.getBatch(batchId).status), uint256(BatchVault.BatchStatus.SETTLED));
 
@@ -945,7 +1018,7 @@ contract BatchVaultTest is Test {
         // Carol sells 50 YES tokens at min $0.60; no buyers in this batch
         uint256 yesCarol = 50e6;
         bytes32 saltCarol = bytes32(uint256(1));
-        bytes32 cCarol = _makeCommitment(MARKET_ID, false, yesCarol, 600000, saltCarol, carol);
+        bytes32 cCarol = _makeCommitment(MARKET_ID, false, yesCarol, 600000, saltCarol);
 
         _mintYes(carol, yesCarol);
         _approveVaultCTF(carol);
@@ -957,7 +1030,7 @@ contract BatchVaultTest is Test {
         // Relayer uses Polymarket mid price (0.65) — all sells route to Polymarket
         uint256 clearingPrice = 650_000;
         BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
-        orders[0] = BatchVault.RevealedOrder(carol, false, yesCarol, 600_000, saltCarol);
+        orders[0] = BatchVault.RevealedOrder(false, yesCarol, 600_000, saltCarol);
 
         // netBuyAmount = 0, netSellYes = 50 YES tokens
         uint256 netSellYes = yesCarol;
@@ -991,13 +1064,13 @@ contract BatchVaultTest is Test {
     function test_settleByNonRelayer_reverts() public {
         uint256 batchId = _openBatch();
 
-        bytes32 commitment = _makeCommitment(MARKET_ID, true, 100e6, 650000, bytes32(uint256(1)), alice);
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, 100e6, 650000, bytes32(uint256(1)));
         vm.prank(alice);
         vault.commitOrder(commitment, 100e6, MARKET_ID);
         _closeBatch(batchId);
 
         BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
-        orders[0] = BatchVault.RevealedOrder(alice, true, 100e6, 650000, bytes32(uint256(1)));
+        orders[0] = BatchVault.RevealedOrder(true, 100e6, 650000, bytes32(uint256(1)));
 
         vm.expectRevert(BatchVault.OnlyRelayer.selector);
         vm.prank(alice);
@@ -1029,8 +1102,8 @@ contract BatchVaultTest is Test {
         uint256 amtAlice  = 100e6;
         uint256 amtBob    = 50e6;
 
-        bytes32 cAlice = _makeCommitment(MARKET_ID,   true, amtAlice, 650000, saltAlice, alice);
-        bytes32 cBob   = _makeCommitment(MARKET_ID_2, true, amtBob,   700000, saltBob,   bob);
+        bytes32 cAlice = _makeCommitment(MARKET_ID,   true, amtAlice, 650000, saltAlice);
+        bytes32 cBob   = _makeCommitment(MARKET_ID_2, true, amtBob,   700000, saltBob);
 
         vm.prank(alice);
         vault.commitOrder(cAlice, amtAlice, MARKET_ID);
@@ -1050,9 +1123,13 @@ contract BatchVaultTest is Test {
         assertEq(uint256(vault.getBatch(2).status), uint256(BatchVault.BatchStatus.OPEN));
 
         BatchVault.RevealedOrder[] memory orders1 = new BatchVault.RevealedOrder[](1);
-        orders1[0] = BatchVault.RevealedOrder(alice, true, amtAlice, 650000, saltAlice);
+        orders1[0] = BatchVault.RevealedOrder(true, amtAlice, 650000, saltAlice);
+
+        BatchVault.TransferAuth[] memory auths1 = new BatchVault.TransferAuth[](1);
+        auths1[0] = _buyAuth(alice);
+
         vm.prank(relayer);
-        vault.settleBatch(batchId1, orders1, _buildAuths(orders1.length), 650000, amtAlice, 0, amtAlice, 0, "");
+        vault.settleBatch(batchId1, orders1, auths1, 650000, amtAlice, 0, amtAlice, 0, "");
         assertEq(uint256(vault.getBatch(1).status), uint256(BatchVault.BatchStatus.SETTLED));
 
         // Market 2 batch is still OPEN after market 1 settles
@@ -1063,9 +1140,13 @@ contract BatchVaultTest is Test {
         assertEq(uint256(vault.getBatch(2).status), uint256(BatchVault.BatchStatus.SETTLING));
 
         BatchVault.RevealedOrder[] memory orders2 = new BatchVault.RevealedOrder[](1);
-        orders2[0] = BatchVault.RevealedOrder(bob, true, amtBob, 700000, saltBob);
+        orders2[0] = BatchVault.RevealedOrder(true, amtBob, 700000, saltBob);
+
+        BatchVault.TransferAuth[] memory auths2 = new BatchVault.TransferAuth[](1);
+        auths2[0] = _buyAuth(bob);
+
         vm.prank(relayer);
-        vault.settleBatch(batchId2, orders2, _buildAuths(orders2.length), 700000, amtBob, 0, amtBob, 0, "");
+        vault.settleBatch(batchId2, orders2, auths2, 700000, amtBob, 0, amtBob, 0, "");
         assertEq(uint256(vault.getBatch(2).status), uint256(BatchVault.BatchStatus.SETTLED));
 
         // Each trader's position is in the correct batch (keyed by commitment hash)
@@ -1076,150 +1157,263 @@ contract BatchVaultTest is Test {
 
         // Cross-check: alice has no position in batch 2, bob has none in batch 1
         // (use commitment hashes that were never submitted to those batches)
-        bytes32 aliceForBatch2 = _makeCommitment(MARKET_ID_2, true, amtAlice, 650000, saltAlice, alice);
-        bytes32 bobForBatch1   = _makeCommitment(MARKET_ID,   true, amtBob,   700000, saltBob,   bob);
+        bytes32 aliceForBatch2 = _makeCommitment(MARKET_ID_2, true, amtAlice, 650000, saltAlice);
+        bytes32 bobForBatch1   = _makeCommitment(MARKET_ID,   true, amtBob,   700000, saltBob);
         BatchVault.Position memory aliceInBatch2 = vault.getPosition(batchId2, aliceForBatch2);
         BatchVault.Position memory bobInBatch1   = vault.getPosition(batchId1, bobForBatch1);
         assertEq(aliceInBatch2.filledAmount, 0);
         assertEq(bobInBatch1.filledAmount,   0);
     }
 
-    // ─── Tests: claimPositionFor (ephemeral wallet pattern) ───────────────
+    // ─── Tests: claimWithProof (ZK claim — no address revealed on-chain) ──
 
-    /// @dev Sign a ClaimAuth struct — mirrors claimPositionFor's EIP-712 verification.
-    function _signClaimAuth(
-        uint256 signerKey,
-        uint256 batchId,
-        bytes32 commitment,
-        address recipient
-    ) internal view returns (bytes memory sig) {
-        bytes32 structHash = keccak256(abi.encode(
-            vault.CLAIM_AUTH_TYPEHASH(),
-            batchId,
-            commitment,
-            recipient
-        ));
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", vault.DOMAIN_SEPARATOR(), structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerKey, digest);
-        return abi.encodePacked(r, s, v);
-    }
-
-    /// @notice Full ephemeral wallet buy order flow:
-    ///   1. Ephemeral keypair used as `trader` in commitment hash.
-    ///   2. USDC funded into ephemeral address (simulates real wallet sending USDC to ephemeral).
-    ///   3. EIP-3009 pulls from ephemeral at settlement (not real wallet).
-    ///   4. ClaimAuth from ephemeral authorizes alice (real wallet) to claim.
-    ///   5. Alice calls claimPositionFor — YES tokens land in alice's wallet.
-    function test_claimPositionFor_ephemeral_buy_order() public {
-        uint256 ephemeralKey = 0xEEEEEEEE;
-        address ephemeral    = vm.addr(ephemeralKey);
+    /// @notice Happy path: Alice's filled buy order claimed via ZK proof.
+    ///   - Commitment hash has no trader address (just marketId, isBuy, amount, limitPrice, salt).
+    ///   - Payout goes to `recipient` derived from public inputs (no msg.sender link).
+    ///   - Nullifier prevents double-claim.
+    function test_claimWithProof_filledBuy_receivesYES() public {
+        uint256 batchId = _openBatch();
 
         uint256 amount     = 100e6;
         uint256 limitPrice = 650000;
         bytes32 salt       = bytes32(uint256(42));
+        address recipient  = alice; // real wallet that receives YES tokens
 
-        // Fund ephemeral address with USDC (simulates real wallet → ephemeral transfer)
-        usdc.mint(ephemeral, amount);
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, amount, limitPrice, salt);
 
-        uint256 batchId = _openBatch();
-
-        // Commitment hash uses ephemeral as trader
-        bytes32 commitment = _makeCommitment(MARKET_ID, true, amount, limitPrice, salt, ephemeral);
-
-        // Ephemeral commits order (via commitOrder directly for simplicity)
-        vm.prank(ephemeral);
+        // Commit order (alice acts as ephemeral here for simplicity)
+        vm.prank(alice);
         vault.commitOrder(commitment, amount, MARKET_ID);
 
         _closeBatch(batchId);
 
-        // Build settlement: ephemeral is the trader, EIP-3009 pulls from ephemeral
         BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
-        orders[0] = BatchVault.RevealedOrder(ephemeral, true, amount, limitPrice, salt);
+        orders[0] = BatchVault.RevealedOrder(true, amount, limitPrice, salt);
 
-        BatchVault.TransferAuth[] memory auths = _buildAuths(1);
-        // EIP-3009 auth: from = ephemeral (not alice!). MockUSDC skips sig validation.
-        // Pre-fund vault with ephemeral's USDC (simulates transferWithAuthorization moving it)
-        // MockUSDC.transferWithAuthorization reduces ephemeral's balance:
-        // auths[0] is zero-value — MockUSDC doesn't validate, just executes transfer.
+        BatchVault.TransferAuth[] memory auths = new BatchVault.TransferAuth[](1);
+        auths[0] = _buyAuth(alice);
 
         uint256 clearingPrice = 650000;
         vm.prank(relayer);
         vault.settleBatch(batchId, orders, auths, clearingPrice, amount, 0, amount, 0, "");
 
-        // Sign ClaimAuth: ephemeral authorizes alice (real wallet) to receive payout
-        bytes memory claimAuthSig = _signClaimAuth(ephemeralKey, batchId, commitment, alice);
+        // After settlement: claimMerkleRoot is set.
+        // For a single-order batch, root = commitment (leaf == root since depth=0 padding).
+        BatchVault.Batch memory b = vault.getBatch(batchId);
+        assertEq(uint256(b.status), uint256(BatchVault.BatchStatus.SETTLED));
+        assertTrue(b.claimMerkleRoot != bytes32(0));
 
-        // Alice (real wallet) calls claimPositionFor — pays gas, receives YES tokens
+        // Build public inputs for claimWithProof
+        bytes32[] memory publicInputs = _buildClaimPublicInputs(
+            batchId,
+            b.claimMerkleRoot,
+            clearingPrice,
+            commitment,
+            salt,
+            recipient,
+            true,   // fills
+            amount, // fillAmount = USDC committed
+            0,      // refundAmount
+            true    // isBuy
+        );
+
         uint256 aliceYesBefore = ctf.balanceOf(alice, _yesTokenId());
-        vm.prank(alice);
-        vault.claimPositionFor(batchId, true, amount, limitPrice, salt, ephemeral, alice, claimAuthSig);
 
-        // Alice receives YES tokens — payout goes to recipient (alice), not ephemeral
-        uint256 aliceYesAfter = ctf.balanceOf(alice, _yesTokenId());
-        assertGt(aliceYesAfter, aliceYesBefore, "alice should have received YES tokens");
-        assertEq(ctf.balanceOf(ephemeral, _yesTokenId()), 0, "ephemeral should receive nothing");
+        // Anyone can submit the proof (relayer pays gas; recipient receives tokens)
+        vault.claimWithProof(batchId, "", publicInputs);
 
-        // Position is marked claimed
-        BatchVault.Position memory pos = vault.getPosition(batchId, commitment);
-        assertTrue(pos.claimed);
+        // Alice received YES tokens
+        assertGt(ctf.balanceOf(alice, _yesTokenId()), aliceYesBefore);
+
+        // Nullifier is marked used
+        bytes32 nullifier = keccak256(abi.encode(commitment, batchId, salt));
+        assertTrue(vault.usedNullifiers(nullifier));
     }
 
-    function test_claimPositionFor_wrongRecipient_reverts() public {
-        uint256 ephemeralKey = 0xEEEEEEEE;
-        address ephemeral    = vm.addr(ephemeralKey);
-        address attacker     = address(0xBAD);
+    /// @notice ZK claim double-spend prevention: nullifier reuse reverts.
+    function test_claimWithProof_doubleClaim_reverts() public {
+        uint256 batchId = _openBatch();
 
         uint256 amount     = 100e6;
         uint256 limitPrice = 650000;
         bytes32 salt       = bytes32(uint256(42));
 
-        usdc.mint(ephemeral, amount);
-        uint256 batchId    = _openBatch();
-        bytes32 commitment = _makeCommitment(MARKET_ID, true, amount, limitPrice, salt, ephemeral);
-        vm.prank(ephemeral);
-        vault.commitOrder(commitment, amount, MARKET_ID);
-        _closeBatch(batchId);
-
-        BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
-        orders[0] = BatchVault.RevealedOrder(ephemeral, true, amount, limitPrice, salt);
-        vm.prank(relayer);
-        vault.settleBatch(batchId, orders, _buildAuths(1), 650000, amount, 0, amount, 0, "");
-
-        // ClaimAuth signed for alice — attacker tries to redirect to themselves
-        bytes memory sig = _signClaimAuth(ephemeralKey, batchId, commitment, alice);
-
-        vm.expectRevert(BatchVault.InvalidSignature.selector);
-        vm.prank(attacker);
-        vault.claimPositionFor(batchId, true, amount, limitPrice, salt, ephemeral, attacker, sig);
-    }
-
-    function test_claimPositionFor_doubleClaim_reverts() public {
-        uint256 ephemeralKey = 0xEEEEEEEE;
-        address ephemeral    = vm.addr(ephemeralKey);
-
-        uint256 amount     = 100e6;
-        uint256 limitPrice = 650000;
-        bytes32 salt       = bytes32(uint256(42));
-
-        usdc.mint(ephemeral, amount);
-        uint256 batchId    = _openBatch();
-        bytes32 commitment = _makeCommitment(MARKET_ID, true, amount, limitPrice, salt, ephemeral);
-        vm.prank(ephemeral);
-        vault.commitOrder(commitment, amount, MARKET_ID);
-        _closeBatch(batchId);
-
-        BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
-        orders[0] = BatchVault.RevealedOrder(ephemeral, true, amount, limitPrice, salt);
-        vm.prank(relayer);
-        vault.settleBatch(batchId, orders, _buildAuths(1), 650000, amount, 0, amount, 0, "");
-
-        bytes memory sig = _signClaimAuth(ephemeralKey, batchId, commitment, alice);
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, amount, limitPrice, salt);
 
         vm.prank(alice);
-        vault.claimPositionFor(batchId, true, amount, limitPrice, salt, ephemeral, alice, sig);
+        vault.commitOrder(commitment, amount, MARKET_ID);
 
+        _closeBatch(batchId);
+
+        BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
+        orders[0] = BatchVault.RevealedOrder(true, amount, limitPrice, salt);
+        BatchVault.TransferAuth[] memory auths = new BatchVault.TransferAuth[](1);
+        auths[0] = _buyAuth(alice);
+
+        vm.prank(relayer);
+        vault.settleBatch(batchId, orders, auths, 650000, amount, 0, amount, 0, "");
+
+        BatchVault.Batch memory b = vault.getBatch(batchId);
+        bytes32[] memory publicInputs = _buildClaimPublicInputs(
+            batchId, b.claimMerkleRoot, 650000, commitment, salt,
+            alice, true, amount, 0, true
+        );
+
+        // First claim succeeds
+        vault.claimWithProof(batchId, "", publicInputs);
+
+        // Second claim with same nullifier reverts
         vm.expectRevert(BatchVault.AlreadyClaimed.selector);
+        vault.claimWithProof(batchId, "", publicInputs);
+    }
+
+    /// @notice claimWithProof reverts if batch is not yet settled.
+    function test_claimWithProof_batchNotSettled_reverts() public {
+        uint256 batchId = _openBatch();
+
+        uint256 amount     = 100e6;
+        bytes32 salt       = bytes32(uint256(1));
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, amount, 650000, salt);
+
         vm.prank(alice);
-        vault.claimPositionFor(batchId, true, amount, limitPrice, salt, ephemeral, alice, sig);
+        vault.commitOrder(commitment, amount, MARKET_ID);
+
+        // Batch is still OPEN — don't close or settle
+        bytes32[] memory publicInputs = _buildClaimPublicInputs(
+            batchId, bytes32(0), 650000, commitment, salt,
+            alice, true, amount, 0, true
+        );
+
+        vm.expectRevert(BatchVault.BatchNotSettled.selector);
+        vault.claimWithProof(batchId, "", publicInputs);
+    }
+
+    /// @notice claimWithProof reverts if publicInputs[0] (batchId) doesn't match.
+    function test_claimWithProof_wrongBatchId_reverts() public {
+        uint256 batchId = _openBatch();
+
+        uint256 amount     = 100e6;
+        bytes32 salt       = bytes32(uint256(1));
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, amount, 650000, salt);
+
+        vm.prank(alice);
+        vault.commitOrder(commitment, amount, MARKET_ID);
+
+        _closeBatch(batchId);
+
+        BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
+        orders[0] = BatchVault.RevealedOrder(true, amount, 650000, salt);
+        BatchVault.TransferAuth[] memory auths = new BatchVault.TransferAuth[](1);
+        auths[0] = _buyAuth(alice);
+        vm.prank(relayer);
+        vault.settleBatch(batchId, orders, auths, 650000, amount, 0, amount, 0, "");
+
+        BatchVault.Batch memory b = vault.getBatch(batchId);
+
+        // Pass wrong batchId (999) in public inputs but call with correct batchId
+        bytes32[] memory publicInputs = _buildClaimPublicInputs(
+            999, // wrong batchId in inputs
+            b.claimMerkleRoot, 650000, commitment, salt,
+            alice, true, amount, 0, true
+        );
+
+        vm.expectRevert(BatchVault.CommitmentMismatch.selector);
+        vault.claimWithProof(batchId, "", publicInputs);
+    }
+
+    /// @notice claimWithProof reverts if publicInputs[1] (claimMerkleRoot) is wrong.
+    function test_claimWithProof_wrongRoot_reverts() public {
+        uint256 batchId = _openBatch();
+
+        uint256 amount     = 100e6;
+        bytes32 salt       = bytes32(uint256(1));
+        bytes32 commitment = _makeCommitment(MARKET_ID, true, amount, 650000, salt);
+
+        vm.prank(alice);
+        vault.commitOrder(commitment, amount, MARKET_ID);
+
+        _closeBatch(batchId);
+
+        BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
+        orders[0] = BatchVault.RevealedOrder(true, amount, 650000, salt);
+        BatchVault.TransferAuth[] memory auths = new BatchVault.TransferAuth[](1);
+        auths[0] = _buyAuth(alice);
+        vm.prank(relayer);
+        vault.settleBatch(batchId, orders, auths, 650000, amount, 0, amount, 0, "");
+
+        // Pass wrong Merkle root
+        bytes32[] memory publicInputs = _buildClaimPublicInputs(
+            batchId,
+            bytes32(uint256(0xDEAD)), // wrong root
+            650000, commitment, salt,
+            alice, true, amount, 0, true
+        );
+
+        vm.expectRevert(BatchVault.CommitmentMismatch.selector);
+        vault.claimWithProof(batchId, "", publicInputs);
+    }
+
+    /// @notice claimWithProof for a filled sell order — payout is USDC to recipient.
+    function test_claimWithProof_filledSell_receivesUSDC() public {
+        uint256 batchId = _openBatch();
+
+        // Alice buys 100 USDC, Carol sells 80 YES — Carol uses claimWithProof
+        uint256 amtAlice = 100e6;
+        uint256 yesCarol = 80e6;
+        bytes32 saltAlice = bytes32(uint256(1));
+        bytes32 saltCarol = bytes32(uint256(2));
+
+        bytes32 cAlice = _makeCommitment(MARKET_ID, true,  amtAlice, 700000, saltAlice);
+        bytes32 cCarol = _makeCommitment(MARKET_ID, false, yesCarol, 600000, saltCarol);
+
+        vm.prank(alice);
+        vault.commitOrder(cAlice, amtAlice, MARKET_ID);
+
+        _mintYes(carol, yesCarol);
+        _approveVaultCTF(carol);
+        vm.prank(carol);
+        vault.commitSellOrder(cCarol, yesCarol, MARKET_ID);
+
+        _closeBatch(batchId);
+
+        uint256 clearingPrice = 650000;
+        BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](2);
+        orders[0] = BatchVault.RevealedOrder(true,  amtAlice, 700000, saltAlice);
+        orders[1] = BatchVault.RevealedOrder(false, yesCarol, 600000, saltCarol);
+
+        BatchVault.TransferAuth[] memory auths = new BatchVault.TransferAuth[](2);
+        auths[0] = _buyAuth(alice);
+        auths[1] = _zeroAuth();
+
+        (uint256 buyVol, uint256 sellVol, uint256 netBuy, uint256 netSell) = _buildSettleParams(orders, clearingPrice);
+        vm.prank(relayer);
+        vault.settleBatch(batchId, orders, auths, clearingPrice, buyVol, sellVol, netBuy, netSell, "");
+
+        BatchVault.Batch memory b = vault.getBatch(batchId);
+
+        // Carol's filled sell: fillAmount = yesCarol * clearingPrice / 1e6 = 52e6 USDC
+        uint256 carolFillUSDC = yesCarol * clearingPrice / 1e6; // 52e6
+
+        // Use a fresh address as recipient (demonstrates address privacy)
+        address freshRecipient = address(0xF45E);
+
+        bytes32[] memory publicInputs = _buildClaimPublicInputs(
+            batchId,
+            b.claimMerkleRoot,
+            clearingPrice,
+            cCarol,
+            saltCarol,
+            freshRecipient,
+            true,           // fills
+            carolFillUSDC,  // fillAmount = USDC payout
+            0,              // refundAmount
+            false           // isBuy = false (sell order)
+        );
+
+        uint256 recipientUSDCBefore = usdc.balanceOf(freshRecipient);
+        vault.claimWithProof(batchId, "", publicInputs);
+
+        // Fresh recipient receives USDC — carol's address never appeared on-chain
+        assertEq(usdc.balanceOf(freshRecipient), recipientUSDCBefore + carolFillUSDC);
     }
 }

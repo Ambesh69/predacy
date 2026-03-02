@@ -41,7 +41,8 @@ contract DeployTestnet is Script {
             address(usdc),
             address(ctf),
             deployer,   // relayer
-            address(verifier)
+            address(verifier),
+            address(verifier) // claimVerifier — same mock for now
         );
         console.log("BatchVault:        ", address(vault));
 

@@ -15,6 +15,7 @@ export interface OrderStore {
 
 function serializeAuth(auth: TransferAuth): object {
   return {
+    from:        auth.from,
     validAfter:  auth.validAfter.toString(),
     validBefore: auth.validBefore.toString(),
     nonce:       auth.nonce,
@@ -26,6 +27,7 @@ function serializeAuth(auth: TransferAuth): object {
 
 function deserializeAuth(raw: any): TransferAuth {
   return {
+    from:        (raw.from ?? ("0x" + "0".repeat(40))) as `0x${string}`,
     validAfter:  BigInt(raw.validAfter),
     validBefore: BigInt(raw.validBefore),
     nonce:       raw.nonce       as `0x${string}`,

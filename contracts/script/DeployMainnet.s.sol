@@ -70,7 +70,8 @@ contract DeployMainnet is Script {
             REAL_USDC,
             REAL_CTF,
             deployer,        // relayer — should be a dedicated relayer wallet, not user wallet
-            address(verifier)
+            address(verifier),
+            address(0)       // claimVerifier — deploy ClaimHonkVerifier separately and set via setClaimVerifier
         );
         console.log("BatchVault:         ", address(vault));
 

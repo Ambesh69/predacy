@@ -585,7 +585,9 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     return createWalletClient({ account: walletAddress, chain: ACTIVE_CHAIN, transport: custom(provider) });
   };
 
-  // ── Claim position (ephemeral wallet pattern or legacy) ─────────────────────
+  // ── Claim position via ZK proof (relayer submits on-chain — no wallet tx needed) ──
+  // The relayer generates a ZK proof of order membership and calls claimWithProof.
+  // No wallet signing required — the salt in localStorage is the secret credential.
   const handleClaimPosition = async (batchId: bigint) => {
     setClaimLoading(true);
     setChainError(null);
@@ -595,54 +597,41 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       const storedOrders: Array<{
         commitment: string; salt: string; isBuy: boolean;
         amount: string; limitPrice: string; batchId: string;
-        ephemeralTrader?: string; claimAuthSig?: string;
+        marketId: string;
       }> = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
       const myOrder = storedOrders.find((o) => o.batchId === batchId.toString());
       if (!myOrder) throw new Error("Order preimage not found in local storage — cannot claim");
+      if (!myOrder.marketId) throw new Error("Order is missing marketId — cannot claim");
 
-      const walletClient = await ensureAmoy();
-      const contracts = getContracts(ACTIVE_CHAIN.id);
+      const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
+      if (!relayerUrl) throw new Error("NEXT_PUBLIC_RELAYER_URL is not set");
 
-      let tx: `0x${string}`;
+      // POST order preimage + desired recipient to relayer.
+      // Relayer generates ZK proof and submits claimWithProof on-chain (relayer = msg.sender).
+      const resp = await fetch(`${relayerUrl}/claim-proof`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          batchId:    batchId.toString(),
+          marketId:   myOrder.marketId,
+          isBuy:      myOrder.isBuy,
+          amount:     myOrder.amount,
+          limitPrice: myOrder.limitPrice,
+          salt:       myOrder.salt,
+          recipient:  walletAddress,   // payout goes to connected wallet
+        }),
+      });
 
-      if (myOrder.ephemeralTrader && myOrder.claimAuthSig) {
-        tx = await walletClient.writeContract({
-          address: contracts.batchVault,
-          abi:     BATCH_VAULT_ABI,
-          functionName: "claimPositionFor",
-          args: [
-            batchId,
-            myOrder.isBuy,
-            BigInt(myOrder.amount),
-            BigInt(myOrder.limitPrice),
-            myOrder.salt as `0x${string}`,
-            myOrder.ephemeralTrader as `0x${string}`,
-            walletAddress,
-            myOrder.claimAuthSig as `0x${string}`,
-          ],
-          ...CHAIN_GAS,
-          gas: 400_000n,
-        });
-      } else {
-        tx = await walletClient.writeContract({
-          address: contracts.batchVault,
-          abi:     BATCH_VAULT_ABI,
-          functionName: "claimPosition",
-          args: [
-            batchId,
-            myOrder.isBuy,
-            BigInt(myOrder.amount),
-            BigInt(myOrder.limitPrice),
-            myOrder.salt as `0x${string}`,
-          ],
-          ...CHAIN_GAS,
-          gas: 400_000n,
-        });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.error ?? `Claim request failed (${resp.status})`);
       }
 
-      const receipt = await publicClient.waitForTransactionReceipt({ hash: tx });
+      const { txHash } = await resp.json();
+
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash as `0x${string}` });
       if (receipt.status === "reverted") {
-        throw new Error("Transaction reverted — the batch may not be fully settled yet. Try again in a few seconds.");
+        throw new Error("Claim transaction reverted — the batch may not be fully settled yet. Try again in a few seconds.");
       }
       setBalanceVersion(v => v + 1);
     } catch (e: any) {
@@ -690,7 +679,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         amount:     params.amount,
         limitPrice: params.limitPrice,
         salt:       params.salt,
-        trader:     ephemeralAddress,
+        // No trader address — salt is the secret credential (see commitmentHash.ts)
       });
 
       const ephemeralNonce = await publicClient.readContract({
@@ -735,19 +724,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       const r = transferSig.slice(0, 66) as `0x${string}`;
       const s = ("0x" + transferSig.slice(66, 130)) as `0x${string}`;
       const v = parseInt(transferSig.slice(130, 132), 16);
-      const transferAuth = { validAfter: validAfter.toString(), validBefore: validBefore.toString(), nonce: transferNonce, v, r, s };
-
-      const claimAuthSig = await ephemeralWalletClient.signTypedData({
-        account: ephemeralAccount,
-        domain: { name: "BatchVault", version: "1", chainId: BigInt(ACTIVE_CHAIN.id), verifyingContract: contracts.batchVault },
-        types: { ClaimAuth: [
-          { name: "batchId",    type: "uint256" },
-          { name: "commitment", type: "bytes32" },
-          { name: "recipient",  type: "address" },
-        ]},
-        primaryType: "ClaimAuth",
-        message: { batchId: batch.batchId, commitment: actualCommitment, recipient: walletAddress! },
-      });
+      const transferAuth = { from: ephemeralAddress, validAfter: validAfter.toString(), validBefore: validBefore.toString(), nonce: transferNonce, v, r, s };
 
       const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
       if (!relayerUrl) throw new Error("NEXT_PUBLIC_RELAYER_URL is not set");
@@ -780,18 +757,18 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         try {
           const key = `predacy:orders:${walletAddress.toLowerCase()}`;
           const existing: unknown[] = JSON.parse(localStorage.getItem(key) ?? "[]");
+          // Persist order preimage for ZK claim proof at claim time.
+          // Salt is the secret credential — relayer uses it to generate proof.
           existing.unshift({
-            commitment:      actualCommitment,
-            salt:            params.salt,
-            amount:          params.amount.toString(),
-            isBuy:           true,
-            limitPrice:      params.limitPrice.toString(),
-            batchId:         batch.batchId.toString(),
-            marketId:        selectedMarket.conditionId,
-            marketQuestion:  selectedMarket.question ?? null,
-            timestamp:       Date.now(),
-            ephemeralTrader: ephemeralAddress,
-            claimAuthSig,
+            commitment:     actualCommitment,
+            salt:           params.salt,
+            amount:         params.amount.toString(),
+            isBuy:          true,
+            limitPrice:     params.limitPrice.toString(),
+            batchId:        batch.batchId.toString(),
+            marketId:       selectedMarket.conditionId,
+            marketQuestion: selectedMarket.question ?? null,
+            timestamp:      Date.now(),
           });
           localStorage.setItem(key, JSON.stringify(existing.slice(0, 200)));
         } catch { /* ignore */ }

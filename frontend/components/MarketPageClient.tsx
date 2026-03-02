@@ -404,9 +404,9 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   //   BUY orders:
   //     1. Fresh keypair generated in-browser (never persisted)
   //     2. Real wallet sends USDC to ephemeral address (1 MetaMask tx)
-  //     3. Ephemeral key signs CommitOrder + EIP-3009 + ClaimAuth (0 MetaMask popups!)
+  //     3. Ephemeral key signs CommitOrder + EIP-3009 (0 MetaMask popups!)
   //     4. On-chain: Transfer(ephemeralAddress → vault) — NOT realWallet!
-  //     5. Claim: real wallet calls claimPositionFor with stored ClaimAuth sig
+  //     5. Claim: POST /claim-proof to relayer — relayer generates ZK proof + submits on-chain
   //   SELL orders: unchanged (real wallet signs everything; YES tokens must come from real wallet)
   const handleOrderSubmit = async (params: {
     commitment: `0x${string}`;
@@ -447,15 +447,13 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         transport: http(),
       });
 
-      // 4. Recompute commitment with ephemeral address as trader
-      //    (commitment hash includes trader; ephemeral address is trader on-chain)
+      // 4. Recompute commitment (no trader address — salt is the 256-bit secret credential)
       const actualCommitment = computeCommitment({
         marketId:   batch.batchMarketId,
         isBuy:      params.isBuy,
         amount:     params.amount,
         limitPrice: params.limitPrice,
         salt:       params.salt,
-        trader:     ephemeralAddress,
       });
 
       // 5. Ephemeral nonce (fresh address, always 0 on first use)
@@ -544,33 +542,10 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         v, r, s,
       };
 
-      // 8. Sign ClaimAuth EIP-712 from ephemeral key — authorizes real wallet to claim
-      //    This is stored locally. Ephemeral private key is discarded after this block.
-      const claimAuthSig = await ephemeralWalletClient.signTypedData({
-        account: ephemeralAccount,
-        domain: {
-          name:              "BatchVault",
-          version:           "1",
-          chainId:           BigInt(ACTIVE_CHAIN.id),
-          verifyingContract: contracts.batchVault,
-        },
-        types: {
-          ClaimAuth: [
-            { name: "batchId",    type: "uint256" },
-            { name: "commitment", type: "bytes32" },
-            { name: "recipient",  type: "address" },
-          ],
-        },
-        primaryType: "ClaimAuth",
-        message: {
-          batchId:    batch.batchId,
-          commitment: actualCommitment,
-          recipient:  walletAddress!,  // real wallet receives payout at claim time
-        },
-      });
       // Ephemeral private key goes out of scope here — it's gone from memory.
+      // Claim will be done via ZK proof (POST /claim-proof to relayer) — no ClaimAuth sig needed.
 
-      // 9. POST to relayer
+      // 8. POST to relayer
       const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
       if (!relayerUrl) throw new Error("NEXT_PUBLIC_RELAYER_URL is not set");
 
@@ -614,23 +589,22 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
 
       setActiveTab("positions");
 
-      // Persist locally — store ClaimAuth sig (NOT private key!) for claim time
+      // Persist locally — store order preimage for ZK claim proof at claim time.
+      // Note: salt is the secret credential that proves ownership. Never share it.
+      // No private keys, ClaimAuth sigs, or ephemeral addresses are stored.
       try {
         const key = `predacy:orders:${walletAddress!.toLowerCase()}`;
         const existing: unknown[] = JSON.parse(localStorage.getItem(key) ?? "[]");
         existing.unshift({
-          commitment:      actualCommitment,
-          salt:            params.salt,
-          amount:          params.amount.toString(),
-          isBuy:           true,
-          limitPrice:      params.limitPrice.toString(),
-          batchId:         batch.batchId.toString(),
-          marketId:        id,
-          marketQuestion:  market?.question ?? null,
-          timestamp:       Date.now(),
-          // Ephemeral wallet fields (enables claimPositionFor at claim time)
-          ephemeralTrader: ephemeralAddress,
-          claimAuthSig,
+          commitment:     actualCommitment,
+          salt:           params.salt,
+          amount:         params.amount.toString(),
+          isBuy:          true,
+          limitPrice:     params.limitPrice.toString(),
+          batchId:        batch.batchId.toString(),
+          marketId:       id,
+          marketQuestion: market?.question ?? null,
+          timestamp:      Date.now(),
         });
         localStorage.setItem(key, JSON.stringify(existing.slice(0, 200)));
       } catch { /* ignore quota / SSR errors */ }
@@ -759,7 +733,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         marketId:       id,
         marketQuestion: market?.question ?? null,
         timestamp:      Date.now(),
-        // No ephemeralTrader / claimAuthSig — sell orders use claimPosition directly
+        // No ephemeral wallet for sell orders — real wallet signs everything directly
       });
       localStorage.setItem(key, JSON.stringify(existing.slice(0, 200)));
     } catch { /* ignore quota / SSR errors */ }
@@ -790,9 +764,10 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     }
   };
 
-  // ── Claim position (parameterized — works for current or historical batches) ──
-  // For buy orders with ephemeral wallet: uses claimPositionFor (ephemeral pattern).
-  // For sell orders / legacy buy orders: uses claimPosition (real wallet = trader).
+  // ── Claim position via ZK proof (relayer submits on-chain — no wallet tx needed) ──
+  // The user provides a recipient address (defaults to their wallet).
+  // The relayer generates a ZK proof of order membership and calls claimWithProof.
+  // No wallet signing required — the salt in localStorage is the secret credential.
   const handleClaimPosition = async (batchId: bigint) => {
     setClaimLoading(true);
     setChainError(null);
@@ -802,57 +777,45 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       const storedOrders: Array<{
         commitment: string; salt: string; isBuy: boolean;
         amount: string; limitPrice: string; batchId: string;
-        ephemeralTrader?: string; claimAuthSig?: string;
+        marketId: string;
       }> = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
       const myOrder = storedOrders.find((o) => o.batchId === batchId.toString());
       if (!myOrder) throw new Error("Order preimage not found in local storage — cannot claim");
+      if (!myOrder.marketId) throw new Error("Order is missing marketId — cannot claim");
 
-      const walletClient = await ensureAmoy();
-      const contracts = getContracts(ACTIVE_CHAIN.id);
+      const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
+      if (!relayerUrl) throw new Error("NEXT_PUBLIC_RELAYER_URL is not set");
 
-      let tx: `0x${string}`;
+      // POST order preimage + desired recipient to relayer.
+      // Relayer generates ZK proof and submits claimWithProof on-chain (relayer = msg.sender).
+      // Recipient defaults to the user's connected wallet — can be any fresh address for privacy.
+      const resp = await fetch(`${relayerUrl}/claim-proof`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          batchId:    batchId.toString(),
+          marketId:   myOrder.marketId,
+          isBuy:      myOrder.isBuy,
+          amount:     myOrder.amount,
+          limitPrice: myOrder.limitPrice,
+          salt:       myOrder.salt,
+          recipient:  walletAddress,   // payout goes to connected wallet
+        }),
+      });
 
-      if (myOrder.ephemeralTrader && myOrder.claimAuthSig) {
-        // Ephemeral wallet pattern — real wallet calls claimPositionFor with ClaimAuth sig
-        tx = await walletClient.writeContract({
-          address: contracts.batchVault,
-          abi:     BATCH_VAULT_ABI,
-          functionName: "claimPositionFor",
-          args: [
-            batchId,
-            myOrder.isBuy,
-            BigInt(myOrder.amount),
-            BigInt(myOrder.limitPrice),
-            myOrder.salt as `0x${string}`,
-            myOrder.ephemeralTrader as `0x${string}`,
-            walletAddress,
-            myOrder.claimAuthSig as `0x${string}`,
-          ],
-          ...CHAIN_GAS,
-          gas: 400_000n,
-        });
-      } else {
-        // Legacy / sell order path — real wallet is trader, msg.sender must match
-        tx = await walletClient.writeContract({
-          address: contracts.batchVault,
-          abi:     BATCH_VAULT_ABI,
-          functionName: "claimPosition",
-          args: [
-            batchId,
-            myOrder.isBuy,
-            BigInt(myOrder.amount),
-            BigInt(myOrder.limitPrice),
-            myOrder.salt as `0x${string}`,
-          ],
-          ...CHAIN_GAS,
-          gas: 400_000n,
-        });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.error ?? `Claim request failed (${resp.status})`);
       }
 
-      const receipt = await publicClient.waitForTransactionReceipt({ hash: tx });
+      const { txHash } = await resp.json();
+
+      // Wait for the relayer's tx to land
+      const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash as `0x${string}` });
       if (receipt.status === "reverted") {
-        throw new Error("Transaction reverted — the batch may not be fully settled yet. Try again in a few seconds.");
+        throw new Error("Claim transaction reverted — the batch may not be fully settled yet. Try again in a few seconds.");
       }
+
       if (batchId === batch.batchId) {
         setPosition((p) => p ? { ...p, claimed: true } : p);
       }

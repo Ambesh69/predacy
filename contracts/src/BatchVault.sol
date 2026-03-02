@@ -40,16 +40,19 @@ interface IUSDC {
 ///   4. BatchVault verifies the ZK proof, then pulls USDC from filled buy orders
 ///      via their stored EIP-3009 authorizations (no upfront deposit needed).
 ///   5. The vault executes the net position on Polymarket's CTF Exchange.
-///   6. Users call claimPosition() with their order preimage to receive payouts.
+///   6. Users call claimWithProof() with a ZK claim proof to receive payouts
+///      at a recipient address of their choice — their identity is never revealed.
 ///
-/// Privacy model:
+/// Privacy model (post Fix #2):
 ///   - OrderCommitted events reveal ONLY the commitment hash and batch ID.
 ///     No wallet address, no amount, no direction is exposed at order time.
-///   - EIP-3009 Transfer events appear at settlement time — the user's address
-///     and amount become visible then (unavoidable: real USDC must move).
-///   - Claim time also reveals msg.sender and the order preimage.
-///   - Uniqueness is enforced by commitment hash, not trader address.
-///   - Users prove ownership at claim time by revealing the preimage.
+///   - Commitment = keccak256(marketId, isBuy, amount, limitPrice, salt).
+///     No trader address — the 256-bit salt is the secret credential.
+///   - settleBatch calldata contains RevealedOrder WITHOUT trader addresses.
+///   - EIP-3009 Transfer: ephemeral→vault (not Alice's real address).
+///   - claimWithProof: relayer submits ZK proof, payout goes to chosen recipient.
+///     Alice's address never appears on-chain at claim time.
+///   - Remaining link: Transfer(Alice→ephemeral) at order funding (Fix #1 target).
 contract BatchVault {
     // ═══════════════════════════════════════════════════════════════════════
     // Types
@@ -74,20 +77,21 @@ contract BatchVault {
         uint256 filledSellYes;      // YES tokens from filled sell orders (distributed to buyers)
         uint256 totalFilledBuyVol;  // USDC from filled buy orders (denominator for YES share calc)
         uint256 commitmentCount;
-        bytes32 commitmentRoot;     // Sequential hash of all commitments (set at settlement)
+        bytes32 commitmentRoot;     // Sequential hash chain of commitments (for batch clearing ZK)
+        bytes32 claimMerkleRoot;    // Standard binary Merkle root (for ZK claim proofs)
     }
 
     /// @notice An order commitment — only the hash and amount are stored.
     ///         No trader address is persisted on-chain; position lookup uses commitment hash.
     struct Commitment {
-        bytes32 hash;       // keccak256 of order params (includes trader address in preimage)
+        bytes32 hash;       // keccak256(marketId, isBuy, amount, limitPrice, salt) — NO trader address
         uint256 amount;     // USDC authorized (buy) or YES tokens deposited (sell)
-        bool claimed;       // set true after claimPosition
+        bool claimed;       // set true after claimPosition (direct claims)
     }
 
-    /// @notice Revealed order (submitted by relayer at settlement)
+    /// @notice Revealed order (submitted by relayer at settlement).
+    ///         No trader address — the 256-bit salt is the secret credential.
     struct RevealedOrder {
-        address trader;
         bool isBuy;           // true = buy YES (USDC in), false = sell YES (YES tokens in)
         uint256 amount;       // USDC (buy) or YES tokens (sell), 6 decimals
         uint256 limitPrice;   // 6-decimal fixed point
@@ -98,6 +102,7 @@ contract BatchVault {
     ///         The relayer submits this at settlement for filled buy orders only.
     ///         Sell orders and unfilled buy orders use a zero-value struct (ignored by contract).
     struct TransferAuth {
+        address from;         // The address whose USDC is being pulled (ephemeral wallet)
         uint256 validAfter;   // 0 = valid immediately
         uint256 validBefore;  // expiry unix timestamp (e.g. order time + 7200s)
         bytes32 nonce;        // random 32 bytes chosen by user (prevents replay)
@@ -109,7 +114,7 @@ contract BatchVault {
     /// @notice Per-commitment position after settlement
     struct Position {
         uint256 filledAmount;     // Buy: USDC filled. Sell: USDC received.
-        uint256 refundAmount;     // Buy: USDC refund (unfilled). Sell: YES tokens returned (unfilled).
+        uint256 refundAmount;     // Buy: 0 (EIP-3009 deferred). Sell: YES tokens returned (unfilled).
         bool isBuy;
         bool claimed;
     }
@@ -122,7 +127,7 @@ contract BatchVault {
     uint256 public constant PRICE_DECIMALS = 1e6;   // 6-decimal prices (matches USDC)
     uint256 public constant MAX_BATCH_ORDERS = 500; // gas safety limit
 
-    /// @dev EIP-712 type hashes for commitOrderFor() meta-transactions
+    /// @dev EIP-712 type hashes for meta-transactions
     bytes32 private constant EIP712_DOMAIN_TYPEHASH = keccak256(
         "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
     );
@@ -132,17 +137,11 @@ contract BatchVault {
         "CommitOrder(bytes32 commitment,uint256 amount,uint256 batchId,uint256 nonce,uint256 deadline)"
     );
 
-    /// @notice Ephemeral traders sign this struct to authorize a recipient (real wallet) to
-    ///         claim their position via claimPositionFor. This enables the ephemeral wallet
-    ///         privacy pattern: trader = ephemeral address (no gas), recipient = real wallet.
-    bytes32 public constant CLAIM_AUTH_TYPEHASH = keccak256(
-        "ClaimAuth(uint256 batchId,bytes32 commitment,address recipient)"
-    );
-
     address public immutable usdc;
     address public immutable ctf;          // ConditionalTokens
     address public immutable relayer;      // Trusted batch processor address
-    IBatchVerifier public verifier;
+    IBatchVerifier public verifier;        // ZK verifier for batch clearing proofs
+    IBatchVerifier public claimVerifier;   // ZK verifier for ZK claim proofs
 
     /// @notice EIP-712 domain separator — computed once at construction
     bytes32 public immutable DOMAIN_SEPARATOR;
@@ -165,11 +164,15 @@ contract BatchVault {
     // batchId => commitment hash => index (O(1) lookup)
     mapping(uint256 => mapping(bytes32 => uint256)) public commitmentIndex;
 
-    // batchId => commitment hash => submitted? (uniqueness guard — prevents duplicate hashes)
+    // batchId => commitment hash => submitted? (uniqueness guard)
     mapping(uint256 => mapping(bytes32 => bool)) public hasCommittedHash;
 
     /// @notice EIP-712 per-signer nonces — incremented on each commitOrderFor / commitSellOrderFor call
     mapping(address => uint256) public nonces;
+
+    /// @notice ZK claim nullifiers — prevents double-claim via claimWithProof.
+    ///         nullifier = keccak256(abi.encode(commitment, batchId, salt))
+    mapping(bytes32 => bool) public usedNullifiers;
 
     // ═══════════════════════════════════════════════════════════════════════
     // Events
@@ -195,6 +198,7 @@ contract BatchVault {
 
     event PositionClaimed(uint256 indexed batchId, address indexed claimer, uint256 yesShares, uint256 refund);
     event VerifierUpdated(address newVerifier);
+    event ClaimVerifierUpdated(address newClaimVerifier);
 
     // ═══════════════════════════════════════════════════════════════════════
     // Errors
@@ -216,16 +220,28 @@ contract BatchVault {
     error InvalidClearingPrice();
     error InvalidSignature();
     error SignatureExpired();
+    error ClaimVerifierNotSet();
 
     // ═══════════════════════════════════════════════════════════════════════
     // Constructor
     // ═══════════════════════════════════════════════════════════════════════
 
-    constructor(address _usdc, address _ctf, address _relayer, address _verifier) {
+    /// @param _verifier      ZK verifier for batch clearing proofs
+    /// @param _claimVerifier ZK verifier for claim proofs (pass address(0) to set later via setClaimVerifier)
+    constructor(
+        address _usdc,
+        address _ctf,
+        address _relayer,
+        address _verifier,
+        address _claimVerifier
+    ) {
         usdc = _usdc;
         ctf = _ctf;
         relayer = _relayer;
         verifier = IBatchVerifier(_verifier);
+        if (_claimVerifier != address(0)) {
+            claimVerifier = IBatchVerifier(_claimVerifier);
+        }
         DOMAIN_SEPARATOR = keccak256(abi.encode(
             EIP712_DOMAIN_TYPEHASH,
             keccak256("BatchVault"),
@@ -253,19 +269,20 @@ contract BatchVault {
         batchId = ++_nextBatchId;
         currentBatchIdByMarket[marketId] = batchId;
         batches[batchId] = Batch({
-            marketId: marketId,
-            openedAt: block.timestamp,
-            closedAt: 0,
-            status: BatchStatus.OPEN,
-            totalDeposited: 0,
-            totalSellYes: 0,
-            clearingPrice: 0,
-            netBuyAmount: 0,
+            marketId:        marketId,
+            openedAt:        block.timestamp,
+            closedAt:        0,
+            status:          BatchStatus.OPEN,
+            totalDeposited:  0,
+            totalSellYes:    0,
+            clearingPrice:   0,
+            netBuyAmount:    0,
             yesTokensReceived: 0,
-            filledSellYes: 0,
+            filledSellYes:   0,
             totalFilledBuyVol: 0,
             commitmentCount: 0,
-            commitmentRoot: bytes32(0)
+            commitmentRoot:  bytes32(0),
+            claimMerkleRoot: bytes32(0)
         });
 
         emit BatchOpened(batchId, marketId, block.timestamp);
@@ -291,26 +308,12 @@ contract BatchVault {
     // off-chain; the relayer pulls USDC at settlement for filled orders only.
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// @notice Submit a sealed-bid BUY order directly (via direct call).
-    ///         NOTE: This path does NOT transfer USDC upfront.
-    ///         The caller must separately provide an EIP-3009 TransferAuth to
-    ///         the relayer so it can be submitted at settlement.
     function commitOrder(bytes32 commitment, uint256 amount, bytes32 marketId) external {
         if (amount == 0) revert ZeroAmount();
         _executeCommit(commitment, amount, marketId);
     }
 
     /// @notice Privacy-preserving BUY commitment via EIP-712 meta-transaction.
-    ///
-    ///         EIP-3009 privacy model:
-    ///           - No USDC transferred at order time — user signs an off-chain
-    ///             EIP-3009 TransferWithAuthorization alongside CommitOrder.
-    ///           - Relayer submits CommitOrder to the chain (only relayer address visible).
-    ///           - USDC is pulled from user's wallet at settlement (filled orders only)
-    ///             via IUSDC.transferWithAuthorization — the user's address and amount
-    ///             appear on-chain at that point (EIP-3009 trade-off).
-    ///           - Only the commitment hash is emitted in the OrderCommitted event.
-    ///
     /// @param marketId Polymarket condition ID — selects which market's batch to commit to
     function commitOrderFor(
         bytes32 commitment,
@@ -339,22 +342,15 @@ contract BatchVault {
         if (recovered == address(0) || recovered != signer) revert InvalidSignature();
 
         nonces[signer]++;
-        // No USDC transfer here — EIP-3009 auth is held off-chain by the relayer
-        // and submitted at settlement time for filled orders.
         _executeCommit(commitment, amount, marketId);
     }
 
-    /// @dev Shared logic for commitOrder and commitOrderFor.
-    ///      Records the commitment on-chain. No USDC transfer — payment is deferred
-    ///      to settlement time via EIP-3009 (for filled buy orders only).
     function _executeCommit(bytes32 commitment, uint256 amount, bytes32 marketId) internal {
         uint256 batchId = currentBatchIdByMarket[marketId];
         Batch storage batch = batches[batchId];
         if (batch.status != BatchStatus.OPEN)         revert BatchNotOpen();
         if (hasCommittedHash[batchId][commitment])     revert DuplicateCommitment();
         if (batch.commitmentCount >= MAX_BATCH_ORDERS) revert MaxOrdersExceeded();
-
-        // NOTE: No USDC transferFrom here — EIP-3009 payment happens at settlement.
 
         uint256 idx = batch.commitmentCount++;
         commitments[batchId][idx] = Commitment({
@@ -365,27 +361,20 @@ contract BatchVault {
 
         hasCommittedHash[batchId][commitment] = true;
         commitmentIndex[batchId][commitment]  = idx;
-        batch.totalDeposited += amount; // tracks authorized USDC volume (not yet in vault)
+        batch.totalDeposited += amount;
 
-        emit OrderCommitted(batchId, commitment); // no trader address, no amount
+        emit OrderCommitted(batchId, commitment);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
     // User: submit sell order commitment (YES ERC-1155 token collateral)
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// @notice Submit a sealed-bid SELL order directly (trader = msg.sender).
-    ///         Deposits YES ERC-1155 tokens; trader receives USDC at clearing price.
-    ///         Requires trader to have called ctf.setApprovalForAll(vault, true) first.
     function commitSellOrder(bytes32 commitment, uint256 yesAmount, bytes32 marketId) external {
         if (yesAmount == 0) revert ZeroAmount();
         _executeCommitSell(commitment, yesAmount, msg.sender, marketId);
     }
 
-    /// @notice Privacy-preserving SELL commitment via EIP-712 meta-transaction.
-    ///         NOTE: Sell orders require the user to transfer YES ERC-1155 tokens, so the
-    ///         user's address appears in the token transfer (CTF safeTransferFrom). This is
-    ///         a known limitation — full sell-order privacy requires a different design.
     function commitSellOrderFor(
         bytes32 commitment,
         uint256 yesAmount,
@@ -416,7 +405,6 @@ contract BatchVault {
         _executeCommitSell(commitment, yesAmount, signer, marketId);
     }
 
-    /// @dev Shared logic for sell order commitments (YES token deposits).
     function _executeCommitSell(bytes32 commitment, uint256 yesAmount, address trader, bytes32 marketId) internal {
         uint256 batchId = currentBatchIdByMarket[marketId];
         Batch storage batch = batches[batchId];
@@ -438,7 +426,7 @@ contract BatchVault {
         commitmentIndex[batchId][commitment]  = idx;
         batch.totalSellYes += yesAmount;
 
-        emit OrderCommitted(batchId, commitment); // no trader address, no amount
+        emit OrderCommitted(batchId, commitment);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -466,7 +454,7 @@ contract BatchVault {
     ///
     /// @param auths EIP-3009 transfer authorizations — one per order (same length as orders).
     ///              For sell orders or unfilled buy orders, pass a zero-value struct (ignored).
-    ///              For filled buy orders, this authorizes the USDC pull from the user's wallet.
+    ///              For filled buy orders: auth.from = ephemeral wallet address.
     function settleBatch(
         uint256 batchId,
         RevealedOrder[] calldata orders,
@@ -489,7 +477,7 @@ contract BatchVault {
         // 1. Verify all revealed orders match their on-chain commitment hashes
         _verifyCommitments(batchId, batch.marketId, orders);
 
-        // 2. Build public inputs for ZK verifier
+        // 2. Build public inputs for batch clearing ZK verifier
         bytes32 commitmentRoot = _computeCommitmentRoot(batchId, orders.length);
         bytes32[] memory publicInputs = new bytes32[](6);
         publicInputs[0] = commitmentRoot;
@@ -502,9 +490,8 @@ contract BatchVault {
         // 3. Verify ZK proof
         if (!verifier.verify(proof, publicInputs)) revert ZKProofInvalid();
 
-        // 4. Collect USDC from filled buy orders via EIP-3009 transferWithAuthorization.
-        //    Only filled buy orders pay — unfilled orders and sell orders are skipped.
-        //    This must happen before _executeOnPolymarket (which needs USDC in vault).
+        // 4. Collect USDC from filled buy orders via EIP-3009.
+        //    auth.from = ephemeral wallet (not Alice's real address).
         for (uint256 i = 0; i < orders.length; i++) {
             bool orderFills = orders[i].isBuy
                 ? orders[i].limitPrice >= clearingPrice
@@ -512,9 +499,9 @@ contract BatchVault {
 
             if (orders[i].isBuy && orderFills) {
                 IUSDC(usdc).transferWithAuthorization(
-                    orders[i].trader,   // from: user wallet (revealed at settlement)
-                    address(this),      // to: this vault
-                    orders[i].amount,   // value: full order amount (all-or-nothing fill)
+                    auths[i].from,        // ephemeral wallet address
+                    address(this),
+                    orders[i].amount,
                     auths[i].validAfter,
                     auths[i].validBefore,
                     auths[i].nonce,
@@ -525,7 +512,7 @@ contract BatchVault {
             }
         }
 
-        // 5a. Execute net buy on Polymarket (USDC now in vault from step 4)
+        // 5a. Execute net buy on Polymarket
         uint256 yesTokensReceived = 0;
         if (netBuyAmount > 0) {
             yesTokensReceived = _executeOnPolymarket(batch.marketId, netBuyAmount, clearingPrice);
@@ -536,39 +523,122 @@ contract BatchVault {
             _executeSellOnPolymarket(batch.marketId, netSellYes, clearingPrice);
         }
 
-        // 6. Compute per-commitment positions and store them (keyed by commitment hash)
+        // 6. Compute per-commitment positions (keyed by commitment hash, no trader address)
         (uint256 filledBuyVol, uint256 filledSellYes) = _assignPositions(batchId, orders, clearingPrice);
 
-        // 7. Finalize batch state
+        // 7. Build binary Merkle root for ZK claim proofs
+        bytes32 claimMerkleRoot = _buildMerkleRoot(batchId, orders.length);
+
+        // 8. Finalize batch state
         uint256 yesForBuyers = filledSellYes >= netSellYes ? filledSellYes - netSellYes : 0;
 
-        batch.status = BatchStatus.SETTLED;
-        batch.clearingPrice = clearingPrice;
-        batch.netBuyAmount = netBuyAmount;
+        batch.status            = BatchStatus.SETTLED;
+        batch.clearingPrice     = clearingPrice;
+        batch.netBuyAmount      = netBuyAmount;
         batch.yesTokensReceived = yesTokensReceived;
-        batch.filledSellYes = yesForBuyers;
+        batch.filledSellYes     = yesForBuyers;
         batch.totalFilledBuyVol = filledBuyVol;
-        batch.commitmentRoot = commitmentRoot;
+        batch.commitmentRoot    = commitmentRoot;
+        batch.claimMerkleRoot   = claimMerkleRoot;
 
         emit BatchSettled(batchId, clearingPrice, totalBuyVol, totalSellVol, netBuyAmount, yesTokensReceived);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // User: claim position after settlement
+    // User: ZK-private claim (primary path for buy orders)
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// @notice Claim position after batch settlement by revealing the order preimage.
+    /// @notice Claim a position using a ZK proof — Alice's address is never revealed.
     ///
-    ///         Privacy-preserving claim: the user proves they know the preimage of their
-    ///         commitment hash by providing (isBuy, amount, limitPrice, salt). The contract
-    ///         reconstructs the commitment and looks up the position — no address stored on-chain.
-    ///         Payout is sent to msg.sender.
+    ///         Privacy model:
+    ///           - The relayer generates the ZK proof server-side using Alice's private
+    ///             order preimage (marketId, isBuy, amount, limitPrice, salt).
+    ///           - The proof shows Merkle membership WITHOUT revealing which leaf is Alice's,
+    ///             and verifies the payout WITHOUT revealing her identity.
+    ///           - msg.sender = the relayer (Alice never sends this tx).
+    ///           - The recipient can be any address Alice specifies (e.g. a fresh wallet).
     ///
-    /// @param batchId    The settled batch to claim from
-    /// @param isBuy      Order direction (true = buy YES, false = sell YES)
-    /// @param amount     Collateral deposited (USDC for buys, YES tokens for sells)
-    /// @param limitPrice Limit price used in the order (6-decimal fixed point)
-    /// @param salt       Random blinding factor chosen at order creation
+    ///         Public inputs layout (bytes32[]):
+    ///           [0] batch_id        must equal batchId param
+    ///           [1] commitment_root  must equal batch.claimMerkleRoot
+    ///           [2] clearing_price   must equal batch.clearingPrice
+    ///           [3] nullifier        checked against usedNullifiers
+    ///           [4] recipient        address packed right-aligned in bytes32
+    ///           [5] fills            0 or 1
+    ///           [6] fill_amount      USDC or YES token payout
+    ///           [7] refund_amount    YES tokens for unfilled sell; 0 for buy
+    ///           [8] is_buy           0 or 1
+    function claimWithProof(
+        uint256 batchId,
+        bytes calldata proof,
+        bytes32[] calldata publicInputs
+    ) external {
+        if (address(claimVerifier) == address(0)) revert ClaimVerifierNotSet();
+
+        Batch storage batch = batches[batchId];
+        if (batch.status != BatchStatus.SETTLED) revert BatchNotSettled();
+        if (publicInputs.length < 9) revert CommitmentMismatch();
+
+        // Verify public inputs match on-chain state
+        if (uint256(publicInputs[0]) != batchId)             revert CommitmentMismatch();
+        if (publicInputs[1] != batch.claimMerkleRoot)        revert CommitmentMismatch();
+        if (uint256(publicInputs[2]) != batch.clearingPrice) revert CommitmentMismatch();
+
+        // Verify ZK proof
+        if (!claimVerifier.verify(proof, publicInputs)) revert ZKProofInvalid();
+
+        // Nullifier check (prevents double-claim)
+        bytes32 nullifier = publicInputs[3];
+        if (usedNullifiers[nullifier]) revert AlreadyClaimed();
+        usedNullifiers[nullifier] = true;
+
+        // Decode remaining public inputs
+        address recipient    = address(uint160(uint256(publicInputs[4])));
+        bool fills           = uint256(publicInputs[5]) == 1;
+        uint256 fillAmount   = uint256(publicInputs[6]);
+        uint256 refundAmount = uint256(publicInputs[7]);
+        bool isBuy           = uint256(publicInputs[8]) == 1;
+
+        uint256 yesShares = 0;
+
+        if (fills && fillAmount > 0) {
+            if (isBuy) {
+                uint256 totalYes = batch.yesTokensReceived + batch.filledSellYes;
+                if (batch.totalFilledBuyVol > 0 && totalYes > 0) {
+                    yesShares = (fillAmount * totalYes) / batch.totalFilledBuyVol;
+                }
+                if (yesShares > 0) {
+                    uint256 yesTokenId = _getYesTokenId(batch.marketId);
+                    IConditionalTokens(ctf).safeTransferFrom(address(this), recipient, yesTokenId, yesShares, "");
+                }
+            } else {
+                // Filled sell: USDC proceeds to recipient
+                IERC20(usdc).transfer(recipient, fillAmount);
+            }
+        }
+
+        if (!fills && refundAmount > 0) {
+            if (!isBuy) {
+                // Unfilled sell: return YES tokens to recipient
+                uint256 yesTokenId = _getYesTokenId(batch.marketId);
+                IConditionalTokens(ctf).safeTransferFrom(address(this), recipient, yesTokenId, refundAmount, "");
+            }
+            // Unfilled buy: EIP-3009 deferred — USDC was never deposited, nothing to refund.
+            // (Circuit enforces refundAmount == 0 for unfilled buys.)
+        }
+
+        emit PositionClaimed(batchId, recipient, yesShares, refundAmount);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // User: direct claim (primarily for sell orders)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// @notice Claim position by revealing the order preimage. Primarily for SELL orders.
+    ///         Buy order holders should prefer claimWithProof() to preserve privacy.
+    ///
+    ///         Commitment = keccak256(marketId, isBuy, amount, limitPrice, salt) — no trader address.
+    ///         Payout sent to msg.sender.
     function claimPosition(
         uint256 batchId,
         bool isBuy,
@@ -579,9 +649,9 @@ contract BatchVault {
         Batch storage batch = batches[batchId];
         if (batch.status != BatchStatus.SETTLED) revert BatchNotSettled();
 
-        // Reconstruct commitment from preimage (same formula as frontend)
+        // Reconstruct commitment (no trader address — same formula as frontend commitmentHash.ts)
         bytes32 commitment = keccak256(
-            abi.encode(batch.marketId, isBuy, amount, limitPrice, salt, msg.sender)
+            abi.encode(batch.marketId, isBuy, amount, limitPrice, salt)
         );
 
         Position storage pos = positionsByCommitment[batchId][commitment];
@@ -608,105 +678,28 @@ contract BatchVault {
         }
 
         if (pos.refundAmount > 0) {
-            if (pos.isBuy) {
-                IERC20(usdc).transfer(msg.sender, pos.refundAmount);
-            } else {
+            if (!pos.isBuy) {
                 uint256 yesTokenId = _getYesTokenId(batch.marketId);
                 IConditionalTokens(ctf).safeTransferFrom(address(this), msg.sender, yesTokenId, pos.refundAmount, "");
             }
+            // Unfilled buy: should not occur with EIP-3009 deferred model (USDC never deposited)
         }
 
         emit PositionClaimed(batchId, msg.sender, yesShares, pos.refundAmount);
-    }
-
-    /// @notice Claim a position on behalf of an ephemeral trader (the ephemeral wallet pattern).
-    ///
-    ///         Privacy model:
-    ///           - trader = ephemeral address (was used as `trader` in the commitment hash)
-    ///           - recipient = real wallet (receives YES tokens / USDC, pays gas for this call)
-    ///           - traderSig = ephemeral key's EIP-712 ClaimAuth signature authorizing recipient
-    ///
-    ///         The ephemeral key never needs POL for gas — only the recipient wallet does.
-    ///         The ephemeral private key can be discarded after signing the ClaimAuth at order time.
-    ///
-    /// @param batchId    The settled batch to claim from
-    /// @param isBuy      Order direction (true = buy YES, false = sell YES)
-    /// @param amount     Collateral (USDC for buys, YES tokens for sells), 6 decimals
-    /// @param limitPrice Limit price (6-decimal fixed point)
-    /// @param salt       Random blinding factor chosen at order creation
-    /// @param trader     The ephemeral address used as `trader` in the commitment hash
-    /// @param recipient  The real wallet that receives the payout (msg.sender, pays gas)
-    /// @param traderSig  EIP-712 signature from trader: ClaimAuth(batchId, commitment, recipient)
-    function claimPositionFor(
-        uint256 batchId,
-        bool isBuy,
-        uint256 amount,
-        uint256 limitPrice,
-        bytes32 salt,
-        address trader,
-        address recipient,
-        bytes calldata traderSig
-    ) external {
-        Batch storage batch = batches[batchId];
-        if (batch.status != BatchStatus.SETTLED) revert BatchNotSettled();
-
-        // Reconstruct commitment using the ephemeral trader address
-        bytes32 commitment = keccak256(
-            abi.encode(batch.marketId, isBuy, amount, limitPrice, salt, trader)
-        );
-
-        // Verify that the ephemeral trader signed a ClaimAuth authorizing this specific recipient
-        bytes32 structHash = keccak256(abi.encode(CLAIM_AUTH_TYPEHASH, batchId, commitment, recipient));
-        bytes32 digest      = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash));
-        address recovered   = _recoverSigner(digest, traderSig);
-        if (recovered == address(0) || recovered != trader) revert InvalidSignature();
-
-        Position storage pos = positionsByCommitment[batchId][commitment];
-        if (pos.filledAmount == 0 && pos.refundAmount == 0) revert NothingToClaim();
-        if (pos.claimed) revert AlreadyClaimed();
-
-        pos.claimed = true;
-
-        uint256 yesShares = 0;
-
-        if (pos.filledAmount > 0) {
-            if (pos.isBuy) {
-                uint256 totalYes = batch.yesTokensReceived + batch.filledSellYes;
-                if (batch.totalFilledBuyVol > 0 && totalYes > 0) {
-                    yesShares = (pos.filledAmount * totalYes) / batch.totalFilledBuyVol;
-                }
-                if (yesShares > 0) {
-                    uint256 yesTokenId = _getYesTokenId(batch.marketId);
-                    IConditionalTokens(ctf).safeTransferFrom(address(this), recipient, yesTokenId, yesShares, "");
-                }
-            } else {
-                IERC20(usdc).transfer(recipient, pos.filledAmount);
-            }
-        }
-
-        if (pos.refundAmount > 0) {
-            if (pos.isBuy) {
-                IERC20(usdc).transfer(recipient, pos.refundAmount);
-            } else {
-                uint256 yesTokenId = _getYesTokenId(batch.marketId);
-                IConditionalTokens(ctf).safeTransferFrom(address(this), recipient, yesTokenId, pos.refundAmount, "");
-            }
-        }
-
-        emit PositionClaimed(batchId, recipient, yesShares, pos.refundAmount);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
     // Internal helpers
     // ═══════════════════════════════════════════════════════════════════════
 
+    /// @dev Verify each revealed order matches its on-chain commitment.
+    ///      Hash = keccak256(marketId, isBuy, amount, limitPrice, salt) — NO trader address.
     function _verifyCommitments(uint256 batchId, bytes32 marketId, RevealedOrder[] calldata orders) internal view {
         for (uint256 i = 0; i < orders.length; i++) {
             Commitment storage c = commitments[batchId][i];
 
-            // Commitment hash includes trader address — verified without storing it separately
             bytes32 expectedHash = keccak256(
-                abi.encode(marketId, orders[i].isBuy, orders[i].amount, orders[i].limitPrice, orders[i].salt, orders[i].trader)
+                abi.encode(marketId, orders[i].isBuy, orders[i].amount, orders[i].limitPrice, orders[i].salt)
             );
 
             if (c.hash != expectedHash)           revert CommitmentMismatch();
@@ -714,6 +707,7 @@ contract BatchVault {
         }
     }
 
+    /// @dev Sequential hash chain — used by batch clearing ZK proof.
     function _computeCommitmentRoot(uint256 batchId, uint256 count) internal view returns (bytes32 root) {
         root = bytes32(0);
         for (uint256 i = 0; i < count; i++) {
@@ -721,8 +715,27 @@ contract BatchVault {
         }
     }
 
-    /// @notice Assign per-commitment positions based on clearing price.
-    ///         Positions are keyed by commitment hash — no trader address stored.
+    /// @dev Standard binary Merkle tree — used by ZK claim proofs.
+    ///      Pads to next power of 2 with bytes32(0).
+    ///      Internal nodes: keccak256(abi.encode(left, right)).
+    function _buildMerkleRoot(uint256 batchId, uint256 count) internal view returns (bytes32) {
+        if (count == 0) return bytes32(0);
+
+        uint256 n = 1;
+        while (n < count) n <<= 1;
+
+        bytes32[] memory nodes = new bytes32[](2 * n);
+        for (uint256 i = 0; i < count; i++) {
+            nodes[n + i] = commitments[batchId][i].hash;
+        }
+        for (uint256 i = n - 1; i > 0; i--) {
+            nodes[i] = keccak256(abi.encode(nodes[2 * i], nodes[2 * i + 1]));
+        }
+        return nodes[1];
+    }
+
+    /// @dev Assign per-commitment positions based on clearing price.
+    ///      Keyed by commitment hash — no trader address stored.
     function _assignPositions(
         uint256 batchId,
         RevealedOrder[] calldata orders,
@@ -748,16 +761,14 @@ contract BatchVault {
                 }
             } else {
                 if (!o.isBuy) {
-                    // Sell orders: return YES tokens that were deposited upfront
-                    refundAmount = o.amount;
+                    refundAmount = o.amount; // YES tokens returned for unfilled sells
                 }
-                // Buy orders: USDC was never deposited (EIP-3009 deferred payment model).
-                // The user's USDC stayed in their wallet — claimPosition returns NothingToClaim.
+                // Unfilled buy: USDC never deposited (EIP-3009 deferred), nothing to refund
             }
 
-            // Reconstruct commitment hash to key the position — no address stored
+            // Key by commitment hash — no trader address
             bytes32 commitment = keccak256(
-                abi.encode(batch.marketId, o.isBuy, o.amount, o.limitPrice, o.salt, o.trader)
+                abi.encode(batch.marketId, o.isBuy, o.amount, o.limitPrice, o.salt)
             );
             positionsByCommitment[batchId][commitment] = Position({
                 filledAmount: filledAmount,
@@ -811,6 +822,12 @@ contract BatchVault {
         emit VerifierUpdated(newVerifier);
     }
 
+    function setClaimVerifier(address newClaimVerifier) external {
+        if (msg.sender != relayer) revert OnlyRelayer();
+        claimVerifier = IBatchVerifier(newClaimVerifier);
+        emit ClaimVerifierUpdated(newClaimVerifier);
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // View helpers
     // ═══════════════════════════════════════════════════════════════════════
@@ -828,7 +845,6 @@ contract BatchVault {
     }
 
     /// @notice Get position by commitment hash (not trader address).
-    ///         Only the user who knows the commitment preimage can derive this key.
     function getPosition(uint256 batchId, bytes32 commitment) external view returns (Position memory) {
         return positionsByCommitment[batchId][commitment];
     }

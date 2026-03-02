@@ -2,7 +2,10 @@ import "dotenv/config";
 import { createServer } from "node:http";
 import { createPublicClient, http, parseAbiItem } from "viem";
 import { polygon, polygonAmoy } from "viem/chains";
+import { privateKeyToAccount } from "viem/accounts";
+import { createWalletClient } from "viem";
 import { BatchProcessor, BATCH_VAULT_ABI, type RelayerConfig } from "./batchProcessor.js";
+import { ZKClaimProver } from "./zkClaimProver.js";
 
 // ── Environment ───────────────────────────────────────────────────────────────
 const missingVars = ["VAULT_ADDRESS", "RELAYER_PRIVATE_KEY"].filter((v) => !process.env[v]);
@@ -238,6 +241,7 @@ const server = createServer((req, res) => {
             if (data.transferAuth) {
               const ta = data.transferAuth;
               transferAuth = {
+                from:        (ta.from ?? signer) as `0x${string}`, // ephemeral wallet address
                 validAfter:  BigInt(ta.validAfter  ?? "0"),
                 validBefore: BigInt(ta.validBefore ?? "0"),
                 nonce:       (ta.nonce ?? ("0x" + "0".repeat(64))) as `0x${string}`,
@@ -272,6 +276,117 @@ const server = createServer((req, res) => {
         send(200, { ok: true, batchId: batchId.toString(), orders });
       } catch (e: any) {
         send(400, { error: e.message });
+      }
+    });
+    return;
+  }
+
+  // POST /claim-proof
+  //
+  // ZK claim: user sends their order preimage; relayer builds Merkle path,
+  // generates ZK proof, calls claimWithProof() on-chain, and returns txHash.
+  //
+  // Body: { batchId, marketId, isBuy, amount, limitPrice, salt, recipient }
+  // Response: { ok: true, txHash }
+  //
+  // Privacy: the relayer submits claimWithProof() as msg.sender — neither the
+  // user's address nor which specific order is being claimed appears on-chain.
+  // Payout goes to `recipient` (chosen by the user; can be a fresh address).
+  if (req.method === "POST" && req.url === "/claim-proof") {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", async () => {
+      try {
+        const data = JSON.parse(body);
+        const { batchId, marketId, isBuy, amount, limitPrice, salt, recipient } = data;
+
+        if (!batchId || !marketId || isBuy === undefined || !amount || !limitPrice || !salt || !recipient) {
+          send(400, { error: "Missing fields: batchId, marketId, isBuy, amount, limitPrice, salt, recipient" });
+          return;
+        }
+        if (missingVars.length > 0) {
+          send(503, { error: "Relayer not configured — set VAULT_ADDRESS and RELAYER_PRIVATE_KEY" });
+          return;
+        }
+
+        const batchIdBig    = BigInt(batchId);
+        const amountBig     = BigInt(amount);
+        const limitPriceBig = BigInt(limitPrice);
+
+        // 1. Fetch settled batch info from chain
+        const batchRaw = await publicClient.readContract({
+          address:      baseConfig.vaultAddress,
+          abi:          BATCH_VAULT_ABI,
+          functionName: "getBatch",
+          args:         [batchIdBig],
+        }) as {
+          status: number;
+          clearingPrice: bigint;
+          claimMerkleRoot: `0x${string}`;
+          commitmentCount: bigint;
+          yesTokensReceived: bigint;
+          filledSellYes: bigint;
+          totalFilledBuyVol: bigint;
+        };
+
+        if (batchRaw.status !== 2 /* SETTLED */) {
+          send(400, { error: `Batch ${batchId} is not yet settled (status=${batchRaw.status})` });
+          return;
+        }
+
+        // 2. Fetch all commitment hashes from chain
+        const commitmentCount = Number(batchRaw.commitmentCount);
+        const allCommitments: `0x${string}`[] = [];
+        for (let i = 0; i < commitmentCount; i++) {
+          const c = await publicClient.readContract({
+            address:      baseConfig.vaultAddress,
+            abi:          BATCH_VAULT_ABI,
+            functionName: "getCommitment",
+            args:         [batchIdBig, BigInt(i)],
+          }) as { hash: `0x${string}`; amount: bigint; claimed: boolean };
+          allCommitments.push(c.hash);
+        }
+
+        // 3. Generate ZK claim proof
+        const prover = new ZKClaimProver(baseConfig.useRealZk ?? false);
+        const { proof, publicInputs } = await prover.generateProof({
+          batchId:           batchIdBig,
+          claimMerkleRoot:   batchRaw.claimMerkleRoot,
+          clearingPrice:     batchRaw.clearingPrice,
+          totalFilledBuyVol: batchRaw.totalFilledBuyVol,
+          yesTokensReceived: batchRaw.yesTokensReceived,
+          filledSellYes:     batchRaw.filledSellYes,
+          marketId:          marketId  as `0x${string}`,
+          isBuy:             Boolean(isBuy),
+          amount:            amountBig,
+          limitPrice:        limitPriceBig,
+          salt:              salt      as `0x${string}`,
+          allCommitments,
+          recipient:         recipient as `0x${string}`,
+        });
+
+        // 4. Submit claimWithProof() on-chain (relayer is msg.sender — no trader address leaked)
+        const account     = privateKeyToAccount(baseConfig.relayerPrivateKey);
+        const chain       = baseConfig.chainId === polygon.id ? polygon : polygonAmoy;
+        const walletClient = createWalletClient({ chain, transport: http(baseConfig.rpcUrl), account });
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const txHash = await (walletClient.writeContract as (p: any) => Promise<`0x${string}`>)({
+          address:      baseConfig.vaultAddress,
+          abi:          BATCH_VAULT_ABI,
+          functionName: "claimWithProof",
+          args:         [batchIdBig, proof, publicInputs],
+          maxPriorityFeePerGas: 30_000_000_000n,
+          maxFeePerGas:         35_000_000_000n,
+        });
+
+        await publicClient.waitForTransactionReceipt({ hash: txHash });
+        console.log(`[Relayer] claimWithProof tx: ${txHash} (batch ${batchId}, recipient ${recipient})`);
+
+        send(200, { ok: true, txHash });
+      } catch (e: any) {
+        console.error("[Relayer] /claim-proof error:", e?.message ?? e);
+        send(400, { error: e?.message ?? "Claim proof failed" });
       }
     });
     return;
@@ -345,6 +460,7 @@ server.listen(PORT, () => {
   console.log(`[Relayer]   GET  /health                               — liveness check`);
   console.log(`[Relayer]   POST /warm                                 — pre-open a batch for a market (fire-and-forget)`);
   console.log(`[Relayer]   POST /order                                — submit off-chain order details (include marketId)`);
+  console.log(`[Relayer]   POST /claim-proof                          — generate ZK claim proof and submit claimWithProof()`);
   console.log(`[Relayer]   POST /admin/force-advance?marketId=0x...   — skip stuck SETTLING batch`);
 });
 

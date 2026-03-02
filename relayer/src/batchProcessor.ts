@@ -17,7 +17,9 @@ const AMOY_GAS = {
 // The contract only calls transferWithAuthorization when isBuy && orderFills, so
 // zero auths for other orders are safely ignored.
 const ZERO_BYTES32 = ("0x" + "0".repeat(64)) as `0x${string}`;
+const ZERO_ADDRESS  = ("0x" + "0".repeat(40)) as `0x${string}`;
 const ZERO_TRANSFER_AUTH: TransferAuth = {
+  from:        ZERO_ADDRESS,
   validAfter:  0n,
   validBefore: 0n,
   nonce:       ZERO_BYTES32,
@@ -88,7 +90,6 @@ export const BATCH_VAULT_ABI = [
         name: "orders",
         type: "tuple[]",
         components: [
-          { name: "trader",     type: "address" },
           { name: "isBuy",      type: "bool"    },
           { name: "amount",     type: "uint256" },
           { name: "limitPrice", type: "uint256" },
@@ -97,10 +98,12 @@ export const BATCH_VAULT_ABI = [
       },
       // EIP-3009 transfer authorizations — one per order (same index as orders[]).
       // For sell orders and unfilled buy orders, pass zero-value struct (ignored by contract).
+      // `from` = ephemeral wallet address (source of USDC pull for filled buy orders).
       {
         name: "auths",
         type: "tuple[]",
         components: [
+          { name: "from",        type: "address" },
           { name: "validAfter",  type: "uint256" },
           { name: "validBefore", type: "uint256" },
           { name: "nonce",       type: "bytes32" },
@@ -141,6 +144,7 @@ export const BATCH_VAULT_ABI = [
           { name: "totalFilledBuyVol", type: "uint256" },
           { name: "commitmentCount",   type: "uint256" },
           { name: "commitmentRoot",    type: "bytes32" },
+          { name: "claimMerkleRoot",   type: "bytes32" },
         ],
       },
     ],
@@ -172,6 +176,26 @@ export const BATCH_VAULT_ABI = [
     type: "function",
     inputs: [{ name: "marketId", type: "bytes32" }],
     outputs: [{ name: "", type: "uint256" }],
+    stateMutability: "view",
+  },
+  {
+    // ZK claim: prove order membership in Merkle tree without revealing which leaf.
+    // Payout goes to recipient derived from publicInputs[4].
+    name: "claimWithProof",
+    type: "function",
+    inputs: [
+      { name: "batchId",      type: "uint256" },
+      { name: "proof",        type: "bytes"   },
+      { name: "publicInputs", type: "bytes32[]" },
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+  {
+    name: "usedNullifiers",
+    type: "function",
+    inputs: [{ name: "nullifier", type: "bytes32" }],
+    outputs: [{ name: "", type: "bool" }],
     stateMutability: "view",
   },
   // Note: events are not listed here — index.ts uses parseAbiItem() for getLogs
@@ -568,8 +592,9 @@ export class BatchProcessor {
         : order.limitPrice <= effectiveClearingPrice;
 
       if (order.isBuy && isFilled && order.transferAuth) {
-        console.log(`[BatchProcessor] Including TransferAuth for filled buy order (trader=${order.trader})`);
-        return order.transferAuth;
+        console.log(`[BatchProcessor] Including TransferAuth for filled buy order (ephemeral=${order.trader})`);
+        // Ensure `from` = ephemeral wallet address (stored as order.trader)
+        return { ...order.transferAuth, from: order.trader };
       }
 
       if (order.isBuy && isFilled && !order.transferAuth) {
@@ -587,13 +612,13 @@ export class BatchProcessor {
       args: [
         batchId,
         orders.map((o) => ({
-          trader:     o.trader,
           isBuy:      o.isBuy,
           amount:     o.amount,
           limitPrice: o.limitPrice,
           salt:       o.salt,
         })),
         auths.map((a) => ({
+          from:        a.from,
           validAfter:  a.validAfter,
           validBefore: a.validBefore,
           nonce:       a.nonce,
@@ -670,7 +695,7 @@ export class BatchProcessor {
     return matched;
   }
 
-  /** Mirror BatchVault._executeCommit commitment hash computation */
+  /** Mirror BatchVault._executeCommit commitment hash computation (no trader address) */
   private _computeCommitmentHash(marketId: `0x${string}`, order: Order): `0x${string}` {
     return keccak256(
       encodeAbiParameters(
@@ -680,10 +705,44 @@ export class BatchProcessor {
           { type: "uint256" },
           { type: "uint256" },
           { type: "bytes32" },
-          { type: "address" },
         ],
-        [marketId, order.isBuy, order.amount, order.limitPrice, order.salt, order.trader],
+        [marketId, order.isBuy, order.amount, order.limitPrice, order.salt],
       ),
     );
+  }
+
+  /** Build a standard binary Merkle tree over `leaves`. Returns all nodes (1-indexed). */
+  static buildMerkleTree(leaves: `0x${string}`[]): `0x${string}`[] {
+    if (leaves.length === 0) return [ZERO_BYTES32];
+    let n = 1;
+    while (n < leaves.length) n <<= 1;
+    // nodes[0] unused, nodes[1] = root, nodes[n..2n-1] = leaves
+    const nodes: `0x${string}`[] = new Array(2 * n).fill(ZERO_BYTES32);
+    for (let i = 0; i < leaves.length; i++) {
+      nodes[n + i] = leaves[i];
+    }
+    for (let i = n - 1; i > 0; i--) {
+      nodes[i] = keccak256(
+        encodeAbiParameters(
+          [{ type: "bytes32" }, { type: "bytes32" }],
+          [nodes[2 * i], nodes[2 * i + 1]],
+        ),
+      );
+    }
+    return nodes;
+  }
+
+  /** Get the Merkle path (sibling hashes) for a leaf at `leafIndex` in a tree of `n` leaves. */
+  static getMerklePath(leaves: `0x${string}`[], leafIndex: number): `0x${string}`[] {
+    const nodes = BatchProcessor.buildMerkleTree(leaves);
+    const n = nodes.length / 2; // padded power-of-2 size
+    const path: `0x${string}`[] = [];
+    let pos = n + leafIndex;
+    while (pos > 1) {
+      const siblingPos = pos % 2 === 0 ? pos + 1 : pos - 1;
+      path.push(nodes[siblingPos]);
+      pos = Math.floor(pos / 2);
+    }
+    return path;
   }
 }

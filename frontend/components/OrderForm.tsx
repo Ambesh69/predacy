@@ -106,7 +106,7 @@ export default function OrderForm({
           ? (isBuy ? MARKET_BUY_LIMIT : MARKET_SELL_LIMIT)
           : BigInt(limitPrice));
       const isOrderBuy = mode === "buy" ? isBuy : false; // sell mode always isBuy=false
-      setCommitment(computeCommitment({ marketId, isBuy: isOrderBuy, amount: amountParsed, limitPrice: effLP, salt, trader: walletAddress }));
+      setCommitment(computeCommitment({ marketId, isBuy: isOrderBuy, amount: amountParsed, limitPrice: effLP, salt }));
     } catch { /* ignore parse errors while typing */ }
   }, [walletAddress, amountDisplay, isBuy, limitPrice, orderType, marketId, salt, mode]);
 

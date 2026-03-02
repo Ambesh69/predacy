@@ -2,6 +2,7 @@
 ///         Signed off-chain by the user at order time; submitted by the relayer
 ///         at settlement for filled buy orders only.
 export interface TransferAuth {
+  from:        `0x${string}`; // ephemeral wallet address (source of USDC pull)
   validAfter:  bigint;         // 0 = valid immediately
   validBefore: bigint;         // expiry unix timestamp
   nonce:       `0x${string}`; // random bytes32 chosen by user
@@ -36,8 +37,11 @@ export interface BatchInfo {
   clearingPrice: bigint;
   netBuyAmount: bigint;
   yesTokensReceived: bigint;
+  filledSellYes: bigint;
+  totalFilledBuyVol: bigint;
   commitmentCount: bigint;
   commitmentRoot: `0x${string}`;
+  claimMerkleRoot: `0x${string}`;
 }
 
 export enum BatchStatus {
