@@ -448,8 +448,11 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       });
 
       // 4. Recompute commitment (no trader address — salt is the 256-bit secret credential)
+      // Use `id` (the Polymarket conditionId from the URL) — NOT batch.batchMarketId,
+      // which is bytes32(0) when no batch is open yet (MOCK_BATCH). The contract verifies
+      // commitment hashes using batch.marketId at settlement, so they must match.
       const actualCommitment = computeCommitment({
-        marketId:   batch.batchMarketId,
+        marketId:   id as `0x${string}`,
         isBuy:      params.isBuy,
         amount:     params.amount,
         limitPrice: params.limitPrice,
@@ -569,10 +572,13 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         }),
       });
 
+      const relayerData = await resp.json().catch(() => ({}));
       if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ error: "Relayer error" }));
-        throw new Error(err.error ?? `Relayer returned ${resp.status}`);
+        throw new Error(relayerData.error ?? `Relayer returned ${resp.status}`);
       }
+      // Use actual batchId from relayer (may differ from batch.batchId when batch
+      // was just opened on-demand for this market).
+      const actualBatchId: string = relayerData.batchId ?? batch.batchId.toString();
 
       // Update local state optimistically
       if (walletAddress) {
@@ -601,7 +607,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
           amount:         params.amount.toString(),
           isBuy:          true,
           limitPrice:     params.limitPrice.toString(),
-          batchId:        batch.batchId.toString(),
+          batchId:        actualBatchId,
           marketId:       id,
           marketQuestion: market?.question ?? null,
           timestamp:      Date.now(),

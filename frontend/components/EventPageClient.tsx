@@ -674,12 +674,14 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       });
 
       const actualCommitment = computeCommitment({
-        marketId:   batch.batchMarketId,
+        // Use the actual Polymarket conditionId — this is what the contract uses
+        // in _verifyCommitments at settlement. Using batch.batchMarketId was wrong
+        // when batch.batchId === 0n (MOCK_BATCH has bytes32(0) as marketId).
+        marketId:   selectedMarket.conditionId as `0x${string}`,
         isBuy:      true,
         amount:     params.amount,
         limitPrice: params.limitPrice,
         salt:       params.salt,
-        // No trader address — salt is the secret credential (see commitmentHash.ts)
       });
 
       const ephemeralNonce = await publicClient.readContract({
@@ -746,10 +748,13 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
           transferAuth,
         }),
       });
+      const relayerData = await resp.json().catch(() => ({}));
       if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ error: "Relayer error" }));
-        throw new Error(err.error ?? `Relayer returned ${resp.status}`);
+        throw new Error(relayerData.error ?? `Relayer returned ${resp.status}`);
       }
+      // Use the actual batchId returned by the relayer — it may differ from
+      // batch.batchId if the batch was just opened on-demand for this market.
+      const actualBatchId: string = relayerData.batchId ?? batch.batchId.toString();
 
       if (walletAddress) {
         setCommitments((prev) => [...prev, { hash: actualCommitment, amount: params.amount, trader: walletAddress, timestamp: Date.now() }]);
@@ -765,7 +770,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
             amount:         params.amount.toString(),
             isBuy:          true,
             limitPrice:     params.limitPrice.toString(),
-            batchId:        batch.batchId.toString(),
+            batchId:        actualBatchId,
             marketId:       selectedMarket.conditionId,
             marketQuestion: selectedMarket.question ?? null,
             timestamp:      Date.now(),

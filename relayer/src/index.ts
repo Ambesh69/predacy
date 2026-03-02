@@ -272,8 +272,11 @@ const server = createServer((req, res) => {
           await processor.receiveOrder(BigInt(batchId), order);
         }
 
-        const orders = await processor.orderCount(BigInt(batchId));
-        send(200, { ok: true, batchId: batchId.toString(), orders });
+        const actualBatchId = state.currentBatchId ?? BigInt(batchId);
+        const orders = await processor.orderCount(actualBatchId);
+        // Return the ACTUAL on-chain batchId (not the one from the request body,
+        // which may be stale/0 when the client submits before its first poll).
+        send(200, { ok: true, batchId: actualBatchId.toString(), orders });
       } catch (e: any) {
         send(400, { error: e.message });
       }
