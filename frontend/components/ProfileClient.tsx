@@ -309,6 +309,50 @@ function ActivityRow({ order }: { order: OrderEntry }) {
   );
 }
 
+// ── Sparkline chart ───────────────────────────────────────────────────────────
+
+function SparklineChart({ points, positive }: { points: number[]; positive: boolean }) {
+  if (points.length < 2) {
+    // Single point or no data — render a flat line
+    const color = positive ? "#22c55e" : "#ef4444";
+    return (
+      <svg viewBox="0 0 200 60" className="w-full h-full" preserveAspectRatio="none">
+        <line x1="0" y1="30" x2="200" y2="30" stroke={color} strokeWidth="1.5" strokeOpacity="0.4" />
+      </svg>
+    );
+  }
+
+  const min = Math.min(...points);
+  const max = Math.max(...points);
+  const range = max - min || 1;
+  const pad = 6;
+  const w = 200, h = 60;
+
+  const coords = points.map((v, i) => {
+    const x = (i / (points.length - 1)) * w;
+    const y = h - pad - ((v - min) / range) * (h - pad * 2);
+    return [x, y];
+  });
+
+  const pathD = coords.map(([x, y], i) => `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+  const areaD = `${pathD} L${w},${h} L0,${h} Z`;
+  const color = positive ? "#22c55e" : "#ef4444";
+  const gradId = `spark-${positive ? "pos" : "neg"}`;
+
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-full" preserveAspectRatio="none">
+      <defs>
+        <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity="0.25" />
+          <stop offset="100%" stopColor={color} stopOpacity="0.02" />
+        </linearGradient>
+      </defs>
+      <path d={areaD} fill={`url(#${gradId})`} />
+      <path d={pathD} fill="none" stroke={color} strokeWidth="1.5" />
+    </svg>
+  );
+}
+
 // ── Pending order row (Active tab) ────────────────────────────────────────────
 
 function PendingRow({ order }: { order: OrderEntry }) {
@@ -1019,6 +1063,41 @@ export default function ProfileClient() {
   const pnlDisplay = hasPnlData
     ? (totalPnl >= 0 ? `+$${totalPnl.toFixed(2)}` : `-$${Math.abs(totalPnl).toFixed(2)}`)
     : (enriching ? "…" : "—");
+
+  // Current value of live (unresolved) positions
+  const positionsValue = settledOrders.reduce((sum, o) => {
+    if (!o.shares || o.currentYesPrice == null) return sum;
+    const outcomePrice = o.isBuy ? o.currentYesPrice : 1 - o.currentYesPrice;
+    return sum + o.shares * outcomePrice;
+  }, 0);
+
+  // Biggest single-position win (max positive P&L across all settled positions)
+  const biggestWin = pnlPositions.reduce((best, o) => {
+    const outcomePrice = o.isBuy ? (o.currentYesPrice ?? 0) : 1 - (o.currentYesPrice ?? 0);
+    const cv = (o.shares ?? 0) * outcomePrice;
+    const pnl = cv - Number(o.filledAmount ?? 0n) / 1e6;
+    return pnl > best ? pnl : best;
+  }, 0);
+
+  // Sparkline: cumulative P&L across settled orders sorted by timestamp
+  const sparkPoints = (() => {
+    const sorted = pnlPositions.slice().sort((a, b) => a.timestamp - b.timestamp);
+    let running = 0;
+    const pts = [0]; // start at zero
+    for (const o of sorted) {
+      const outcomePrice = o.isBuy ? (o.currentYesPrice ?? 0) : 1 - (o.currentYesPrice ?? 0);
+      const cv = (o.shares ?? 0) * outcomePrice;
+      running += cv - Number(o.filledAmount ?? 0n) / 1e6;
+      pts.push(running);
+    }
+    return pts;
+  })();
+
+  // Joined date from earliest order timestamp
+  const joinedDate = orders.length > 0
+    ? new Date(Math.min(...orders.map((o) => o.timestamp))).toLocaleDateString("en-US", { month: "short", year: "numeric" })
+    : null;
+
   const shortAddr     = walletAddress
     ? `${walletAddress.slice(0, 6)}…${walletAddress.slice(-4)}`
     : "";
@@ -1115,161 +1194,184 @@ export default function ProfileClient() {
       </div>
 
       <div className="flex-1 px-4 md:px-8 py-6 max-w-4xl mx-auto w-full space-y-6">
-        {/* ── Profile hero ──────────────────────────────────────────────── */}
-        <div className="border border-border p-5 md:p-6">
-          <div className="flex flex-col md:flex-row items-start md:items-center gap-5 md:gap-0">
+        {/* ── Profile cards (Polymarket-style two-panel) ────────────────── */}
+        <div className="grid grid-cols-1 md:grid-cols-2 border border-border">
 
-            {/* Avatar + identity */}
-            <div className="flex items-center gap-4 md:pr-6 md:mr-6 md:border-r md:border-border flex-shrink-0">
-              <WalletAvatar address={walletAddress ?? ""} size={56} />
-              <div className="min-w-0">
+          {/* ── Left card: identity + stats ─────────────────────────── */}
+          <div className="p-5 md:border-r md:border-border space-y-5">
+            {/* Avatar + handle + address */}
+            <div className="flex items-center gap-4">
+              <WalletAvatar address={walletAddress ?? ""} size={64} />
+              <div className="min-w-0 flex-1">
                 <p
-                  className="text-lg font-black text-text tracking-tight leading-none mb-1"
+                  className="text-xl font-black text-text tracking-tight leading-none mb-1"
                   style={{ fontFamily: "var(--font-display)" }}
                 >
                   {walletAddress ? walletAddress.slice(2, 6).toUpperCase() : "——"}
                 </p>
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="hash-text text-[11px] text-muted">{shortAddr}</span>
-                  <CopyButton value={walletAddress ?? ""} label="copy" />
-                  <a
-                    href={`${EXPLORER}/address/${walletAddress}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-[10px] text-accent/60 hover:text-accent transition-colors tracking-wider"
-                  >
-                    ↗
-                  </a>
-                </div>
+                <p className="text-[10px] text-muted-dim">
+                  {joinedDate ? `Joined ${joinedDate}` : "Predacy Trader"}
+                </p>
+              </div>
+              <div className="flex items-center gap-1.5 flex-shrink-0">
+                <CopyButton value={walletAddress ?? ""} label="copy" />
+                <a
+                  href={`${EXPLORER}/address/${walletAddress}`}
+                  target="_blank" rel="noopener noreferrer"
+                  className="text-[10px] text-muted hover:text-accent border border-border px-1.5 py-0.5 transition-colors"
+                >
+                  ↗
+                </a>
               </div>
             </div>
 
-            {/* Stats strip */}
-            <div className="flex items-start flex-wrap gap-y-4 divide-x divide-border w-full md:w-auto">
-              {/* BALANCE */}
-              <div className="px-5 first:pl-0 md:first:pl-5">
-                <p className="text-[9px] text-muted tracking-widest uppercase mb-1">BALANCE</p>
-                <p className="text-xl font-black leading-tight text-text" style={{ fontFamily: "var(--font-display)" }}>
-                  {usdcBalance === null ? "—" : `$${(Number(usdcBalance) / 1e6).toFixed(2)}`}
+            {/* Stats row */}
+            <div className="flex items-start gap-0 divide-x divide-border">
+              <div className="pr-5">
+                <p className="text-base font-black text-text leading-tight" style={{ fontFamily: "var(--font-display)" }}>
+                  {enriching ? "…" : `$${positionsValue.toFixed(2)}`}
                 </p>
-                <p className="text-[9px] text-muted-dim mt-0.5">available</p>
+                <p className="text-[10px] text-muted-dim mt-0.5">Positions Value</p>
               </div>
-              {/* P&L */}
               <div className="px-5">
-                <p className="text-[9px] text-muted tracking-widest uppercase mb-1">P&amp;L</p>
-                <p
-                  className={clsx(
-                    "text-xl font-black leading-tight",
-                    !hasPnlData ? "text-muted" :
-                    totalPnl >= 0 ? "text-accent" : "text-danger"
-                  )}
-                  style={{ fontFamily: "var(--font-display)" }}
-                >
-                  {pnlDisplay}
+                <p className="text-base font-black text-text leading-tight" style={{ fontFamily: "var(--font-display)" }}>
+                  {hasPnlData && biggestWin > 0 ? `$${biggestWin.toFixed(2)}` : "—"}
                 </p>
-                <p className="text-[9px] text-muted-dim mt-0.5">open positions</p>
+                <p className="text-[10px] text-muted-dim mt-0.5">Biggest Win</p>
               </div>
-              {/* ORDERS */}
               <div className="px-5">
-                <p className="text-[9px] text-muted tracking-widest uppercase mb-1">ORDERS</p>
-                <p className="text-xl font-black leading-tight text-text" style={{ fontFamily: "var(--font-display)" }}>
-                  {loading ? "—" : String(totalOrders)}
+                <p className="text-base font-black text-text leading-tight" style={{ fontFamily: "var(--font-display)" }}>
+                  {loading ? "—" : totalOrders}
                 </p>
-                <p className="text-[9px] text-muted-dim mt-0.5">sealed bids</p>
+                <p className="text-[10px] text-muted-dim mt-0.5">Predictions</p>
               </div>
-              {/* PRIVACY */}
-              <div className="px-5">
-                <p className="text-[9px] text-muted tracking-widest uppercase mb-1">PRIVACY</p>
-                <p className="text-xl font-black leading-tight text-accent" style={{ fontFamily: "var(--font-display)" }}>
+              <div className="pl-5">
+                <p className="text-base font-black text-accent leading-tight" style={{ fontFamily: "var(--font-display)" }}>
                   ZK ✓
                 </p>
-                <p className="text-[9px] text-muted-dim mt-0.5">proof system</p>
+                <p className="text-[10px] text-muted-dim mt-0.5">Privacy</p>
               </div>
             </div>
 
-          </div>
-        </div>
-
-        {/* ── Payout address (compact strip) ────────────────────────────── */}
-        <div className="border border-border border-t-0">
-          {!editingRecipient ? (
-            <div className="px-5 py-2.5 flex items-center gap-3">
-              <span className="text-[9px] text-muted tracking-widest uppercase whitespace-nowrap flex-shrink-0">
-                Payout
-              </span>
-              <span className="hash-text text-[11px] text-muted-dim flex-1 truncate">
-                {claimRecipient || walletAddress}
-              </span>
-              {claimRecipient && claimRecipient.toLowerCase() !== walletAddress?.toLowerCase() && (
-                <span className="text-[9px] text-accent/50 flex-shrink-0">↳ custom</span>
-              )}
-              <button
-                onClick={() => { setRecipientDraft(claimRecipient); setEditingRecipient(true); }}
-                className="flex-shrink-0 text-[9px] text-muted hover:text-text border border-border px-2 py-0.5 tracking-widest transition-colors"
-              >
-                EDIT
-              </button>
-            </div>
-          ) : (
-            <div className="px-5 py-3 space-y-2">
-              <div className="flex items-center gap-2">
-                <span className="text-[9px] text-muted tracking-widest uppercase whitespace-nowrap flex-shrink-0">
-                  Payout
-                </span>
-                <input
-                  type="text"
-                  value={recipientDraft}
-                  onChange={(e) => setRecipientDraft(e.target.value)}
-                  placeholder={walletAddress ?? ""}
-                  autoFocus
-                  className="flex-1 bg-surface border border-border px-2 py-1 text-[10px] font-mono text-text placeholder-muted-dim focus:outline-none focus:border-accent/40"
-                />
-              </div>
-              <div className="flex gap-2 items-center">
-                <button
-                  onClick={() => {
-                    const addr = recipientDraft.trim();
-                    if (addr && !/^0x[0-9a-fA-F]{40}$/.test(addr)) return;
-                    if (walletAddress) {
-                      const key = `predacy:claim-recipient:${walletAddress.toLowerCase()}`;
-                      if (addr) { localStorage.setItem(key, addr); setClaimRecipient(addr); }
-                      else      { localStorage.removeItem(key);    setClaimRecipient("");   }
-                    }
-                    setEditingRecipient(false);
-                  }}
-                  disabled={recipientDraft.trim() !== "" && !/^0x[0-9a-fA-F]{40}$/.test(recipientDraft.trim())}
-                  className="px-3 py-1 border border-accent text-accent text-[9px] tracking-widest uppercase hover:bg-accent/5 transition-colors disabled:opacity-30"
-                >
-                  SAVE
-                </button>
-                <button
-                  onClick={() => setEditingRecipient(false)}
-                  className="px-3 py-1 border border-border text-muted text-[9px] tracking-widest uppercase hover:text-text transition-colors"
-                >
-                  CANCEL
-                </button>
-                {claimRecipient && (
+            {/* Payout address */}
+            <div className="border-t border-border/50 pt-3">
+              {!editingRecipient ? (
+                <div className="flex items-center gap-2">
+                  <span className="text-[9px] text-muted tracking-widest uppercase whitespace-nowrap flex-shrink-0">
+                    Payout
+                  </span>
+                  <span className="hash-text text-[10px] text-muted-dim flex-1 truncate">
+                    {claimRecipient || walletAddress}
+                  </span>
+                  {claimRecipient && claimRecipient.toLowerCase() !== walletAddress?.toLowerCase() && (
+                    <span className="text-[9px] text-accent/50 flex-shrink-0">↳ custom</span>
+                  )}
                   <button
-                    onClick={() => {
-                      if (walletAddress) localStorage.removeItem(`predacy:claim-recipient:${walletAddress.toLowerCase()}`);
-                      setClaimRecipient("");
-                      setRecipientDraft("");
-                      setEditingRecipient(false);
-                    }}
-                    className="ml-auto text-[9px] text-muted-dim hover:text-danger transition-colors tracking-widest"
+                    onClick={() => { setRecipientDraft(claimRecipient); setEditingRecipient(true); }}
+                    className="flex-shrink-0 text-[9px] text-muted hover:text-text border border-border px-2 py-0.5 tracking-widest transition-colors"
                   >
-                    RESET
+                    EDIT
                   </button>
-                )}
-              </div>
-              <p className="text-[9px] text-muted-dim">
-                {claimRecipient && claimRecipient.toLowerCase() !== walletAddress?.toLowerCase()
-                  ? <span className="text-accent/60">↳ custom address set — payouts routed privately</span>
-                  : <span>↳ use a fresh address for full claim privacy</span>
-                }
-              </p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[9px] text-muted tracking-widest uppercase whitespace-nowrap flex-shrink-0">Payout</span>
+                    <input
+                      type="text"
+                      value={recipientDraft}
+                      onChange={(e) => setRecipientDraft(e.target.value)}
+                      placeholder={walletAddress ?? ""}
+                      autoFocus
+                      className="flex-1 bg-surface border border-border px-2 py-1 text-[10px] font-mono text-text placeholder-muted-dim focus:outline-none focus:border-accent/40"
+                    />
+                  </div>
+                  <div className="flex gap-2 items-center">
+                    <button
+                      onClick={() => {
+                        const addr = recipientDraft.trim();
+                        if (addr && !/^0x[0-9a-fA-F]{40}$/.test(addr)) return;
+                        if (walletAddress) {
+                          const key = `predacy:claim-recipient:${walletAddress.toLowerCase()}`;
+                          if (addr) { localStorage.setItem(key, addr); setClaimRecipient(addr); }
+                          else      { localStorage.removeItem(key);    setClaimRecipient("");   }
+                        }
+                        setEditingRecipient(false);
+                      }}
+                      disabled={recipientDraft.trim() !== "" && !/^0x[0-9a-fA-F]{40}$/.test(recipientDraft.trim())}
+                      className="px-3 py-1 border border-accent text-accent text-[9px] tracking-widest uppercase hover:bg-accent/5 transition-colors disabled:opacity-30"
+                    >
+                      SAVE
+                    </button>
+                    <button
+                      onClick={() => setEditingRecipient(false)}
+                      className="px-3 py-1 border border-border text-muted text-[9px] tracking-widest uppercase hover:text-text transition-colors"
+                    >
+                      CANCEL
+                    </button>
+                    {claimRecipient && (
+                      <button
+                        onClick={() => {
+                          if (walletAddress) localStorage.removeItem(`predacy:claim-recipient:${walletAddress.toLowerCase()}`);
+                          setClaimRecipient(""); setRecipientDraft(""); setEditingRecipient(false);
+                        }}
+                        className="ml-auto text-[9px] text-muted-dim hover:text-danger transition-colors tracking-widest"
+                      >
+                        RESET
+                      </button>
+                    )}
+                  </div>
+                  <p className="text-[9px] text-muted-dim">
+                    {claimRecipient && claimRecipient.toLowerCase() !== walletAddress?.toLowerCase()
+                      ? <span className="text-accent/60">↳ custom address — payouts routed privately</span>
+                      : <span>↳ use a fresh address for full claim privacy</span>}
+                  </p>
+                </div>
+              )}
             </div>
-          )}
+          </div>
+
+          {/* ── Right card: Profit/Loss + sparkline ─────────────────── */}
+          <div className="p-5 flex flex-col">
+            {/* Header row */}
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-1.5">
+                <span className={clsx(
+                  "text-[11px]",
+                  !hasPnlData ? "text-muted" : totalPnl >= 0 ? "text-accent" : "text-danger",
+                )}>
+                  {!hasPnlData ? "◆" : totalPnl >= 0 ? "▲" : "▼"}
+                </span>
+                <span className="text-[12px] font-medium text-text tracking-wide">Profit/Loss</span>
+              </div>
+              <span className="text-[9px] text-accent/50 border border-accent/20 px-1.5 py-0.5 tracking-widest">
+                ZK SEALED
+              </span>
+            </div>
+
+            {/* P&L amount */}
+            <p
+              className={clsx(
+                "text-3xl font-black leading-tight mb-0.5",
+                !hasPnlData ? "text-muted" : totalPnl >= 0 ? "text-accent" : "text-danger",
+              )}
+              style={{ fontFamily: "var(--font-display)" }}
+            >
+              {enriching ? "…" : (hasPnlData
+                ? (totalPnl >= 0 ? `+$${totalPnl.toFixed(2)}` : `-$${Math.abs(totalPnl).toFixed(2)}`)
+                : "$0.00"
+              )}
+            </p>
+            <p className="text-[10px] text-muted-dim mb-4">
+              All-Time · {usdcBalance !== null ? `$${(Number(usdcBalance) / 1e6).toFixed(2)} balance` : "…"}
+            </p>
+
+            {/* Sparkline */}
+            <div className="flex-1 min-h-[56px]">
+              <SparklineChart points={sparkPoints} positive={totalPnl >= 0} />
+            </div>
+          </div>
+
         </div>
 
         {/* ── Privacy breakdown ─────────────────────────────────────────── */}
