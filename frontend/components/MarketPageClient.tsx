@@ -280,7 +280,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     fetchBatch();
     const interval = setInterval(fetchBatch, 5000);
     return () => { cancelled = true; clearInterval(interval); };
-  }, []);
+  }, [id]);
 
   // ── Poll position when batch is SETTLED ─────────────────────────────────────
   // Position is keyed by commitment hash (not wallet address) — look up from localStorage.

@@ -70,7 +70,9 @@ function CopyButton({ value, label }: { value: string; label?: string }) {
   };
   return (
     <button
+      type="button"
       onClick={copy}
+      aria-label="Copy value"
       className="text-[10px] text-muted hover:text-accent transition-colors px-1.5 py-0.5 border border-border hover:border-accent/30"
       title="Copy"
     >
@@ -133,7 +135,15 @@ function OrderRow({ order }: { order: OrderEntry }) {
       {/* ── Main clickable row ─────────────────────────────────────────── */}
       <div
         className="p-4 cursor-pointer select-none"
+        role="button"
+        tabIndex={0}
         onClick={() => setExpanded((e) => !e)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setExpanded((prev) => !prev);
+          }
+        }}
       >
         <div className="flex items-start justify-between gap-4">
           {/* Left: batch + market */}

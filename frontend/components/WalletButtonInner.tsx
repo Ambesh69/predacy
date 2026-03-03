@@ -33,6 +33,7 @@ export default function WalletButtonInner({ compact = false }: Props) {
       >
         {/* Address → profile */}
         <button
+          type="button"
           onClick={() => router.push("/profile")}
           className={clsx(
             "flex items-center gap-2 tracking-widest uppercase text-text hover:bg-surface/50 transition-colors",
@@ -44,7 +45,9 @@ export default function WalletButtonInner({ compact = false }: Props) {
         </button>
         {/* Disconnect */}
         <button
+          type="button"
           onClick={(e) => { e.stopPropagation(); logout(); }}
+          aria-label="Disconnect wallet"
           title="Disconnect wallet"
           className={clsx(
             "text-muted hover:text-danger hover:bg-surface/50 transition-colors",
@@ -59,6 +62,7 @@ export default function WalletButtonInner({ compact = false }: Props) {
 
   return (
     <button
+      type="button"
       onClick={login}
       className={clsx(
         "border transition-colors tracking-widest uppercase",
