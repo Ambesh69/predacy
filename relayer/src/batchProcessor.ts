@@ -226,9 +226,10 @@ export interface RelayerConfig {
   useRealZk?: boolean;      // true = generate real UltraHonk proofs via bb; default false (mock)
   adapterAddress?: `0x${string}`; // PublicInputAdapter address (required when useRealZk=true)
   polymarket: {
-    apiKey: string;
-    apiSecret: string;
-    apiPassphrase: string;
+    apiKey:          string;
+    apiSecret:       string;
+    apiPassphrase:   string;
+    signerPrivateKey?: `0x${string}`; // EIP-712 order signing key (maker address must match API key owner)
   };
   batchWindowMs: number;
 }
@@ -283,6 +284,7 @@ export class BatchProcessor {
       config.polymarket.apiKey,
       config.polymarket.apiSecret,
       config.polymarket.apiPassphrase,
+      config.polymarket.signerPrivateKey,
     );
     this.store = createOrderStore(config.redisUrl);
   }

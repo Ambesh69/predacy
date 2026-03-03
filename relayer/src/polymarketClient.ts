@@ -1,37 +1,106 @@
 import axios from "axios";
 import { createHmac } from "node:crypto";
+import { privateKeyToAccount } from "viem/accounts";
 import type { PolymarketMarket } from "./types.js";
 
 const CLOB_API  = "https://clob.polymarket.com";
 const GAMMA_API = "https://gamma-api.polymarket.com";
 
+/**
+ * Polymarket CTFExchange on Polygon mainnet.
+ * All orders are signed against this contract's EIP-712 domain.
+ */
+const CTF_EXCHANGE = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E" as const;
+const POLYGON_CHAIN_ID = 137;
+
+/**
+ * EIP-712 domain for Polymarket CTF Exchange.
+ * Fixed to Polygon mainnet — Polymarket CLOB only operates on mainnet.
+ */
+const POLYMARKET_DOMAIN = {
+  name:              "CTF Exchange",
+  version:           "1",
+  chainId:           POLYGON_CHAIN_ID,
+  verifyingContract: CTF_EXCHANGE,
+} as const;
+
+/**
+ * EIP-712 Order type definition.
+ * Matches the Order struct in Polymarket's CTFExchange contract.
+ */
+const ORDER_TYPES = {
+  Order: [
+    { name: "salt",          type: "uint256" },
+    { name: "maker",         type: "address" },
+    { name: "signer",        type: "address" },
+    { name: "taker",         type: "address" },
+    { name: "tokenId",       type: "uint256" },
+    { name: "makerAmount",   type: "uint256" },
+    { name: "takerAmount",   type: "uint256" },
+    { name: "expiration",    type: "uint256" },
+    { name: "nonce",         type: "uint256" },
+    { name: "feeRateBps",    type: "uint256" },
+    { name: "side",          type: "uint8"   },
+    { name: "signatureType", type: "uint8"   },
+  ],
+} as const;
+
+const SIDE_BUY  = 0;
+const SIDE_SELL = 1;
+const SIG_TYPE_EOA = 0;  // normal ECDSA from EOA
+const TAKER_ZERO = "0x0000000000000000000000000000000000000000" as `0x${string}`;
+
 // Gamma API returns some fields as JSON-encoded strings — parse them.
 function normalizeMarket(m: any): PolymarketMarket {
   const parse = (v: any) => (typeof v === "string" ? JSON.parse(v) : v);
-  return { ...m, tokens: parse(m.tokens) ?? [], outcomes: parse(m.outcomes) ?? [], outcomePrices: parse(m.outcomePrices) ?? [], clobTokenIds: parse(m.clobTokenIds) ?? [] };
+  return {
+    ...m,
+    tokens:        parse(m.tokens)        ?? [],
+    outcomes:      parse(m.outcomes)      ?? [],
+    outcomePrices: parse(m.outcomePrices) ?? [],
+    clobTokenIds:  parse(m.clobTokenIds)  ?? [],
+  };
 }
 
 /**
  * Polymarket CLOB REST API client.
  *
- * Auth: Polymarket uses HMAC-SHA256 request signing (L2 API key scheme).
- * Signature = base64( HMAC-SHA256( apiSecret, timestamp + method + path + body ) )
- * Docs: https://docs.polymarket.com/#authentication
+ * Auth: two-layer scheme.
+ *
+ *   Layer 1 — HTTP request signing (all authenticated endpoints):
+ *     Headers: POLY-API-KEY, POLY-SIGNATURE, POLY-TIMESTAMP, POLY-PASSPHRASE
+ *     Signature = base64( HMAC-SHA256( apiSecret, timestamp + method + path + body ) )
+ *     Docs: https://docs.polymarket.com/#authentication
+ *
+ *   Layer 2 — EIP-712 order signing (POST /order only):
+ *     Each order is signed with an Ethereum private key against the CTFExchange
+ *     EIP-712 domain. The signature is embedded in the order body.
+ *     The `maker` address must match the address that created the API key.
  *
  * To obtain API keys:
  *   1. Go to polymarket.com, connect your wallet
  *   2. Settings → API Keys → Generate new key
  *   3. Set POLYMARKET_API_KEY, POLYMARKET_API_SECRET, POLYMARKET_API_PASSPHRASE in .env
+ *
+ * The `signerPrivateKey` must be the Ethereum private key of the wallet used to
+ * create the API key. Set POLYMARKET_SIGNER_KEY in .env (falls back to RELAYER_PRIVATE_KEY).
  */
 export class PolymarketClient {
   private apiKey:        string;
   private apiSecret:     string;
   private apiPassphrase: string;
+  private account:       ReturnType<typeof privateKeyToAccount> | null;
 
-  constructor(apiKey: string, apiSecret: string, apiPassphrase: string) {
+  constructor(
+    apiKey:        string,
+    apiSecret:     string,
+    apiPassphrase: string,
+    signerPrivateKey?: `0x${string}`,
+  ) {
     this.apiKey        = apiKey;
     this.apiSecret     = apiSecret;
     this.apiPassphrase = apiPassphrase;
+    this.account       = signerPrivateKey ? privateKeyToAccount(signerPrivateKey) : null;
   }
 
   // ─── Market data (no auth required) ────────────────────────────────────────
@@ -79,13 +148,13 @@ export class PolymarketClient {
     return book.asks.sort((a, b) => a.price - b.price)[0].price;
   }
 
-  // ─── Order execution (requires auth) ───────────────────────────────────────
+  // ─── Order execution (requires auth + EIP-712 signing) ─────────────────────
 
   /**
    * Place a market-like buy order for YES tokens on Polymarket's CLOB.
    * Uses a FOK (fill-or-kill) order at mid + 1% slippage so it fills immediately.
    *
-   * Polymarket CLOB does not have a true "MARKET" order type.  FOK with an
+   * Polymarket CLOB does not have a true "MARKET" order type. FOK with an
    * aggressive limit achieves the same effect in normal liquidity conditions.
    *
    * @param tokenId    YES (or NO) token ID from market.tokens[].token_id
@@ -93,34 +162,27 @@ export class PolymarketClient {
    * @returns orderId and the limit price used (as a float in [0, 1])
    */
   async placeMarketBuy(
-    tokenId: string,
+    tokenId:    string,
     usdcAmount: bigint,
   ): Promise<{ orderId: string; limitPrice: number }> {
-    // Fetch current mid to size the order and set a realistic limit
+    this._requireSigner();
     const mid = await this.getMidPrice(tokenId);
-
     // Accept up to 1% above mid — ensures fill without excess slippage
     const limitPrice = parseFloat(Math.min(0.999, mid * 1.01).toFixed(4));
 
-    // Polymarket size = number of tokens, NOT USDC amount
-    const usdcFloat = Number(usdcAmount) / 1e6;
-    const tokenSize = parseFloat((usdcFloat / limitPrice).toFixed(2));
+    // makerAmount = USDC to spend; takerAmount = tokens to receive
+    const makerAmount = usdcAmount;
+    const takerAmount = BigInt(Math.round(Number(usdcAmount) / limitPrice));
 
-    const body = JSON.stringify({
-      order: {
-        tokenID:   tokenId,
-        side:      "BUY",
-        price:     limitPrice,
-        size:      tokenSize,
-        orderType: "FOK",
-      },
-    });
+    const { body, orderId } = await this._buildSignedOrder(
+      tokenId, makerAmount, takerAmount, SIDE_BUY, limitPrice, "FOK",
+    );
 
     const res = await axios.post(`${CLOB_API}/order`, body, {
       headers: this._authHeaders("POST", "/order", body),
     });
 
-    return { orderId: res.data.orderId as string, limitPrice };
+    return { orderId: (res.data.orderID ?? res.data.orderId ?? orderId) as string, limitPrice };
   }
 
   /**
@@ -128,37 +190,31 @@ export class PolymarketClient {
    * Uses a FOK (fill-or-kill) order at mid - 1% slippage so it fills immediately.
    *
    * @param tokenId   YES token ID from market.tokens[].token_id
-   * @param yesAmount Number of YES tokens to sell (bigint, 6 decimals — e.g. 1_000_000n = 1 token)
+   * @param yesAmount Number of YES tokens to sell (bigint, 6 decimals)
    * @returns orderId and the limit price used (as a float in [0, 1])
    */
   async placeMarketSell(
-    tokenId: string,
+    tokenId:   string,
     yesAmount: bigint,
   ): Promise<{ orderId: string; limitPrice: number }> {
-    // Fetch current mid to set a realistic limit — sell slightly below mid to ensure fill
+    this._requireSigner();
     const mid = await this.getMidPrice(tokenId);
-
     // Accept up to 1% below mid — ensures fill without excess slippage
     const limitPrice = parseFloat(Math.max(0.001, mid * 0.99).toFixed(4));
 
-    // Polymarket size = number of tokens to sell (on-chain uses 6 decimals, API uses float)
-    const tokenSize = parseFloat((Number(yesAmount) / 1e6).toFixed(2));
+    // For SELL: makerAmount = tokens to sell; takerAmount = USDC to receive
+    const makerAmount = yesAmount;
+    const takerAmount = BigInt(Math.round(Number(yesAmount) * limitPrice));
 
-    const body = JSON.stringify({
-      order: {
-        tokenID:   tokenId,
-        side:      "SELL",
-        price:     limitPrice,
-        size:      tokenSize,
-        orderType: "FOK",
-      },
-    });
+    const { body, orderId } = await this._buildSignedOrder(
+      tokenId, makerAmount, takerAmount, SIDE_SELL, limitPrice, "FOK",
+    );
 
     const res = await axios.post(`${CLOB_API}/order`, body, {
       headers: this._authHeaders("POST", "/order", body),
     });
 
-    return { orderId: res.data.orderId as string, limitPrice };
+    return { orderId: (res.data.orderID ?? res.data.orderId ?? orderId) as string, limitPrice };
   }
 
   /**
@@ -170,27 +226,99 @@ export class PolymarketClient {
    * @returns orderId and the limit price used
    */
   async placeLimitBuy(
-    tokenId: string,
+    tokenId:    string,
     usdcAmount: bigint,
     limitPrice: number,
   ): Promise<{ orderId: string; limitPrice: number }> {
-    // size = tokens to receive at this price for the given USDC spend
-    const tokenSize = parseFloat((Number(usdcAmount) / 1e6 / limitPrice).toFixed(2));
-    const body = JSON.stringify({
-      order: {
-        tokenID:   tokenId,
-        side:      "BUY",
-        price:     limitPrice,
-        size:      tokenSize,
-        orderType: "GTC",
-      },
-    });
+    this._requireSigner();
+
+    const makerAmount = usdcAmount;
+    const takerAmount = BigInt(Math.round(Number(usdcAmount) / limitPrice));
+
+    const { body, orderId } = await this._buildSignedOrder(
+      tokenId, makerAmount, takerAmount, SIDE_BUY, limitPrice, "GTC",
+    );
 
     const res = await axios.post(`${CLOB_API}/order`, body, {
       headers: this._authHeaders("POST", "/order", body),
     });
 
-    return { orderId: res.data.orderId as string, limitPrice };
+    return { orderId: (res.data.orderID ?? res.data.orderId ?? orderId) as string, limitPrice };
+  }
+
+  // ─── Internal: EIP-712 order building + signing ─────────────────────────────
+
+  /**
+   * Build and EIP-712 sign a Polymarket order.
+   *
+   * Returns the JSON-stringified body ready to POST to /order, and the locally
+   * computed order ID (salt-based) for logging before the response arrives.
+   */
+  private async _buildSignedOrder(
+    tokenId:     string,
+    makerAmount: bigint,
+    takerAmount: bigint,
+    side:        0 | 1,
+    limitPrice:  number,
+    orderType:   "FOK" | "GTC" | "GTD",
+  ): Promise<{ body: string; orderId: string }> {
+    const account = this.account!;
+    // Use current timestamp as salt — unique per order, no pre-image concerns
+    const salt = BigInt(Date.now());
+
+    const orderMessage = {
+      salt,
+      maker:         account.address,
+      signer:        account.address,
+      taker:         TAKER_ZERO,
+      tokenId:       BigInt(tokenId),
+      makerAmount,
+      takerAmount,
+      expiration:    0n,
+      nonce:         0n,
+      feeRateBps:    0n,
+      side:          side as number,
+      signatureType: SIG_TYPE_EOA as number,
+    };
+
+    const signature = await account.signTypedData({
+      domain:      POLYMARKET_DOMAIN,
+      types:       ORDER_TYPES,
+      primaryType: "Order",
+      message:     orderMessage,
+    });
+
+    const sideStr = side === SIDE_BUY ? "BUY" : "SELL";
+
+    const body = JSON.stringify({
+      order: {
+        salt:          salt.toString(),
+        maker:         account.address,
+        signer:        account.address,
+        taker:         TAKER_ZERO,
+        tokenId,
+        makerAmount:   makerAmount.toString(),
+        takerAmount:   takerAmount.toString(),
+        expiration:    "0",
+        nonce:         "0",
+        feeRateBps:    "0",
+        side:          sideStr,
+        signatureType: SIG_TYPE_EOA,
+        signature,
+      },
+      orderType,
+    });
+
+    return { body, orderId: `local-${salt}` };
+  }
+
+  private _requireSigner(): void {
+    if (!this.account) {
+      throw new Error(
+        "PolymarketClient: signerPrivateKey is required for order placement. " +
+        "Set POLYMARKET_SIGNER_KEY (or RELAYER_PRIVATE_KEY as fallback) in .env",
+      );
+    }
   }
 
   // ─── Auth ────────────────────────────────────────────────────────────────────
@@ -202,11 +330,11 @@ export class PolymarketClient {
   private _authHeaders(method: string, path: string, body: string): Record<string, string> {
     const timestamp = Math.floor(Date.now() / 1000).toString();
     return {
-      "POLY-API-KEY":     this.apiKey,
-      "POLY-SIGNATURE":   this._sign(timestamp, method, path, body),
-      "POLY-TIMESTAMP":   timestamp,
-      "POLY-PASSPHRASE":  this.apiPassphrase,
-      "Content-Type":     "application/json",
+      "POLY-API-KEY":    this.apiKey,
+      "POLY-SIGNATURE":  this._sign(timestamp, method, path, body),
+      "POLY-TIMESTAMP":  timestamp,
+      "POLY-PASSPHRASE": this.apiPassphrase,
+      "Content-Type":    "application/json",
     };
   }
 

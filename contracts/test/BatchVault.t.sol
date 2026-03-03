@@ -1428,4 +1428,147 @@ contract BatchVaultTest is Test {
         // Fresh recipient receives USDC — carol's address never appeared on-chain
         assertEq(usdc.balanceOf(freshRecipient), recipientUSDCBefore + carolFillUSDC);
     }
+
+    // ─── Security: cross-path double-claim prevention ─────────────────────
+
+    /// @notice claimWithProof → claimPosition must revert: nullifier is shared.
+    ///         Regression for the cross-path double-claim vulnerability where
+    ///         each claim path tracked state independently.
+    function test_crossPath_claimWithProof_then_claimPosition_reverts() public {
+        uint256 batchId = _openBatch();
+
+        uint256 yesCarol  = 100e6;
+        bytes32 saltCarol = bytes32(uint256(7));
+        bytes32 cCarol    = _makeCommitment(MARKET_ID, false, yesCarol, 600000, saltCarol);
+
+        _mintYes(carol, yesCarol);
+        _approveVaultCTF(carol);
+        vm.prank(carol);
+        vault.commitSellOrder(cCarol, yesCarol, MARKET_ID);
+
+        // Also need a buy order to have a counterparty
+        uint256 amtAlice  = 100e6;
+        bytes32 saltAlice = bytes32(uint256(8));
+        bytes32 cAlice    = _makeCommitment(MARKET_ID, true, amtAlice, 700000, saltAlice);
+        vm.prank(alice);
+        vault.commitOrder(cAlice, amtAlice, MARKET_ID);
+
+        _closeBatch(batchId);
+
+        uint256 clearingPrice = 650000;
+        BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](2);
+        orders[0] = BatchVault.RevealedOrder(false, yesCarol, 600000, saltCarol);
+        orders[1] = BatchVault.RevealedOrder(true,  amtAlice, 700000, saltAlice);
+
+        BatchVault.TransferAuth[] memory auths = new BatchVault.TransferAuth[](2);
+        auths[0] = _zeroAuth();
+        auths[1] = _buyAuth(alice);
+
+        (uint256 buyVol, uint256 sellVol, uint256 netBuy, uint256 netSell) = _buildSettleParams(orders, clearingPrice);
+        vm.prank(relayer);
+        vault.settleBatch(batchId, orders, auths, clearingPrice, buyVol, sellVol, netBuy, netSell, "");
+
+        BatchVault.Batch memory b = vault.getBatch(batchId);
+        uint256 carolFillUSDC = yesCarol * clearingPrice / 1e6;
+
+        // Path 1: ZK claim via claimWithProof
+        bytes32[] memory publicInputs = _buildClaimPublicInputs(
+            batchId, b.claimMerkleRoot, clearingPrice,
+            cCarol, saltCarol, carol, true, carolFillUSDC, 0, false
+        );
+        vault.claimWithProof(batchId, "", publicInputs);
+
+        // Path 2: direct claim via claimPosition — must revert (nullifier already set)
+        vm.expectRevert(BatchVault.AlreadyClaimed.selector);
+        vm.prank(carol);
+        vault.claimPosition(batchId, false, yesCarol, 600000, saltCarol);
+    }
+
+    /// @notice claimPosition → claimWithProof must revert: nullifier is shared.
+    function test_crossPath_claimPosition_then_claimWithProof_reverts() public {
+        uint256 batchId = _openBatch();
+
+        uint256 yesCarol  = 80e6;
+        bytes32 saltCarol = bytes32(uint256(9));
+        bytes32 cCarol    = _makeCommitment(MARKET_ID, false, yesCarol, 600000, saltCarol);
+
+        _mintYes(carol, yesCarol);
+        _approveVaultCTF(carol);
+        vm.prank(carol);
+        vault.commitSellOrder(cCarol, yesCarol, MARKET_ID);
+
+        uint256 amtAlice  = 100e6;
+        bytes32 saltAlice = bytes32(uint256(10));
+        bytes32 cAlice    = _makeCommitment(MARKET_ID, true, amtAlice, 700000, saltAlice);
+        vm.prank(alice);
+        vault.commitOrder(cAlice, amtAlice, MARKET_ID);
+
+        _closeBatch(batchId);
+
+        uint256 clearingPrice = 650000;
+        BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](2);
+        orders[0] = BatchVault.RevealedOrder(false, yesCarol, 600000, saltCarol);
+        orders[1] = BatchVault.RevealedOrder(true,  amtAlice, 700000, saltAlice);
+
+        BatchVault.TransferAuth[] memory auths = new BatchVault.TransferAuth[](2);
+        auths[0] = _zeroAuth();
+        auths[1] = _buyAuth(alice);
+
+        (uint256 buyVol, uint256 sellVol, uint256 netBuy, uint256 netSell) = _buildSettleParams(orders, clearingPrice);
+        vm.prank(relayer);
+        vault.settleBatch(batchId, orders, auths, clearingPrice, buyVol, sellVol, netBuy, netSell, "");
+
+        BatchVault.Batch memory b = vault.getBatch(batchId);
+
+        // Path 1: direct claim via claimPosition
+        vm.prank(carol);
+        vault.claimPosition(batchId, false, yesCarol, 600000, saltCarol);
+
+        // Path 2: ZK claim via claimWithProof — must revert (nullifier already set)
+        uint256 carolFillUSDC = yesCarol * clearingPrice / 1e6;
+        bytes32[] memory publicInputs = _buildClaimPublicInputs(
+            batchId, b.claimMerkleRoot, clearingPrice,
+            cCarol, saltCarol, carol, true, carolFillUSDC, 0, false
+        );
+        vm.expectRevert(BatchVault.AlreadyClaimed.selector);
+        vault.claimWithProof(batchId, "", publicInputs);
+    }
+
+    /// @notice rescueStuckSellOrder: sell-order holders can recover YES tokens
+    ///         after RESCUE_DELAY if the relayer never settles the batch.
+    function test_rescueStuckSellOrder_afterDelay_succeeds() public {
+        uint256 batchId = _openBatch();
+
+        uint256 yesCarol  = 100e6;
+        bytes32 saltCarol = bytes32(uint256(11));
+        bytes32 cCarol    = _makeCommitment(MARKET_ID, false, yesCarol, 600000, saltCarol);
+
+        _mintYes(carol, yesCarol);
+        _approveVaultCTF(carol);
+        vm.prank(carol);
+        vault.commitSellOrder(cCarol, yesCarol, MARKET_ID);
+
+        // Close the batch (moves to SETTLING) — relayer never calls settleBatch
+        _closeBatch(batchId);
+
+        // Before delay: rescue should revert
+        vm.expectRevert("BatchVault: rescue delay not elapsed");
+        vm.prank(carol);
+        vault.rescueStuckSellOrder(batchId, yesCarol, 600000, saltCarol);
+
+        // Fast-forward past RESCUE_DELAY
+        vm.warp(block.timestamp + 7 days + 1);
+
+        uint256 carolYesBefore = ctf.balanceOf(carol, _yesTokenId());
+        vm.prank(carol);
+        vault.rescueStuckSellOrder(batchId, yesCarol, 600000, saltCarol);
+
+        // Carol recovers her YES tokens
+        assertEq(ctf.balanceOf(carol, _yesTokenId()), carolYesBefore + yesCarol);
+
+        // Second rescue should revert (already marked claimed)
+        vm.expectRevert("BatchVault: invalid or already rescued");
+        vm.prank(carol);
+        vault.rescueStuckSellOrder(batchId, yesCarol, 600000, saltCarol);
+    }
 }

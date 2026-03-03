@@ -434,14 +434,16 @@ contract BatchVault {
     // ═══════════════════════════════════════════════════════════════════════
 
     function onERC1155Received(address, address, uint256, uint256, bytes calldata)
-        external pure returns (bytes4)
+        external view returns (bytes4)
     {
+        require(msg.sender == ctf, "BatchVault: only CTF tokens accepted");
         return 0xf23a6e61;
     }
 
     function onERC1155BatchReceived(address, address, uint256[] calldata, uint256[] calldata, bytes calldata)
-        external pure returns (bytes4)
+        external view returns (bytes4)
     {
+        require(msg.sender == ctf, "BatchVault: only CTF tokens accepted");
         return 0xbc197c81;
     }
 
@@ -583,7 +585,7 @@ contract BatchVault {
 
         Batch storage batch = batches[batchId];
         if (batch.status != BatchStatus.SETTLED) revert BatchNotSettled();
-        if (publicInputs.length < 11) revert CommitmentMismatch();
+        if (publicInputs.length != 11) revert CommitmentMismatch();
 
         // Reconstruct bytes32 values from hi/lo u128 pairs
         bytes32 claimMerkleRoot = bytes32((uint256(publicInputs[1]) << 128) | uint256(publicInputs[2]));
@@ -648,6 +650,11 @@ contract BatchVault {
     ///
     ///         Commitment = keccak256(marketId, isBuy, amount, limitPrice, salt) — no trader address.
     ///         Payout sent to msg.sender.
+    ///
+    ///         WARNING: This function's preimage (including salt) appears in calldata and is
+    ///         visible in the mempool before confirmation. Frontrunners who observe a pending
+    ///         claimPosition call can copy it and claim the payout to their own address first.
+    ///         Use claimWithProof() (the ZK path via the relayer) to avoid this risk.
     function claimPosition(
         uint256 batchId,
         bool isBuy,
@@ -663,11 +670,17 @@ contract BatchVault {
             abi.encode(batch.marketId, isBuy, amount, limitPrice, salt)
         );
 
+        // Compute nullifier — cross-checks with claimWithProof to prevent double-claiming
+        // across both claim paths. Must match the nullifier formula in the claim circuit.
+        bytes32 nullifier = keccak256(abi.encode(commitment, batchId, salt));
+        if (usedNullifiers[nullifier]) revert AlreadyClaimed();
+
         Position storage pos = positionsByCommitment[batchId][commitment];
         if (pos.filledAmount == 0 && pos.refundAmount == 0) revert NothingToClaim();
         if (pos.claimed) revert AlreadyClaimed();
 
         pos.claimed = true;
+        usedNullifiers[nullifier] = true;
 
         uint256 yesShares = 0;
 
@@ -804,6 +817,46 @@ contract BatchVault {
             2
         );
         return IConditionalTokens(ctf).getPositionId(usdc, collectionId);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Emergency: rescue stuck sell-order deposits
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// @notice 7-day grace period after closedAt before rescue is permitted.
+    uint256 public constant RESCUE_DELAY = 7 days;
+
+    /// @notice Emergency rescue for sell-order depositors when a batch is stuck in SETTLING.
+    ///
+    ///         If the relayer fails to call settleBatch within RESCUE_DELAY after closedAt,
+    ///         sell-order holders can recover their YES tokens by revealing their preimage.
+    ///         This is a safety valve only — honest relayers will never leave batches stuck.
+    ///
+    ///         Only valid for SELL orders (sell orders transfer YES tokens upfront).
+    ///         Buy orders use EIP-3009 deferred transfer — no USDC is ever held by the vault.
+    function rescueStuckSellOrder(
+        uint256 batchId,
+        uint256 amount,
+        uint256 limitPrice,
+        bytes32 salt
+    ) external {
+        Batch storage batch = batches[batchId];
+        require(batch.status == BatchStatus.SETTLING, "BatchVault: batch not stuck");
+        require(
+            batch.closedAt > 0 && block.timestamp >= batch.closedAt + RESCUE_DELAY,
+            "BatchVault: rescue delay not elapsed"
+        );
+
+        bytes32 commitment = keccak256(
+            abi.encode(batch.marketId, false, amount, limitPrice, salt)
+        );
+
+        Commitment storage c = commitments[batchId][commitmentIndex[batchId][commitment]];
+        require(c.hash == commitment && !c.claimed, "BatchVault: invalid or already rescued");
+        c.claimed = true;
+
+        uint256 yesTokenId = _getYesTokenId(batch.marketId);
+        IConditionalTokens(ctf).safeTransferFrom(address(this), msg.sender, yesTokenId, amount, "");
     }
 
     // ═══════════════════════════════════════════════════════════════════════
