@@ -11,50 +11,219 @@ const publicClient = createPublicClient({
   transport: http(),
 });
 
+// ── Types ─────────────────────────────────────────────────────────────────────
+
 interface HistoricalPosition {
-  batchId: bigint;
-  batchMarketId: `0x${string}`;
-  batchStatus: BatchStatus;
+  batchId:        bigint;
+  batchMarketId:  `0x${string}`;
+  batchStatus:    BatchStatus;
+  clearingPrice:  bigint;
+  marketQuestion?: string;
   position: {
     filledAmount: bigint;
     refundAmount: bigint;
-    isBuy: boolean;
-    claimed: boolean;
+    isBuy:        boolean;
+    claimed:      boolean;
   };
+  /** Number of YES tokens received (buy) or USDC received (sell) — computed */
+  shares?: number;
 }
 
 interface PositionsPanelProps {
-  walletAddress: `0x${string}`;
-  currentBatchId: bigint;
-  currentBatchStatus: BatchStatus;
-  /** Commitments the user has sealed in the current batch this session */
+  walletAddress:           `0x${string}`;
+  currentBatchId:          bigint;
+  currentBatchStatus:      BatchStatus;
   currentBatchCommitments: Array<{ hash: `0x${string}`; amount?: bigint }>;
-  onClaim: (batchId: bigint) => Promise<void>;
-  /** Called after scanning history — provides unique market IDs seen across all batches */
-  onMarketIdsFound?: (ids: `0x${string}`[]) => void;
+  onClaim:                 (batchId: bigint) => Promise<void>;
+  onMarketIdsFound?:       (ids: `0x${string}`[]) => void;
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-function BatchStatusBadge({ status }: { status: BatchStatus }) {
-  if (status === BatchStatus.OPEN)
-    return <span className="text-[9px] tracking-widest uppercase text-accent/70 border border-accent/20 px-1.5 py-0.5">OPEN</span>;
-  if (status === BatchStatus.SETTLING)
-    return <span className="text-[9px] tracking-widest uppercase text-blue/70 border border-blue/20 px-1.5 py-0.5">SETTLING</span>;
-  return <span className="text-[9px] tracking-widest uppercase text-muted-dim border border-border px-1.5 py-0.5">SETTLED</span>;
+function fUsdc(v: bigint) { return `$${(Number(v) / 1e6).toFixed(2)}`; }
+
+function computeShares(filledAmount: bigint, clearingPrice: bigint): number {
+  if (clearingPrice === 0n || filledAmount === 0n) return 0;
+  return Number(filledAmount * 1_000_000n / clearingPrice) / 1_000_000;
 }
 
-function SkeletonCard() {
+function timeAgo(ts: number) {
+  const diff = Date.now() - ts;
+  const mins = Math.floor(diff / 60_000);
+  if (mins < 1)  return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24)  return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
+
+// ── Sub-components ────────────────────────────────────────────────────────────
+
+function DirectionBadge({ isBuy }: { isBuy: boolean }) {
   return (
-    <div className="border border-border p-3 space-y-2 animate-pulse">
-      <div className="flex items-center justify-between">
-        <div className="h-3 w-16 bg-surface/80 rounded" />
-        <div className="h-3 w-12 bg-surface/80 rounded" />
-      </div>
-      <div className="h-3 w-24 bg-surface/60 rounded" />
-      <div className="h-3 w-20 bg-surface/60 rounded" />
+    <span className={clsx(
+      "text-[9px] tracking-widest uppercase px-1.5 py-0.5 border font-mono",
+      isBuy
+        ? "border-accent/30 text-accent bg-accent/5"
+        : "border-danger/30 text-danger bg-danger/5",
+    )}>
+      {isBuy ? "YES" : "NO"}
+    </span>
+  );
+}
+
+function SkeletonRow() {
+  return (
+    <div className="px-4 py-3 border-b border-border/40 animate-pulse space-y-1.5">
+      <div className="h-3 w-40 bg-surface/80 rounded" />
+      <div className="h-2.5 w-24 bg-surface/60 rounded" />
     </div>
   );
 }
+
+// ── Position row (compact, fits in 340px panel) ───────────────────────────────
+interface PositionRowProps {
+  batchId:        bigint;
+  position:       HistoricalPosition["position"];
+  clearingPrice:  bigint;
+  marketQuestion?: string;
+  shares?:        number;
+  onClaim:        (batchId: bigint) => Promise<void>;
+  isClaiming:     boolean;
+  claimError?:    string;
+  isActive:       boolean;  // true = unclaimed settled; false = closed
+}
+
+function PositionRow({
+  batchId, position, clearingPrice, marketQuestion, shares,
+  onClaim, isClaiming, claimError, isActive,
+}: PositionRowProps) {
+  const avgCents    = clearingPrice > 0n ? (Number(clearingPrice) / 1e4).toFixed(1) : "—";
+  const filledUsdc  = Number(position.filledAmount) / 1e6;
+  const sharesDisp  = shares != null ? shares.toFixed(1) : "—";
+
+  return (
+    <div className={clsx(
+      "px-4 py-3 border-b border-border/40 last:border-b-0 space-y-2",
+      !isActive && "opacity-60",
+    )}>
+      {/* Row header: direction badge + question */}
+      <div className="flex items-start gap-2 min-w-0">
+        <div className="flex-shrink-0 pt-px">
+          <DirectionBadge isBuy={position.isBuy} />
+        </div>
+        <p className="text-[11px] text-text leading-snug line-clamp-2 min-w-0">
+          {marketQuestion ?? `Batch #${batchId.toString()}`}
+        </p>
+      </div>
+
+      {/* Metrics row */}
+      <div className="flex items-center gap-3 flex-wrap text-[10px]">
+        {clearingPrice > 0n && (
+          <>
+            <span className="text-muted-dim">avg <span className="text-text font-mono">{avgCents}¢</span></span>
+            {shares != null && shares > 0 && (
+              <span className="text-muted-dim"><span className="text-text font-mono">{sharesDisp}</span> shares</span>
+            )}
+            <span className="text-muted-dim">cost <span className="text-text font-mono">{fUsdc(position.filledAmount)}</span></span>
+          </>
+        )}
+        {position.refundAmount > 0n && (
+          <span className="text-muted-dim">refund <span className="text-text font-mono">{fUsdc(position.refundAmount)}</span></span>
+        )}
+      </div>
+
+      {/* Claimed / Claim button */}
+      {isActive ? (
+        <div className="space-y-1">
+          <button
+            onClick={() => onClaim(batchId)}
+            disabled={isClaiming}
+            className="w-full py-1.5 border border-accent text-accent text-[10px] tracking-widest uppercase hover:bg-accent/5 transition-colors disabled:opacity-40"
+          >
+            {isClaiming ? (
+              <span className="flex items-center justify-center gap-1.5">
+                <span className="w-2.5 h-2.5 border border-current border-t-transparent rounded-full animate-spin" />
+                CLAIMING…
+              </span>
+            ) : "CLAIM POSITION"}
+          </button>
+          {isClaiming && (
+            <p className="text-[9px] text-muted-dim text-center">
+              Generating ZK proof + awaiting tx (~20s)
+            </p>
+          )}
+          {claimError && !isClaiming && (
+            <p className="text-danger text-[10px]">{claimError}</p>
+          )}
+        </div>
+      ) : (
+        <span className="text-[9px] text-accent/60 tracking-widest uppercase">CLAIMED ✓</span>
+      )}
+    </div>
+  );
+}
+
+// ── Activity row ──────────────────────────────────────────────────────────────
+interface ActivityRowProps {
+  batchId:        bigint;
+  isBuy:          boolean;
+  amount:         bigint;
+  clearingPrice?: bigint;
+  shares?:        number;
+  marketQuestion?: string;
+  timestamp?:     number;
+  batchStatus?:   BatchStatus;
+}
+
+function ActivityRow({
+  batchId, isBuy, amount, clearingPrice, shares, marketQuestion, timestamp, batchStatus,
+}: ActivityRowProps) {
+  const amountDisplay = isBuy
+    ? fUsdc(amount)
+    : `${(Number(amount) / 1e6).toFixed(2)} YES`;
+
+  const sharesDisplay = clearingPrice && clearingPrice > 0n && isBuy && shares != null
+    ? `${shares.toFixed(1)} shares`
+    : null;
+
+  return (
+    <div className="px-4 py-3 border-b border-border/40 last:border-b-0 flex items-start gap-3">
+      {/* Type badge */}
+      <span className={clsx(
+        "text-[9px] tracking-widest uppercase px-1.5 py-0.5 border font-mono flex-shrink-0 mt-0.5",
+        isBuy
+          ? "border-accent/30 text-accent bg-accent/5"
+          : "border-danger/30 text-danger bg-danger/5",
+      )}>
+        {isBuy ? "BUY" : "SELL"}
+      </span>
+
+      {/* Market + batch */}
+      <div className="flex-1 min-w-0 space-y-0.5">
+        <p className="text-[11px] text-text leading-snug line-clamp-2">
+          {marketQuestion ?? `Batch #${batchId.toString()}`}
+        </p>
+        {sharesDisplay && (
+          <p className="text-[10px] text-muted-dim">{sharesDisplay}</p>
+        )}
+      </div>
+
+      {/* Amount + time */}
+      <div className="text-right flex-shrink-0 space-y-0.5">
+        <p className="text-[11px] text-text font-mono tabular-nums">{amountDisplay}</p>
+        <p className="text-[9px] text-muted-dim">
+          {timestamp ? timeAgo(timestamp) : `#${batchId.toString()}`}
+        </p>
+        {batchStatus === BatchStatus.SETTLED && (
+          <span className="text-[8px] text-muted-dim border border-border px-1">SETTLED</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Main component ────────────────────────────────────────────────────────────
 
 export default function PositionsPanel({
   walletAddress,
@@ -65,69 +234,77 @@ export default function PositionsPanel({
   onMarketIdsFound,
 }: PositionsPanelProps) {
   const [historicalPositions, setHistoricalPositions] = useState<HistoricalPosition[]>([]);
-  const [scanning, setScanning] = useState(false);
+  const [allStoredOrders,     setAllStoredOrders]     = useState<Array<{
+    batchId: string; isBuy: boolean; amount: string; marketQuestion?: string;
+    timestamp?: number; clearingPrice?: bigint; shares?: number; batchStatus?: BatchStatus;
+  }>>([]);
+  const [scanning,      setScanning]      = useState(false);
   const [claimingBatchId, setClaimingBatchId] = useState<bigint | null>(null);
-  const [claimErrors, setClaimErrors] = useState<Record<string, string>>({});
+  const [claimErrors,   setClaimErrors]   = useState<Record<string, string>>({});
+  const [mainTab,       setMainTab]       = useState<"positions" | "activity">("positions");
+  const [posTab,        setPosTab]        = useState<"active" | "closed">("active");
 
-  // Current-batch position (fetched separately when settled)
+  // Current-batch position (fetched when settled)
   const [currentPosition, setCurrentPosition] = useState<{
-    filledAmount: bigint;
-    refundAmount: bigint;
-    isBuy: boolean;
-    claimed: boolean;
+    filledAmount: bigint; refundAmount: bigint; isBuy: boolean; claimed: boolean;
   } | null>(null);
 
-  // ── Fetch current batch position when it settles ─────────────────────────────
-  // Position is keyed by commitment hash — look up from localStorage.
+  // ── Fetch current batch position when settled ────────────────────────────────
   useEffect(() => {
     if (currentBatchStatus !== BatchStatus.SETTLED || currentBatchId === 0n) {
       setCurrentPosition(null);
       return;
     }
     let cancelled = false;
-    const fetch = async () => {
+    const run = async () => {
       try {
-        const storageKey = `predacy:orders:${walletAddress.toLowerCase()}`;
-        const storedOrders: Array<{ commitment: string; batchId: string }> =
+        const storageKey  = `predacy:orders:${walletAddress.toLowerCase()}`;
+        const stored: Array<{ commitment: string; batchId: string }> =
           JSON.parse(localStorage.getItem(storageKey) ?? "[]");
-        const myOrder = storedOrders.find((o) => o.batchId === currentBatchId.toString());
-        if (!myOrder) return; // no order in this batch
+        const myOrder = stored.find((o) => o.batchId === currentBatchId.toString());
+        if (!myOrder) return;
 
         const contracts = getContracts(ACTIVE_CHAIN.id);
         const pos = await publicClient.readContract({
-          address: contracts.batchVault,
-          abi: BATCH_VAULT_ABI,
+          address:      contracts.batchVault,
+          abi:          BATCH_VAULT_ABI,
           functionName: "getPosition",
-          args: [currentBatchId, myOrder.commitment as `0x${string}`],
+          args:         [currentBatchId, myOrder.commitment as `0x${string}`],
         }) as { filledAmount: bigint; refundAmount: bigint; isBuy: boolean; claimed: boolean };
         if (!cancelled) setCurrentPosition(pos);
       } catch { /* RPC hiccup */ }
     };
-    fetch();
+    run();
     return () => { cancelled = true; };
   }, [currentBatchStatus, currentBatchId, walletAddress]);
 
   // ── Scan historical batches from localStorage ─────────────────────────────────
-  // Positions are keyed by commitment hash — look up from localStorage instead of
-  // scanning all batches by address (which is no longer possible after the privacy fix).
   const scanHistory = useCallback(async () => {
     setScanning(true);
     const contracts = getContracts(ACTIVE_CHAIN.id);
     const results: HistoricalPosition[] = [];
 
-    // Load all stored orders for this wallet
     let storedOrders: Array<{
       commitment: string; batchId: string; salt?: string; claimed?: boolean;
+      isBuy: boolean; amount: string; marketQuestion?: string; timestamp?: number;
     }> = [];
     try {
       const storageKey = `predacy:orders:${walletAddress.toLowerCase()}`;
       storedOrders = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
     } catch { /* ignore */ }
 
-    // Only look at historical batches (exclude current batch — handled separately)
     const historicalOrders = storedOrders.filter(
       (o) => o.batchId !== currentBatchId.toString()
     );
+
+    // Keep raw order list for Activity tab (enriched below)
+    const rawActivity: typeof allStoredOrders = historicalOrders.map((o) => ({
+      batchId:       o.batchId,
+      isBuy:         o.isBuy,
+      amount:        o.amount,
+      marketQuestion: o.marketQuestion,
+      timestamp:     o.timestamp,
+    }));
 
     await Promise.allSettled(
       historicalOrders.map(async (order) => {
@@ -135,23 +312,27 @@ export default function PositionsPanel({
           const id = BigInt(order.batchId);
           const [batchRaw, posRaw] = await Promise.all([
             publicClient.readContract({
-              address: contracts.batchVault,
-              abi: BATCH_VAULT_ABI,
+              address:      contracts.batchVault,
+              abi:          BATCH_VAULT_ABI,
               functionName: "getBatch",
-              args: [id],
-            }) as Promise<{ status: number; marketId: `0x${string}` }>,
+              args:         [id],
+            }) as Promise<{ status: number; marketId: `0x${string}`; clearingPrice: bigint }>,
             publicClient.readContract({
-              address: contracts.batchVault,
-              abi: BATCH_VAULT_ABI,
+              address:      contracts.batchVault,
+              abi:          BATCH_VAULT_ABI,
               functionName: "getPosition",
-              args: [id, order.commitment as `0x${string}`],
+              args:         [id, order.commitment as `0x${string}`],
             }) as Promise<{ filledAmount: bigint; refundAmount: bigint; isBuy: boolean; claimed: boolean }>,
           ]);
 
-          if (posRaw.filledAmount === 0n && posRaw.refundAmount === 0n) return;
+          if (posRaw.filledAmount === 0n && posRaw.refundAmount === 0n) {
+            // Enrich activity row even if not filled
+            const idx = rawActivity.findIndex((r) => r.batchId === order.batchId);
+            if (idx >= 0) rawActivity[idx].batchStatus = batchRaw.status as BatchStatus;
+            return;
+          }
 
-          // claimWithProof sets usedNullifiers but NOT positionsByCommitment.claimed.
-          // Check usedNullifiers on-chain as the authoritative claimed signal.
+          // Check usedNullifiers for claimed state
           let claimed = posRaw.claimed || order.claimed === true;
           if (!claimed && order.salt) {
             try {
@@ -162,40 +343,53 @@ export default function PositionsPanel({
                 )
               );
               claimed = await publicClient.readContract({
-                address: contracts.batchVault,
-                abi: BATCH_VAULT_ABI,
+                address:      contracts.batchVault,
+                abi:          BATCH_VAULT_ABI,
                 functionName: "usedNullifiers",
-                args: [nullifier],
+                args:         [nullifier],
               }) as boolean;
               if (claimed) {
-                // Persist to localStorage so future loads skip the RPC call
                 try {
                   const sk = `predacy:orders:${walletAddress.toLowerCase()}`;
                   const all: Array<Record<string, unknown>> = JSON.parse(localStorage.getItem(sk) ?? "[]");
                   localStorage.setItem(sk, JSON.stringify(
-                    all.map(o => o.batchId === order.batchId ? { ...o, claimed: true } : o)
+                    all.map((o) => o.batchId === order.batchId ? { ...o, claimed: true } : o)
                   ));
                 } catch { /* ignore */ }
               }
-            } catch { /* RPC hiccup — leave as unclaimed */ }
+            } catch { /* leave as unclaimed */ }
+          }
+
+          const clearingPrice = batchRaw.clearingPrice ?? 0n;
+          const shares = computeShares(posRaw.filledAmount, clearingPrice);
+
+          // Enrich activity row
+          const idx = rawActivity.findIndex((r) => r.batchId === order.batchId);
+          if (idx >= 0) {
+            rawActivity[idx].clearingPrice = clearingPrice;
+            rawActivity[idx].shares        = shares;
+            rawActivity[idx].batchStatus   = batchRaw.status as BatchStatus;
           }
 
           results.push({
-            batchId: id,
-            batchMarketId: batchRaw.marketId,
-            batchStatus: batchRaw.status as BatchStatus,
-            position: { ...posRaw, claimed },
+            batchId:        id,
+            batchMarketId:  batchRaw.marketId,
+            batchStatus:    batchRaw.status as BatchStatus,
+            clearingPrice,
+            marketQuestion: order.marketQuestion,
+            position:       { ...posRaw, claimed },
+            shares,
           });
         } catch { /* batch doesn't exist or RPC hiccup — skip */ }
       })
     );
 
-    // Sort descending by batchId
     results.sort((a, b) => (a.batchId > b.batchId ? -1 : 1));
     setHistoricalPositions(results);
+    setAllStoredOrders(rawActivity);
     setScanning(false);
-    // Bubble up all unique market IDs so the sell form can check balance for each
-    const uniqueMarketIds = [...new Set(results.map(r => r.batchMarketId))];
+
+    const uniqueMarketIds = [...new Set(results.map((r) => r.batchMarketId))];
     onMarketIdsFound?.(uniqueMarketIds);
   }, [currentBatchId, walletAddress, onMarketIdsFound]);
 
@@ -209,19 +403,16 @@ export default function PositionsPanel({
     setClaimErrors((prev) => { const n = { ...prev }; delete n[key]; return n; });
     try {
       await onClaim(batchId);
-      // Optimistically mark as claimed immediately so the UI updates right away
       if (batchId === currentBatchId) {
         setCurrentPosition((p) => p ? { ...p, claimed: true } : p);
       } else {
         setHistoricalPositions((prev) =>
-          prev.map((hp) =>
-            hp.batchId === batchId
-              ? { ...hp, position: { ...hp.position, claimed: true } }
-              : hp
+          prev.map((hp) => hp.batchId === batchId
+            ? { ...hp, position: { ...hp.position, claimed: true } }
+            : hp
           )
         );
       }
-      // Re-fetch in background to confirm on-chain state
       scanHistory();
     } catch (e: any) {
       if (e?.code !== 4001) {
@@ -232,197 +423,223 @@ export default function PositionsPanel({
     }
   };
 
-  const formatUsdc = (v: bigint) => `$${(Number(v) / 1e6).toFixed(2)}`;
+  // ── Derived data ─────────────────────────────────────────────────────────────
+
+  // Current batch: does the user have a sealed order this session?
+  const hasCurrentOrder = currentBatchCommitments.length > 0;
+
+  // Current batch position for Active tab (settled + unclaimed)
+  const currentIsActive =
+    currentBatchStatus === BatchStatus.SETTLED &&
+    currentPosition !== null &&
+    (currentPosition.filledAmount > 0n || currentPosition.refundAmount > 0n) &&
+    !currentPosition.claimed;
+
+  // Current batch for Activity tab
+  const currentForActivity = hasCurrentOrder ? currentBatchCommitments[0] : null;
+
+  // Active = unclaimed settled historical + current if settled+unclaimed
+  const activePositions = historicalPositions.filter(
+    (hp) => hp.batchStatus === BatchStatus.SETTLED && !hp.position.claimed
+  );
+  // Closed = claimed historical
+  const closedPositions = historicalPositions.filter(
+    (hp) => hp.position.claimed
+  );
+
+  // Activity = all historical stored orders (newest first) + current if exists
+  // already newest-first from localStorage
 
   // ── Render ───────────────────────────────────────────────────────────────────
   return (
-    <div className="flex-1 overflow-y-auto p-4 space-y-3">
+    <div className="flex-1 flex flex-col overflow-hidden">
 
-      {/* ── Current batch ──────────────────────────────────────────────────── */}
-      <div className="space-y-1.5">
-        <div className="flex items-center gap-2">
-          <p className="text-[10px] text-muted tracking-widest uppercase">Current Batch</p>
-          <BatchStatusBadge status={currentBatchStatus} />
-          {currentBatchId > 0n && (
-            <span className="text-[9px] text-muted-dim ml-auto">#{currentBatchId.toString()}</span>
-          )}
-        </div>
-
-        {currentBatchId === 0n ? (
-          <p className="text-muted-dim text-[11px]">Loading…</p>
-        ) : currentBatchStatus === BatchStatus.OPEN ? (
-          currentBatchCommitments.length > 0 ? (
-            <div className="border border-accent/20 bg-accent/5 p-3 space-y-2">
-              <p className="text-accent text-[11px] tracking-wide">✓ ORDER SEALED</p>
-              {currentBatchCommitments.map((c) => (
-                <div key={c.hash} className="space-y-0.5">
-                  <p className="text-[10px] text-muted-dim">
-                    Amount: <span className="text-text">{c.amount != null ? formatUsdc(c.amount) : "—"}</span>
-                  </p>
-                  <p className="hash-text text-[10px] text-muted-dim break-all">{c.hash}</p>
-                </div>
-              ))}
-              <p className="text-[10px] text-muted-dim">Waiting for batch settlement…</p>
-            </div>
-          ) : (
-            <div className="border border-border p-3">
-              <p className="text-[11px] text-muted-dim">No orders placed in this batch.</p>
-            </div>
-          )
-        ) : currentBatchStatus === BatchStatus.SETTLING ? (
-          <div className="border border-blue/20 bg-blue/5 p-3 space-y-1">
-            <div className="flex items-center gap-2">
-              <span className="w-2 h-2 border border-blue/60 border-t-transparent rounded-full animate-spin" />
-              <p className="text-blue/70 text-[11px] tracking-wide">Relayer computing clearing price…</p>
-            </div>
-            <p className="text-[10px] text-muted-dim">Usually takes 10–30 seconds</p>
-          </div>
-        ) : currentPosition === null ? (
-          <div className="border border-border p-3 animate-pulse">
-            <div className="h-3 w-32 bg-surface/80 rounded" />
-          </div>
-        ) : currentPosition.filledAmount === 0n && currentPosition.refundAmount === 0n ? (
-          <div className="border border-border p-3">
-            <p className="text-[11px] text-muted-dim">No position in this batch.</p>
-          </div>
-        ) : (
-          <PositionCard
-            batchId={currentBatchId}
-            position={currentPosition}
-            batchStatus={BatchStatus.SETTLED}
-            onClaim={handleClaim}
-            isClaiming={claimingBatchId === currentBatchId}
-            claimError={claimErrors[currentBatchId.toString()]}
-          />
-        )}
-      </div>
-
-      {/* Divider */}
-      <div className="border-t border-border/50" />
-
-      {/* ── Historical batches ─────────────────────────────────────────────── */}
-      <div className="space-y-1.5">
-        <p className="text-[10px] text-muted tracking-widest uppercase">Previous Batches</p>
-
-        {scanning ? (
-          <div className="space-y-2">
-            <SkeletonCard />
-            <SkeletonCard />
-            <SkeletonCard />
-          </div>
-        ) : historicalPositions.length === 0 ? (
-          <div className="border border-border p-3 text-center">
-            <p className="text-[11px] text-muted-dim">No historical positions found.</p>
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {historicalPositions.map((hp) => (
-              <PositionCard
-                key={hp.batchId.toString()}
-                batchId={hp.batchId}
-                position={hp.position}
-                batchStatus={hp.batchStatus}
-                onClaim={handleClaim}
-                isClaiming={claimingBatchId === hp.batchId}
-                claimError={claimErrors[hp.batchId.toString()]}
-              />
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ── Position card sub-component ────────────────────────────────────────────────
-interface PositionCardProps {
-  batchId: bigint;
-  batchStatus: BatchStatus;
-  position: {
-    filledAmount: bigint;
-    refundAmount: bigint;
-    isBuy: boolean;
-    claimed: boolean;
-  };
-  onClaim: (batchId: bigint) => Promise<void>;
-  isClaiming: boolean;
-  claimError?: string;
-}
-
-function PositionCard({ batchId, batchStatus, position, onClaim, isClaiming, claimError }: PositionCardProps) {
-  const formatUsdc = (v: bigint) => `$${(Number(v) / 1e6).toFixed(2)}`;
-  const isSettled = batchStatus === BatchStatus.SETTLED;
-  const hasPosition = position.filledAmount > 0n || position.refundAmount > 0n;
-
-  if (!hasPosition) return null;
-
-  return (
-    <div className={clsx(
-      "border p-3 space-y-2",
-      position.claimed ? "border-border/40" : isSettled ? "border-border" : "border-border/60"
-    )}>
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <span className="text-[10px] text-muted">Batch #{batchId.toString()}</span>
-        <div className="flex items-center gap-1.5">
-          {position.claimed ? (
-            <span className="text-[9px] tracking-widest uppercase text-accent/60">CLAIMED ✓</span>
-          ) : isSettled ? (
-            <span className="text-[9px] tracking-widest uppercase text-yellow-400/70 border border-yellow-400/20 px-1.5 py-0.5">UNCLAIMED</span>
-          ) : (
-            <BatchStatusBadge status={batchStatus} />
-          )}
-        </div>
-      </div>
-
-      {/* Position details */}
-      <div className="space-y-1">
-        <div className="flex justify-between">
-          <span className="text-[10px] text-muted">Side</span>
-          <span className={clsx("text-[10px]", position.isBuy ? "text-accent" : "text-danger")}>
-            {position.isBuy ? "BUY YES" : "SELL YES"}
-          </span>
-        </div>
-        {position.filledAmount > 0n && (
-          <div className="flex justify-between">
-            <span className="text-[10px] text-muted">Filled</span>
-            <span className="text-[10px] text-text">{formatUsdc(position.filledAmount)}</span>
-          </div>
-        )}
-        {position.refundAmount > 0n && (
-          <div className="flex justify-between">
-            <span className="text-[10px] text-muted">Refund</span>
-            <span className="text-[10px] text-text">{formatUsdc(position.refundAmount)}</span>
-          </div>
-        )}
-      </div>
-
-      {/* Claim button */}
-      {isSettled && !position.claimed && (
-        <>
+      {/* ── Top-level tabs ─────────────────────────────────────────────────── */}
+      <div className="border-b border-border flex items-center px-1 flex-shrink-0">
+        {(["positions", "activity"] as const).map((tab) => (
           <button
-            onClick={() => onClaim(batchId)}
-            disabled={isClaiming}
-            className="w-full py-2 border border-accent text-accent text-[10px] tracking-widest uppercase hover:bg-accent/5 transition-colors disabled:opacity-40"
-          >
-            {isClaiming ? (
-              <span className="flex items-center justify-center gap-1.5">
-                <span className="w-2.5 h-2.5 border border-current border-t-transparent rounded-full animate-spin" />
-                CLAIMING…
-              </span>
-            ) : (
-              "CLAIM POSITION"
+            key={tab}
+            type="button"
+            onClick={() => setMainTab(tab)}
+            className={clsx(
+              "px-3 py-2.5 text-[10px] tracking-widest uppercase transition-colors border-b-2",
+              mainTab === tab
+                ? "border-text/40 text-text"
+                : "border-transparent text-muted hover:text-text",
             )}
+          >
+            {tab === "positions" ? "Positions" : "Activity"}
           </button>
-          {isClaiming && (
-            <p className="text-[9px] text-muted-dim text-center">
-              Generating ZK proof + awaiting tx confirmation (~20s)
-            </p>
+        ))}
+      </div>
+
+      {/* ── POSITIONS TAB ──────────────────────────────────────────────────── */}
+      {mainTab === "positions" && (
+        <div className="flex-1 flex flex-col overflow-hidden">
+
+          {/* Active / Closed sub-tabs */}
+          <div className="border-b border-border/50 flex items-center px-4 gap-4 flex-shrink-0">
+            {(["active", "closed"] as const).map((sub) => {
+              const count = sub === "active"
+                ? activePositions.length + (currentIsActive ? 1 : 0)
+                : closedPositions.length;
+              return (
+                <button
+                  key={sub}
+                  type="button"
+                  onClick={() => setPosTab(sub)}
+                  className={clsx(
+                    "py-2 text-[10px] tracking-widest uppercase transition-colors flex items-center gap-1.5",
+                    posTab === sub ? "text-text" : "text-muted hover:text-text",
+                  )}
+                >
+                  {sub === "active" ? "Active" : "Closed"}
+                  {count > 0 && (
+                    <span className={clsx(
+                      "text-[8px] px-1 py-0.5 border tabular-nums",
+                      posTab === sub ? "border-text/30 text-text" : "border-border text-muted-dim",
+                    )}>{count}</span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* ── ACTIVE sub-tab ───────────────────────────────────────────── */}
+          {posTab === "active" && (
+            <div className="flex-1 overflow-y-auto">
+
+              {/* Current batch status */}
+              {currentBatchStatus === BatchStatus.OPEN && hasCurrentOrder && (
+                <div className="px-4 py-3 border-b border-border/40 bg-accent/5">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
+                    <span className="text-[10px] text-accent tracking-widest uppercase">ORDER SEALED</span>
+                    <span className="text-[9px] text-muted-dim ml-auto">Batch #{currentBatchId.toString()}</span>
+                  </div>
+                  <p className="text-[10px] text-muted-dim">Waiting for batch to close and settle…</p>
+                </div>
+              )}
+
+              {currentBatchStatus === BatchStatus.SETTLING && hasCurrentOrder && (
+                <div className="px-4 py-3 border-b border-border/40">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="w-2 h-2 border border-blue/60 border-t-transparent rounded-full animate-spin flex-shrink-0" />
+                    <span className="text-[10px] text-blue/70 tracking-wide">Relayer computing clearing price…</span>
+                  </div>
+                  <p className="text-[9px] text-muted-dim">Usually takes 10–30 seconds</p>
+                </div>
+              )}
+
+              {/* Current batch settled + unclaimed */}
+              {currentIsActive && currentPosition && (
+                <PositionRow
+                  batchId={currentBatchId}
+                  position={currentPosition}
+                  clearingPrice={0n}
+                  onClaim={handleClaim}
+                  isClaiming={claimingBatchId === currentBatchId}
+                  claimError={claimErrors[currentBatchId.toString()]}
+                  isActive={true}
+                />
+              )}
+
+              {/* Historical active (unclaimed settled) */}
+              {scanning ? (
+                <div>
+                  <SkeletonRow />
+                  <SkeletonRow />
+                </div>
+              ) : activePositions.length === 0 && !currentIsActive && !hasCurrentOrder ? (
+                <div className="px-4 py-8 text-center">
+                  <p className="text-[11px] text-muted-dim">No active positions.</p>
+                  <p className="text-[10px] text-muted-dim mt-1">Place an order to get started.</p>
+                </div>
+              ) : (
+                activePositions.map((hp) => (
+                  <PositionRow
+                    key={hp.batchId.toString()}
+                    batchId={hp.batchId}
+                    position={hp.position}
+                    clearingPrice={hp.clearingPrice}
+                    marketQuestion={hp.marketQuestion}
+                    shares={hp.shares}
+                    onClaim={handleClaim}
+                    isClaiming={claimingBatchId === hp.batchId}
+                    claimError={claimErrors[hp.batchId.toString()]}
+                    isActive={true}
+                  />
+                ))
+              )}
+            </div>
           )}
-          {claimError && !isClaiming && (
-            <p className="text-danger text-[10px]">{claimError}</p>
+
+          {/* ── CLOSED sub-tab ───────────────────────────────────────────── */}
+          {posTab === "closed" && (
+            <div className="flex-1 overflow-y-auto">
+              {scanning ? (
+                <div><SkeletonRow /><SkeletonRow /></div>
+              ) : closedPositions.length === 0 ? (
+                <div className="px-4 py-8 text-center">
+                  <p className="text-[11px] text-muted-dim">No closed positions yet.</p>
+                </div>
+              ) : (
+                closedPositions.map((hp) => (
+                  <PositionRow
+                    key={hp.batchId.toString()}
+                    batchId={hp.batchId}
+                    position={hp.position}
+                    clearingPrice={hp.clearingPrice}
+                    marketQuestion={hp.marketQuestion}
+                    shares={hp.shares}
+                    onClaim={handleClaim}
+                    isClaiming={false}
+                    isActive={false}
+                  />
+                ))
+              )}
+            </div>
           )}
-        </>
+        </div>
+      )}
+
+      {/* ── ACTIVITY TAB ───────────────────────────────────────────────────── */}
+      {mainTab === "activity" && (
+        <div className="flex-1 overflow-y-auto">
+
+          {/* Current batch order (if any) */}
+          {currentForActivity && currentBatchId > 0n && (
+            <ActivityRow
+              batchId={currentBatchId}
+              isBuy={true}  // current session orders are always BUY for simplicity
+              amount={currentForActivity.amount ?? 0n}
+              batchStatus={currentBatchStatus}
+            />
+          )}
+
+          {/* Historical orders */}
+          {scanning ? (
+            <div><SkeletonRow /><SkeletonRow /><SkeletonRow /></div>
+          ) : allStoredOrders.length === 0 && !currentForActivity ? (
+            <div className="px-4 py-8 text-center">
+              <p className="text-[11px] text-muted-dim">No activity yet.</p>
+            </div>
+          ) : (
+            allStoredOrders.map((o, i) => (
+              <ActivityRow
+                key={`${o.batchId}-${i}`}
+                batchId={BigInt(o.batchId)}
+                isBuy={o.isBuy}
+                amount={BigInt(o.amount)}
+                clearingPrice={o.clearingPrice}
+                shares={o.shares}
+                marketQuestion={o.marketQuestion}
+                timestamp={o.timestamp}
+                batchStatus={o.batchStatus}
+              />
+            ))
+          )}
+        </div>
       )}
     </div>
   );

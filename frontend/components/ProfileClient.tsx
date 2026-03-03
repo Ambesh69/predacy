@@ -1,9 +1,12 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
-import { createPublicClient, http, parseAbiItem } from "viem";
+import {
+  createPublicClient, http, parseAbiItem,
+  keccak256, encodeAbiParameters,
+} from "viem";
 import { clsx } from "clsx";
 import { BATCH_VAULT_ABI, ERC20_ABI, BatchStatus, getContracts } from "@/lib/contracts";
 import { ACTIVE_CHAIN } from "@/lib/chain";
@@ -22,10 +25,9 @@ const ORDER_COMMITTED_EVENT = parseAbiItem(
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-/** Persisted locally when the user submits an order (MarketPageClient writes this) */
 interface StoredOrder {
   commitment:      string;
-  salt?:           string;   // preimage needed at claim time; undefined in older cached orders
+  salt?:           string;
   amount:          string;
   isBuy:           boolean;
   limitPrice:      string;
@@ -33,22 +35,31 @@ interface StoredOrder {
   marketId:        string | null;
   marketQuestion:  string | null;
   timestamp:       number;
+  claimed?:        boolean;
 }
 
 interface OrderEntry {
   // from localStorage
-  commitment:      `0x${string}`;
-  rawAmount:       bigint;
-  isBuy:           boolean;
-  limitPrice:      bigint;
-  batchId:         bigint;
-  marketId?:       `0x${string}`;
-  marketQuestion?: string;
-  timestamp:       number;
+  commitment:       `0x${string}`;
+  salt?:            string;
+  rawAmount:        bigint;
+  isBuy:            boolean;
+  limitPrice:       bigint;
+  batchId:          bigint;
+  marketId?:        `0x${string}`;
+  marketQuestion?:  string;
+  timestamp:        number;
   // enriched from chain
-  txHash?:         `0x${string}`;
-  batchStatus?:    BatchStatus;
-  clearingPrice?:  bigint;
+  txHash?:          `0x${string}`;
+  batchStatus?:     BatchStatus;
+  clearingPrice?:   bigint;
+  // position data
+  filledAmount?:    bigint;
+  refundAmount?:    bigint;
+  claimed?:         boolean;
+  // market data
+  currentYesPrice?: number;   // 0–1 float from Gamma API
+  shares?:          number;   // computed from filledAmount / clearingPrice
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -59,6 +70,27 @@ function fUsdc(v: bigint) {
 function shortHash(h: string, pre = 10, suf = 8) {
   return `${h.slice(0, pre)}…${h.slice(-suf)}`;
 }
+function timeAgo(ts: number) {
+  const diff = Date.now() - ts;
+  const mins = Math.floor(diff / 60_000);
+  if (mins < 1)  return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24)  return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
+function cleanClaimError(raw: string): string {
+  if (raw.includes("AlreadyClaimed"))     return "Already claimed.";
+  if (raw.includes("NothingToClaim"))     return "Nothing to claim for this order.";
+  if (raw.includes("BatchNotSettled"))    return "Batch not yet settled — try again shortly.";
+  if (raw.includes("ZKProofInvalid"))     return "ZK proof invalid — contact support.";
+  if (raw.includes("ClaimVerifierNotSet")) return "Claim verifier not configured on-chain.";
+  if (raw.includes("preimage not found")) return "Order preimage missing — cannot claim from this device.";
+  if (raw.length > 100) return raw.slice(0, 100) + "…";
+  return raw;
+}
+
+// ── Sub-components ────────────────────────────────────────────────────────────
 
 function CopyButton({ value, label }: { value: string; label?: string }) {
   const [copied, setCopied] = useState(false);
@@ -81,58 +113,42 @@ function CopyButton({ value, label }: { value: string; label?: string }) {
   );
 }
 
-function StatusBadge({
-  status,
-}: {
-  status?: BatchStatus;
-}) {
+function StatusBadge({ status }: { status?: BatchStatus }) {
   if (status === BatchStatus.SETTLED)
-    return (
-      <span className="text-[9px] tracking-widest uppercase text-yellow-400/70 border border-yellow-400/20 px-1.5 py-0.5">
-        SETTLED
-      </span>
-    );
+    return <span className="text-[9px] tracking-widest uppercase text-yellow-400/70 border border-yellow-400/20 px-1.5 py-0.5">SETTLED</span>;
   if (status === BatchStatus.SETTLING)
-    return (
-      <span className="text-[9px] tracking-widest uppercase text-blue-400/70 border border-blue-400/20 px-1.5 py-0.5 animate-pulse">
-        SETTLING
-      </span>
-    );
+    return <span className="text-[9px] tracking-widest uppercase text-blue-400/70 border border-blue-400/20 px-1.5 py-0.5 animate-pulse">SETTLING</span>;
   if (status === BatchStatus.OPEN)
-    return (
-      <span className="text-[9px] tracking-widest uppercase text-accent/70 border border-accent/20 px-1.5 py-0.5">
-        OPEN
-      </span>
-    );
+    return <span className="text-[9px] tracking-widest uppercase text-accent/70 border border-accent/20 px-1.5 py-0.5">OPEN</span>;
+  return <span className="text-[9px] tracking-widest uppercase text-muted-dim border border-border px-1.5 py-0.5">PENDING</span>;
+}
+
+// ── Skeleton row ──────────────────────────────────────────────────────────────
+
+function SkeletonRow() {
   return (
-    <span className="text-[9px] tracking-widest uppercase text-muted-dim border border-border px-1.5 py-0.5">
-      PENDING
-    </span>
+    <div className="p-4 border-b border-border animate-pulse space-y-2">
+      <div className="flex justify-between">
+        <div className="h-3 w-20 bg-surface rounded" />
+        <div className="h-3 w-24 bg-surface rounded" />
+      </div>
+      <div className="h-3 w-56 bg-surface/60 rounded" />
+      <div className="h-2.5 w-32 bg-surface/40 rounded" />
+    </div>
   );
 }
 
-// ── Order row ────────────────────────────────────────────────────────────────
+// ── Activity row (expandable proof) ──────────────────────────────────────────
 
-function OrderRow({ order }: { order: OrderEntry }) {
+function ActivityRow({ order }: { order: OrderEntry }) {
   const [expanded, setExpanded] = useState(false);
 
   const amountDisplay = order.isBuy
     ? fUsdc(order.rawAmount)
     : `${(Number(order.rawAmount) / 1e18).toFixed(4)} YES`;
 
-  const timeAgo = (() => {
-    const diff = Date.now() - order.timestamp;
-    const mins = Math.floor(diff / 60_000);
-    if (mins < 1) return "just now";
-    if (mins < 60) return `${mins}m ago`;
-    const hrs = Math.floor(mins / 60);
-    if (hrs < 24) return `${hrs}h ago`;
-    return `${Math.floor(hrs / 24)}d ago`;
-  })();
-
   return (
     <div className="bg-bg hover:bg-surface/20 transition-colors border-b border-border last:border-b-0">
-      {/* ── Main clickable row ─────────────────────────────────────────── */}
       <div
         className="p-4 cursor-pointer select-none"
         role="button"
@@ -146,14 +162,19 @@ function OrderRow({ order }: { order: OrderEntry }) {
         }}
       >
         <div className="flex items-start justify-between gap-4">
-          {/* Left: batch + market */}
+          {/* Left: type badge + market question */}
           <div className="flex-1 min-w-0 space-y-1">
             <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-[10px] text-muted-dim font-mono">
-                #{order.batchId.toString()}
+              <span className={clsx(
+                "text-[9px] tracking-widest uppercase px-1.5 py-0.5 border font-mono",
+                order.isBuy
+                  ? "border-accent/30 text-accent bg-accent/5"
+                  : "border-danger/30 text-danger bg-danger/5",
+              )}>
+                {order.isBuy ? "BUY" : "SELL"}
               </span>
               <StatusBadge status={order.batchStatus} />
-              <span className="text-[10px] text-muted-dim">{timeAgo}</span>
+              <span className="text-[10px] text-muted-dim">{timeAgo(order.timestamp)}</span>
             </div>
             {order.marketQuestion ? (
               <p className="text-[12px] text-text leading-snug line-clamp-2">
@@ -168,35 +189,22 @@ function OrderRow({ order }: { order: OrderEntry }) {
             )}
           </div>
 
-          {/* Right: amount + direction (always visible — user knows their own order) */}
+          {/* Right: amount + clearing price */}
           <div className="text-right flex-shrink-0 space-y-1">
             <p className="text-[13px] font-medium text-text tabular-nums">
               {amountDisplay}
             </p>
-            <p
-              className={clsx(
-                "text-[10px] tracking-widest uppercase",
-                order.isBuy ? "text-accent" : "text-danger"
-              )}
-            >
-              {order.isBuy ? "BUY YES" : "SELL YES"}
-            </p>
+            {order.batchStatus === BatchStatus.SETTLED && order.clearingPrice != null && order.clearingPrice > 0n && (
+              <p className="text-[10px] text-muted">
+                @ <span className="text-text">{(Number(order.clearingPrice) / 10_000).toFixed(1)}¢</span>
+              </p>
+            )}
+            {order.claimed && (
+              <p className="text-[9px] text-accent/60 tracking-widest uppercase">CLAIMED ✓</p>
+            )}
           </div>
         </div>
 
-        {/* Fill details after settlement */}
-        {order.batchStatus === BatchStatus.SETTLED && order.clearingPrice != null && order.clearingPrice > 0n && (
-          <div className="mt-2.5 flex items-center gap-4 flex-wrap">
-            <span className="text-[11px] text-muted">
-              Cleared @{" "}
-              <span className="text-text">
-                {(Number(order.clearingPrice) / 10000).toFixed(1)}¢
-              </span>
-            </span>
-          </div>
-        )}
-
-        {/* Expand hint */}
         <div className="mt-2 flex items-center gap-1.5">
           <span className="text-[9px] text-muted-dim tracking-widest">
             {expanded ? "▲ HIDE DETAILS" : "▼ SHOW PROOF"}
@@ -204,10 +212,8 @@ function OrderRow({ order }: { order: OrderEntry }) {
         </div>
       </div>
 
-      {/* ── Expanded: cryptographic proof ──────────────────────────────── */}
       {expanded && (
         <div className="border-t border-border/50 px-4 py-3 bg-surface/10 space-y-3">
-          {/* Commitment */}
           <div>
             <p className="text-[10px] text-muted tracking-widest uppercase mb-1.5">
               Sealed Commitment Hash
@@ -225,7 +231,6 @@ function OrderRow({ order }: { order: OrderEntry }) {
             </p>
           </div>
 
-          {/* Transaction */}
           {order.txHash && !/^0x0+$/.test(order.txHash) ? (
             <div>
               <p className="text-[10px] text-muted tracking-widest uppercase mb-1.5">
@@ -262,14 +267,12 @@ function OrderRow({ order }: { order: OrderEntry }) {
             </div>
           )}
 
-          {/* Privacy note */}
           <div className="bg-accent/5 border border-accent/10 px-3 py-2">
             <p className="text-[10px] text-accent/60 leading-relaxed">
               <span className="text-accent/40">▸ </span>
               Your wallet address never appears in order events — the relayer
               submits on-chain on your behalf. Only your buy/sell direction,
-              limit price, and salt are sealed inside the commitment and cannot
-              be backtracked.
+              limit price, and salt are sealed inside the commitment.
             </p>
           </div>
         </div>
@@ -278,17 +281,153 @@ function OrderRow({ order }: { order: OrderEntry }) {
   );
 }
 
-// ── Skeleton ──────────────────────────────────────────────────────────────────
+// ── Position table row (Polymarket-style, full-width) ─────────────────────────
 
-function SkeletonRow() {
+function PositionRow({
+  order,
+  onClaim,
+  isClaiming,
+  claimError,
+}: {
+  order:      OrderEntry;
+  onClaim:    (order: OrderEntry) => Promise<void>;
+  isClaiming: boolean;
+  claimError?: string;
+}) {
+  const isPending  = order.batchStatus === BatchStatus.OPEN || order.batchStatus === BatchStatus.SETTLING;
+  const isSettled  = order.batchStatus === BatchStatus.SETTLED;
+  const canClaim   = isSettled && !order.claimed && (order.filledAmount ?? 0n) > 0n;
+
+  const avgCents = order.clearingPrice && order.clearingPrice > 0n
+    ? (Number(order.clearingPrice) / 1e4).toFixed(1) + "¢"
+    : "—";
+
+  const currCents = order.currentYesPrice != null
+    ? (order.currentYesPrice * 100).toFixed(1) + "¢"
+    : "—";
+
+  const filledUsdc = order.filledAmount != null
+    ? Number(order.filledAmount) / 1e6
+    : Number(order.rawAmount) / 1e6;
+
+  const currentValue = order.shares != null && order.currentYesPrice != null
+    ? order.shares * order.currentYesPrice
+    : null;
+
+  const pnl    = currentValue != null ? currentValue - filledUsdc : null;
+  const pnlPct = pnl != null && filledUsdc > 0 ? (pnl / filledUsdc) * 100 : null;
+
   return (
-    <div className="p-4 border-b border-border animate-pulse space-y-2">
-      <div className="flex justify-between">
-        <div className="h-3 w-20 bg-surface rounded" />
-        <div className="h-3 w-24 bg-surface rounded" />
+    <div className={clsx(
+      "border-b border-border last:border-b-0 p-4 space-y-3",
+      order.claimed && "opacity-50",
+    )}>
+      <div className="flex items-start gap-4">
+        {/* Left: market info */}
+        <div className="flex-1 min-w-0 space-y-1.5">
+          {/* Direction + status badges */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className={clsx(
+              "text-[9px] tracking-widest uppercase px-1.5 py-0.5 border font-mono",
+              order.isBuy
+                ? "border-accent/30 text-accent bg-accent/5"
+                : "border-danger/30 text-danger bg-danger/5",
+            )}>
+              {order.isBuy ? "YES" : "NO"}
+            </span>
+            {isPending && (
+              <span className={clsx(
+                "text-[9px] tracking-widest uppercase px-1.5 py-0.5 border",
+                order.batchStatus === BatchStatus.SETTLING
+                  ? "text-blue/60 border-blue/20 animate-pulse"
+                  : "text-muted border-border",
+              )}>
+                {order.batchStatus === BatchStatus.SETTLING ? "SETTLING" : "PENDING"}
+              </span>
+            )}
+            {order.claimed && (
+              <span className="text-[9px] tracking-widest uppercase text-accent/50 border border-accent/20 px-1.5 py-0.5">
+                CLAIMED ✓
+              </span>
+            )}
+          </div>
+
+          {/* Market question */}
+          <p className="text-[12px] text-text leading-snug line-clamp-2">
+            {order.marketQuestion
+              ?? (order.marketId ? shortHash(order.marketId, 14, 8) : `Batch #${order.batchId}`)}
+          </p>
+
+          {/* Shares + cost */}
+          {order.shares != null && order.shares > 0 && (
+            <p className="text-[10px] text-muted-dim">
+              {order.shares.toFixed(2)} shares
+              {" · "}cost {fUsdc(order.filledAmount ?? order.rawAmount)}
+            </p>
+          )}
+        </div>
+
+        {/* Right: AVG | CURRENT | VALUE columns */}
+        <div className="flex items-start gap-5 flex-shrink-0 text-right">
+          {/* AVG */}
+          <div className="min-w-[44px]">
+            <p className="text-[9px] text-muted-dim tracking-widest uppercase mb-1">AVG</p>
+            <p className="text-[11px] text-text tabular-nums font-mono">{avgCents}</p>
+          </div>
+
+          {/* CURRENT */}
+          <div className="min-w-[54px]">
+            <p className="text-[9px] text-muted-dim tracking-widest uppercase mb-1">CURRENT</p>
+            <p className="text-[11px] text-text tabular-nums font-mono">{currCents}</p>
+          </div>
+
+          {/* VALUE */}
+          <div className="min-w-[68px]">
+            <p className="text-[9px] text-muted-dim tracking-widest uppercase mb-1">VALUE</p>
+            {currentValue != null ? (
+              <div>
+                <p className="text-[11px] text-text tabular-nums font-mono">
+                  ${currentValue.toFixed(2)}
+                </p>
+                {pnl != null && (
+                  <p className={clsx(
+                    "text-[9px] tabular-nums",
+                    pnl >= 0 ? "text-accent" : "text-danger",
+                  )}>
+                    {pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}
+                    {pnlPct != null ? ` (${pnlPct.toFixed(0)}%)` : ""}
+                  </p>
+                )}
+              </div>
+            ) : (
+              <p className="text-[11px] text-muted-dim">
+                {isPending ? "—" : `$${filledUsdc.toFixed(2)}`}
+              </p>
+            )}
+          </div>
+        </div>
       </div>
-      <div className="h-3 w-56 bg-surface/60 rounded" />
-      <div className="h-2.5 w-32 bg-surface/40 rounded" />
+
+      {/* Claim button */}
+      {canClaim && (
+        <div className="space-y-1">
+          <button
+            onClick={() => onClaim(order)}
+            disabled={isClaiming}
+            className="w-full py-1.5 border border-accent text-accent text-[10px] tracking-widest uppercase hover:bg-accent/5 transition-colors disabled:opacity-40"
+          >
+            {isClaiming ? (
+              <span className="flex items-center justify-center gap-1.5">
+                <span className="w-2.5 h-2.5 border border-current border-t-transparent rounded-full animate-spin" />
+                CLAIMING… (~20s)
+              </span>
+            ) : "CLAIM POSITION"}
+          </button>
+          {claimError && !isClaiming && (
+            <p className="text-danger text-[10px] text-center">{claimError}</p>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -300,11 +439,23 @@ export default function ProfileClient() {
   const { wallets } = useWallets();
   const walletAddress = wallets[0]?.address as `0x${string}` | undefined;
 
-  const [orders, setOrders] = useState<OrderEntry[]>([]);
-  const [usdcBalance, setUsdcBalance] = useState<bigint | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [enriching, setEnriching] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [orders,       setOrders]       = useState<OrderEntry[]>([]);
+  const [usdcBalance,  setUsdcBalance]  = useState<bigint | null>(null);
+  const [loading,      setLoading]      = useState(true);
+  const [enriching,    setEnriching]    = useState(false);
+  const [error,        setError]        = useState<string | null>(null);
+  const [mainTab,      setMainTab]      = useState<"positions" | "activity">("positions");
+  const [posTab,       setPosTab]       = useState<"active" | "closed">("active");
+  const [claimingKey,  setClaimingKey]  = useState<string | null>(null);  // commitment key
+  const [claimErrors,  setClaimErrors]  = useState<Record<string, string>>({});
+  const [toast, setToast] = useState<{ id: number; message: string; type: "success" | "error" } | null>(null);
+  const toastIdRef = useRef(0);
+
+  function pushToast(message: string, type: "success" | "error") {
+    const id = ++toastIdRef.current;
+    setToast({ id, message, type });
+    setTimeout(() => setToast((t) => (t?.id === id ? null : t)), 4000);
+  }
 
   const loadProfile = useCallback(async () => {
     if (!walletAddress) return;
@@ -322,14 +473,9 @@ export default function ProfileClient() {
         functionName: "balanceOf",
         args: [walletAddress],
       }) as bigint;
-
       setUsdcBalance(balance);
 
-      // 2. Load orders from localStorage
-      // Orders are stored here by MarketPageClient when the user submits an order.
-      // The relayer submits commitOrderFor on-chain, so the user's wallet address
-      // never appears as `trader` in OrderCommitted events — only the relayer address
-      // is visible. We therefore track history locally rather than via chain scanning.
+      // 2. Load orders from localStorage (newest first)
       let storedOrders: StoredOrder[] = [];
       try {
         const key = `predacy:orders:${walletAddress.toLowerCase()}`;
@@ -342,32 +488,34 @@ export default function ProfileClient() {
         return;
       }
 
-      // Build initial entries from localStorage (newest first)
-      const entries: OrderEntry[] = storedOrders.map((o) => ({
-        commitment:     o.commitment as `0x${string}`,
-        rawAmount:      BigInt(o.amount),
-        isBuy:          o.isBuy,
-        limitPrice:     BigInt(o.limitPrice),
-        batchId:        BigInt(o.batchId),
-        marketId:       (o.marketId ?? undefined) as `0x${string}` | undefined,
-        marketQuestion: o.marketQuestion ?? undefined,
-        timestamp:      o.timestamp,
-      }));
+      const entries: OrderEntry[] = storedOrders
+        .slice()
+        .reverse()  // newest first
+        .map((o) => ({
+          commitment:     o.commitment as `0x${string}`,
+          salt:           o.salt,
+          rawAmount:      BigInt(o.amount),
+          isBuy:          o.isBuy,
+          limitPrice:     BigInt(o.limitPrice),
+          batchId:        BigInt(o.batchId),
+          marketId:       (o.marketId ?? undefined) as `0x${string}` | undefined,
+          marketQuestion: o.marketQuestion ?? undefined,
+          timestamp:      o.timestamp,
+          claimed:        o.claimed,
+        }));
 
       setOrders(entries);
       setLoading(false);
       setEnriching(true);
 
-      // 3. Enrich: getBatch status + find tx hash per unique batch
+      // 3. Fetch batch status + clearing price + tx hashes per unique batch
       const uniqueBatchIds = [...new Set(entries.map((e) => e.batchId))];
-
-      const batchMap = new Map<bigint, { status: number; clearingPrice: bigint }>();
-      const txHashMap = new Map<string, `0x${string}`>(); // commitment.toLowerCase() → txHash
+      const batchMap   = new Map<bigint, { status: number; clearingPrice: bigint }>();
+      const txHashMap  = new Map<string, `0x${string}`>();
 
       await Promise.allSettled(
         uniqueBatchIds.map(async (batchId) => {
           try {
-            // getBatch for status + clearing price
             const batch = await publicClient.readContract({
               address: contracts.batchVault,
               abi: BATCH_VAULT_ABI,
@@ -376,43 +524,133 @@ export default function ProfileClient() {
             }) as { marketId: `0x${string}`; status: number; clearingPrice: bigint };
             batchMap.set(batchId, { status: batch.status, clearingPrice: batch.clearingPrice });
 
-            // Scan OrderCommitted events for this batch to find tx hashes
-            // (filter by batchId which is indexed — efficient)
-            const logs = await publicClient
-              .getLogs({
+            const logs = await publicClient.getLogs({
+              address: contracts.batchVault,
+              event: ORDER_COMMITTED_EVENT,
+              args: { batchId },
+              fromBlock: 0n,
+              toBlock: "latest",
+            }).catch(async () => {
+              const tip = await publicClient.getBlockNumber();
+              return publicClient.getLogs({
                 address: contracts.batchVault,
                 event: ORDER_COMMITTED_EVENT,
                 args: { batchId },
-                fromBlock: 0n,
+                fromBlock: tip > 200000n ? tip - 200000n : 0n,
                 toBlock: "latest",
-              })
-              .catch(async () => {
-                const tip = await publicClient.getBlockNumber();
-                return publicClient.getLogs({
-                  address: contracts.batchVault,
-                  event: ORDER_COMMITTED_EVENT,
-                  args: { batchId },
-                  fromBlock: tip > 200000n ? tip - 200000n : 0n,
-                  toBlock: "latest",
-                });
               });
+            });
 
             for (const log of logs) {
               const c = (log.args.commitment as string | undefined)?.toLowerCase();
-              if (c && log.transactionHash) {
-                txHashMap.set(c, log.transactionHash);
-              }
+              if (c && log.transactionHash) txHashMap.set(c, log.transactionHash);
             }
-          } catch { /* non-fatal — show order without chain enrichment */ }
+          } catch { /* non-fatal */ }
         })
       );
 
-      const enriched = entries.map((e) => ({
-        ...e,
-        txHash:       txHashMap.get(e.commitment.toLowerCase()),
-        batchStatus:  batchMap.get(e.batchId)?.status as BatchStatus | undefined,
-        clearingPrice: batchMap.get(e.batchId)?.clearingPrice,
-      }));
+      // 4. Enrich position data for SETTLED batches
+      const posMap = new Map<string, {
+        filledAmount: bigint; refundAmount: bigint; claimed: boolean;
+      }>();
+
+      const settledEntries = entries.filter((e) => {
+        const b = batchMap.get(e.batchId);
+        return b?.status === BatchStatus.SETTLED;
+      });
+
+      await Promise.allSettled(
+        settledEntries.map(async (entry) => {
+          try {
+            const pos = await publicClient.readContract({
+              address:      contracts.batchVault,
+              abi:          BATCH_VAULT_ABI,
+              functionName: "getPosition",
+              args:         [entry.batchId, entry.commitment],
+            }) as { filledAmount: bigint; refundAmount: bigint; isBuy: boolean; claimed: boolean };
+
+            // usedNullifiers is authoritative for claimed state
+            let claimed = pos.claimed || entry.claimed === true;
+            if (!claimed && entry.salt) {
+              try {
+                const nullifier = keccak256(
+                  encodeAbiParameters(
+                    [{ type: "bytes32" }, { type: "uint256" }, { type: "bytes32" }],
+                    [entry.commitment, entry.batchId, entry.salt as `0x${string}`],
+                  )
+                );
+                claimed = await publicClient.readContract({
+                  address:      contracts.batchVault,
+                  abi:          BATCH_VAULT_ABI,
+                  functionName: "usedNullifiers",
+                  args:         [nullifier],
+                }) as boolean;
+                if (claimed) {
+                  try {
+                    const sk = `predacy:orders:${walletAddress.toLowerCase()}`;
+                    const all: Array<Record<string, unknown>> = JSON.parse(localStorage.getItem(sk) ?? "[]");
+                    localStorage.setItem(sk, JSON.stringify(
+                      all.map((o) => o.batchId === entry.batchId.toString() ? { ...o, claimed: true } : o)
+                    ));
+                  } catch { /* ignore */ }
+                }
+              } catch { /* leave as unclaimed */ }
+            }
+
+            posMap.set(entry.commitment.toLowerCase(), {
+              filledAmount: pos.filledAmount,
+              refundAmount: pos.refundAmount,
+              claimed,
+            });
+          } catch { /* non-fatal */ }
+        })
+      );
+
+      // 5. Fetch current YES prices from Gamma API for all unique markets
+      const priceMap = new Map<string, number>(); // marketId.lower() → YES price 0–1
+      const uniqueMarketIds = [...new Set(
+        entries.filter((e) => e.marketId).map((e) => e.marketId!)
+      )];
+      await Promise.allSettled(
+        uniqueMarketIds.map(async (marketId) => {
+          try {
+            const conditionId = marketId.slice(2); // strip 0x
+            const r = await fetch(
+              `https://gamma-api.polymarket.com/markets?condition_id=${conditionId}`
+            );
+            const data = await r.json();
+            const prices = JSON.parse(data[0]?.outcomePrices ?? "[]");
+            const yesPrice = parseFloat(prices[0] ?? "0");
+            if (yesPrice > 0) priceMap.set(marketId.toLowerCase(), yesPrice);
+          } catch { /* non-fatal */ }
+        })
+      );
+
+      // 6. Assemble enriched entries
+      const enriched: OrderEntry[] = entries.map((e) => {
+        const batchInfo   = batchMap.get(e.batchId);
+        const posInfo     = posMap.get(e.commitment.toLowerCase());
+        const clearingPrice = batchInfo?.clearingPrice ?? 0n;
+        const filledAmount  = posInfo?.filledAmount ?? 0n;
+        const currentYesPrice = priceMap.get((e.marketId ?? "").toLowerCase());
+
+        const shares =
+          clearingPrice > 0n && filledAmount > 0n
+            ? Number(filledAmount * 1_000_000n / clearingPrice) / 1_000_000
+            : undefined;
+
+        return {
+          ...e,
+          txHash:          txHashMap.get(e.commitment.toLowerCase()),
+          batchStatus:     batchInfo?.status as BatchStatus | undefined,
+          clearingPrice:   clearingPrice > 0n ? clearingPrice : undefined,
+          filledAmount:    posInfo ? filledAmount : undefined,
+          refundAmount:    posInfo?.refundAmount,
+          claimed:         posInfo?.claimed ?? e.claimed,
+          currentYesPrice,
+          shares,
+        };
+      });
 
       setOrders(enriched);
       setEnriching(false);
@@ -430,7 +668,111 @@ export default function ProfileClient() {
     }
   }, [ready, authenticated, walletAddress, loadProfile]);
 
-  // ── Not ready ──────────────────────────────────────────────────────────────
+  // ── Claim handler ─────────────────────────────────────────────────────────
+
+  const handleClaim = async (order: OrderEntry) => {
+    if (!walletAddress) return;
+    const key = order.commitment.toLowerCase();
+    setClaimingKey(key);
+    setClaimErrors((prev) => { const n = { ...prev }; delete n[key]; return n; });
+
+    try {
+      const storageKey = `predacy:orders:${walletAddress.toLowerCase()}`;
+      const storedOrders: Array<StoredOrder> =
+        JSON.parse(localStorage.getItem(storageKey) ?? "[]");
+      const myOrder = storedOrders.find((o) => o.batchId === order.batchId.toString());
+      if (!myOrder)           throw new Error("Order preimage not found in local storage — cannot claim");
+      if (!myOrder.marketId)  throw new Error("Order is missing marketId — cannot claim");
+
+      const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
+      if (!relayerUrl) throw new Error("NEXT_PUBLIC_RELAYER_URL is not set");
+
+      const resp = await fetch(`${relayerUrl}/claim-proof`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          batchId:    order.batchId.toString(),
+          marketId:   myOrder.marketId,
+          isBuy:      myOrder.isBuy,
+          amount:     myOrder.amount,
+          limitPrice: myOrder.limitPrice,
+          salt:       myOrder.salt,
+          recipient:  walletAddress,
+        }),
+      });
+
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.error ?? `Claim request failed (${resp.status})`);
+      }
+
+      const { txHash } = await resp.json();
+      const receipt = await publicClient.waitForTransactionReceipt({
+        hash: txHash as `0x${string}`,
+      });
+      if (receipt.status === "reverted") {
+        throw new Error("Claim transaction reverted — the batch may not be fully settled yet. Try again in a few seconds.");
+      }
+
+      // Mark claimed in localStorage
+      try {
+        const all: Array<Record<string, unknown>> = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
+        localStorage.setItem(storageKey, JSON.stringify(
+          all.map((o) => o.batchId === order.batchId.toString() ? { ...o, claimed: true } : o)
+        ));
+      } catch { /* ignore */ }
+
+      // Update UI optimistically
+      setOrders((prev) =>
+        prev.map((o) =>
+          o.commitment === order.commitment ? { ...o, claimed: true } : o
+        )
+      );
+      // Refresh USDC balance
+      try {
+        const contracts = getContracts(ACTIVE_CHAIN.id);
+        const bal = await publicClient.readContract({
+          address: contracts.usdc,
+          abi: ERC20_ABI,
+          functionName: "balanceOf",
+          args: [walletAddress],
+        }) as bigint;
+        setUsdcBalance(bal);
+      } catch { /* non-fatal */ }
+
+      pushToast("Position claimed — payout sent to wallet.", "success");
+    } catch (e: any) {
+      if (e?.code !== 4001) {
+        const msg = cleanClaimError(e?.message ?? "Claim failed");
+        setClaimErrors((prev) => ({ ...prev, [key]: msg }));
+        pushToast(msg, "error");
+      }
+    } finally {
+      setClaimingKey(null);
+    }
+  };
+
+  // ── Derived data ──────────────────────────────────────────────────────────
+
+  const settledOrders = orders.filter((o) => o.batchStatus === BatchStatus.SETTLED);
+  const totalVolume   = orders.reduce((s, o) => s + o.rawAmount, 0n);
+  const totalOrders   = orders.length;
+  const shortAddr     = walletAddress
+    ? `${walletAddress.slice(0, 6)}…${walletAddress.slice(-4)}`
+    : "";
+
+  // Active: OPEN/SETTLING orders + SETTLED unclaimed with filledAmount > 0
+  const activeOrders = orders.filter((o) =>
+    o.batchStatus === BatchStatus.OPEN ||
+    o.batchStatus === BatchStatus.SETTLING ||
+    (o.batchStatus === BatchStatus.SETTLED && !o.claimed && (o.filledAmount ?? 0n) > 0n)
+  );
+  // Closed: SETTLED + claimed
+  const closedOrders = orders.filter((o) =>
+    o.batchStatus === BatchStatus.SETTLED && o.claimed
+  );
+
+  // ── Not ready ─────────────────────────────────────────────────────────────
   if (!ready) {
     return (
       <div className="min-h-screen bg-bg flex items-center justify-center">
@@ -466,19 +808,9 @@ export default function ProfileClient() {
     );
   }
 
-  // ── Stats ──────────────────────────────────────────────────────────────────
-  const settledOrders = orders.filter(
-    (o) => o.batchStatus === BatchStatus.SETTLED
-  );
-  const totalVolume = orders.reduce((s, o) => s + o.rawAmount, 0n);
-  const totalOrders = orders.length;
-  const shortAddr = walletAddress
-    ? `${walletAddress.slice(0, 6)}…${walletAddress.slice(-4)}`
-    : "";
-
   return (
     <div className="min-h-screen bg-bg flex flex-col">
-      {/* ── Top nav ──────────────────────────────────────────────────────── */}
+      {/* ── Top nav ───────────────────────────────────────────────────────── */}
       <div className="border-b border-border px-6 py-3 flex items-center justify-between">
         <Link
           href="/"
@@ -509,7 +841,7 @@ export default function ProfileClient() {
       </div>
 
       <div className="flex-1 px-4 md:px-8 py-6 max-w-4xl mx-auto w-full space-y-6">
-        {/* ── Address ────────────────────────────────────────────────────── */}
+        {/* ── Address card ──────────────────────────────────────────────── */}
         <div className="border border-border p-4 flex items-center gap-4 flex-wrap">
           <div className="w-2 h-2 rounded-full bg-accent animate-pulse flex-shrink-0" />
           <div className="flex-1 min-w-0">
@@ -533,27 +865,20 @@ export default function ProfileClient() {
           </div>
         </div>
 
-        {/* ── Stats grid ─────────────────────────────────────────────────── */}
+        {/* ── Stats grid ────────────────────────────────────────────────── */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-px bg-border">
           <div className="bg-bg p-4">
-            <p className="text-[10px] text-muted tracking-widest uppercase mb-1">
-              USDC Balance
-            </p>
+            <p className="text-[10px] text-muted tracking-widest uppercase mb-1">USDC Balance</p>
             <p
               className="text-2xl font-black text-text leading-tight"
               style={{ fontFamily: "var(--font-display)" }}
             >
-              {usdcBalance === null
-                ? "—"
-                : `$${(Number(usdcBalance) / 1e6).toFixed(2)}`}
+              {usdcBalance === null ? "—" : `$${(Number(usdcBalance) / 1e6).toFixed(2)}`}
             </p>
             <p className="text-[10px] text-muted-dim mt-0.5">available</p>
           </div>
-
           <div className="bg-bg p-4">
-            <p className="text-[10px] text-muted tracking-widest uppercase mb-1">
-              Orders
-            </p>
+            <p className="text-[10px] text-muted tracking-widest uppercase mb-1">Orders</p>
             <p
               className="text-2xl font-black text-text leading-tight"
               style={{ fontFamily: "var(--font-display)" }}
@@ -562,11 +887,8 @@ export default function ProfileClient() {
             </p>
             <p className="text-[10px] text-muted-dim mt-0.5">sealed bids</p>
           </div>
-
           <div className="bg-bg p-4">
-            <p className="text-[10px] text-muted tracking-widest uppercase mb-1">
-              Settled
-            </p>
+            <p className="text-[10px] text-muted tracking-widest uppercase mb-1">Settled</p>
             <p
               className="text-2xl font-black text-text leading-tight"
               style={{ fontFamily: "var(--font-display)" }}
@@ -575,24 +897,19 @@ export default function ProfileClient() {
             </p>
             <p className="text-[10px] text-muted-dim mt-0.5">batches filled</p>
           </div>
-
           <div className="bg-bg p-4">
-            <p className="text-[10px] text-muted tracking-widest uppercase mb-1">
-              Privacy
-            </p>
+            <p className="text-[10px] text-muted tracking-widest uppercase mb-1">Privacy</p>
             <p
               className="text-2xl font-black text-accent leading-tight"
               style={{ fontFamily: "var(--font-display)" }}
             >
               ZK ✓
             </p>
-            <p className="text-[10px] text-muted-dim mt-0.5">
-              sealed-bid proof
-            </p>
+            <p className="text-[10px] text-muted-dim mt-0.5">sealed-bid proof</p>
           </div>
         </div>
 
-        {/* ── Privacy breakdown ──────────────────────────────────────────── */}
+        {/* ── Privacy breakdown ─────────────────────────────────────────── */}
         <div className="border border-border p-5 space-y-4">
           <div className="flex items-center gap-2">
             <div className="w-1 h-4 bg-accent/40" />
@@ -600,34 +917,21 @@ export default function ProfileClient() {
               What&apos;s On-Chain vs What&apos;s Hidden
             </p>
           </div>
-
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {/* Public column — visible on-chain */}
             <div className="space-y-2">
-              <p className="text-[9px] text-muted/60 uppercase tracking-widest mb-2">
-                ◆ Visible on-chain (public)
-              </p>
+              <p className="text-[9px] text-muted/60 uppercase tracking-widest mb-2">◆ Visible on-chain (public)</p>
               {[
                 ["Commitment hash", "sealed keccak256"],
                 ["Batch ID",        "sequential integer"],
               ].map(([label, sub]) => (
-                <div
-                  key={label}
-                  className="flex items-start justify-between gap-4 bg-surface/30 px-3 py-2"
-                >
+                <div key={label} className="flex items-start justify-between gap-4 bg-surface/30 px-3 py-2">
                   <span className="text-[11px] text-muted">{label}</span>
-                  <span className="text-[10px] text-muted-dim text-right shrink-0">
-                    {sub}
-                  </span>
+                  <span className="text-[10px] text-muted-dim text-right shrink-0">{sub}</span>
                 </div>
               ))}
             </div>
-
-            {/* Hidden column */}
             <div className="space-y-2">
-              <p className="text-[9px] text-accent/60 uppercase tracking-widest mb-2">
-                ✓ Cryptographically hidden (private)
-              </p>
+              <p className="text-[9px] text-accent/60 uppercase tracking-widest mb-2">✓ Cryptographically hidden (private)</p>
               {[
                 ["Your wallet address", "never in any event"],
                 ["Amount deposited",    "relayer pays on-chain"],
@@ -636,111 +940,209 @@ export default function ProfileClient() {
                 ["Random salt",        "blinding factor"],
                 ["Clearing price",     "hidden until settlement"],
               ].map(([label, sub]) => (
-                <div
-                  key={label}
-                  className="flex items-start justify-between gap-4 bg-accent/5 border border-accent/10 px-3 py-2"
-                >
+                <div key={label} className="flex items-start justify-between gap-4 bg-accent/5 border border-accent/10 px-3 py-2">
                   <span className="text-[11px] text-accent/80">{label}</span>
-                  <span className="text-[10px] text-accent/40 text-right shrink-0">
-                    {sub}
-                  </span>
+                  <span className="text-[10px] text-accent/40 text-right shrink-0">{sub}</span>
                 </div>
               ))}
             </div>
           </div>
-
           <div className="border-t border-border/40 pt-3 space-y-2">
             <p className="text-[10px] text-muted-dim leading-relaxed">
               <span className="text-accent/50">// </span>
-              No wallet address or amount ever appears on-chain when you place
-              an order. The relayer holds USDC and calls{" "}
-              <code className="hash-text">commitOrderFor()</code> on your
-              behalf — only the relayer&apos;s address is visible in the{" "}
-              <code className="hash-text">OrderCommitted</code> event.
-            </p>
-            <p className="text-[10px] text-muted-dim leading-relaxed">
-              <span className="text-accent/50">// </span>
-              Order details are sealed inside{" "}
-              <code className="hash-text">
-                keccak256(marketId · direction · amount · limitPrice · salt · address)
-              </code>
-              . To claim after settlement you reveal this preimage — safe
-              post-settlement since the batch is already closed.
+              No wallet address or amount ever appears on-chain when you place an order. The relayer
+              holds USDC and calls <code className="hash-text">commitOrderFor()</code> on your behalf.
             </p>
           </div>
         </div>
 
-        {/* ── Order history ──────────────────────────────────────────────── */}
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <p className="text-[10px] text-muted tracking-widest uppercase">
-                Order History
-              </p>
-              {enriching && (
-                <span className="text-[9px] text-muted-dim tracking-widest">
-                  (enriching from chain…)
-                </span>
-              )}
-            </div>
-            <div className="flex items-center gap-3">
-              <span className="text-[10px] text-muted-dim">
-                {loading ? "…" : `${totalOrders} orders`}
+        {/* ── Positions / Activity tabs ─────────────────────────────────── */}
+        <div className="space-y-0">
+          {/* Main tab bar */}
+          <div className="flex items-center gap-0 border-b border-border">
+            {(["positions", "activity"] as const).map((tab) => (
+              <button
+                key={tab}
+                type="button"
+                onClick={() => setMainTab(tab)}
+                className={clsx(
+                  "px-4 py-2.5 text-[11px] tracking-widest uppercase transition-colors border-b-2",
+                  mainTab === tab
+                    ? "border-text/40 text-text"
+                    : "border-transparent text-muted hover:text-text",
+                )}
+              >
+                {tab === "positions" ? "Positions" : "Activity"}
+              </button>
+            ))}
+            {enriching && (
+              <span className="ml-auto mr-2 text-[9px] text-muted-dim tracking-widest flex items-center gap-1">
+                <span className="w-2 h-2 border border-current border-t-transparent rounded-full animate-spin" />
+                enriching…
               </span>
-              <span className="text-[9px] text-muted-dim border border-border px-2 py-0.5">
-                stored locally
-              </span>
-            </div>
+            )}
           </div>
 
-          {loading ? (
-            <div className="border border-border divide-y divide-border">
-              <SkeletonRow />
-              <SkeletonRow />
-              <SkeletonRow />
-            </div>
-          ) : error ? (
-            <div className="border border-danger/20 p-6 text-center space-y-2">
-              <p className="text-danger text-[11px]">{error}</p>
-              <button
-                onClick={loadProfile}
-                className="text-[10px] text-muted hover:text-text transition-colors tracking-widest border border-border px-3 py-1"
-              >
-                ↻ RETRY
-              </button>
-            </div>
-          ) : orders.length === 0 ? (
-            <div className="border border-border p-10 text-center space-y-3">
-              <div className="w-8 h-8 border border-border flex items-center justify-center mx-auto">
-                <div className="w-2 h-2 bg-muted/30" />
+          {/* ── POSITIONS TAB ──────────────────────────────────────────── */}
+          {mainTab === "positions" && (
+            <div>
+              {/* Active / Closed sub-tabs */}
+              <div className="flex items-center gap-5 px-1 border-b border-border/50">
+                {(["active", "closed"] as const).map((sub) => {
+                  const count = sub === "active" ? activeOrders.length : closedOrders.length;
+                  return (
+                    <button
+                      key={sub}
+                      type="button"
+                      onClick={() => setPosTab(sub)}
+                      className={clsx(
+                        "py-2.5 text-[10px] tracking-widest uppercase transition-colors flex items-center gap-1.5",
+                        posTab === sub ? "text-text" : "text-muted hover:text-text",
+                      )}
+                    >
+                      {sub === "active" ? "Active" : "Closed"}
+                      {count > 0 && (
+                        <span className={clsx(
+                          "text-[8px] px-1 py-0.5 border tabular-nums",
+                          posTab === sub ? "border-text/30 text-text" : "border-border text-muted-dim",
+                        )}>
+                          {count}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
               </div>
-              <p className="text-muted text-[11px] tracking-widest uppercase">
-                No orders yet
-              </p>
-              <p className="text-muted-dim text-[10px]">
-                Place a sealed-bid order on any market — it will appear here
-              </p>
-              <Link
-                href="/"
-                className="inline-block mt-1 text-[10px] text-accent/70 hover:text-accent transition-colors tracking-widest border border-accent/20 hover:border-accent/40 px-3 py-1"
-              >
-                Browse markets →
-              </Link>
+
+              {/* Column headers (desktop) */}
+              <div className="hidden md:flex items-center gap-4 px-4 py-2 border-b border-border/40">
+                <div className="flex-1">
+                  <span className="text-[9px] text-muted-dim tracking-widest uppercase">MARKET</span>
+                </div>
+                <div className="flex items-center gap-5 flex-shrink-0 text-right">
+                  <span className="min-w-[44px] text-[9px] text-muted-dim tracking-widest uppercase text-right">AVG</span>
+                  <span className="min-w-[54px] text-[9px] text-muted-dim tracking-widest uppercase text-right">CURRENT</span>
+                  <span className="min-w-[68px] text-[9px] text-muted-dim tracking-widest uppercase text-right">VALUE</span>
+                </div>
+              </div>
+
+              {/* Active positions */}
+              {posTab === "active" && (
+                loading ? (
+                  <div className="border border-border divide-y divide-border">
+                    <SkeletonRow /><SkeletonRow /><SkeletonRow />
+                  </div>
+                ) : error ? (
+                  <div className="border border-danger/20 p-6 text-center space-y-2">
+                    <p className="text-danger text-[11px]">{error}</p>
+                    <button onClick={loadProfile} className="text-[10px] text-muted hover:text-text border border-border px-3 py-1">↻ RETRY</button>
+                  </div>
+                ) : activeOrders.length === 0 ? (
+                  <div className="border border-border p-10 text-center space-y-3">
+                    <div className="w-8 h-8 border border-border flex items-center justify-center mx-auto">
+                      <div className="w-2 h-2 bg-muted/30" />
+                    </div>
+                    <p className="text-muted text-[11px] tracking-widest uppercase">No active positions</p>
+                    <p className="text-muted-dim text-[10px]">Settled unclaimed positions will appear here.</p>
+                    <Link href="/" className="inline-block mt-1 text-[10px] text-accent/70 hover:text-accent border border-accent/20 hover:border-accent/40 px-3 py-1">
+                      Browse markets →
+                    </Link>
+                  </div>
+                ) : (
+                  <div className="border border-border divide-y divide-border">
+                    {activeOrders.map((o) => (
+                      <PositionRow
+                        key={o.commitment}
+                        order={o}
+                        onClaim={handleClaim}
+                        isClaiming={claimingKey === o.commitment.toLowerCase()}
+                        claimError={claimErrors[o.commitment.toLowerCase()]}
+                      />
+                    ))}
+                  </div>
+                )
+              )}
+
+              {/* Closed positions */}
+              {posTab === "closed" && (
+                loading ? (
+                  <div className="border border-border divide-y divide-border">
+                    <SkeletonRow /><SkeletonRow />
+                  </div>
+                ) : closedOrders.length === 0 ? (
+                  <div className="border border-border p-10 text-center">
+                    <p className="text-muted text-[11px] tracking-widest uppercase">No closed positions yet</p>
+                    <p className="text-muted-dim text-[10px] mt-2">Claimed positions will appear here.</p>
+                  </div>
+                ) : (
+                  <div className="border border-border divide-y divide-border">
+                    {closedOrders.map((o) => (
+                      <PositionRow
+                        key={o.commitment}
+                        order={o}
+                        onClaim={handleClaim}
+                        isClaiming={false}
+                      />
+                    ))}
+                  </div>
+                )
+              )}
             </div>
-          ) : (
-            <div className="border border-border divide-y divide-border">
-              {orders.map((order) => (
-                <OrderRow
-                  key={`${order.commitment}-${order.batchId}`}
-                  order={order}
-                />
-              ))}
+          )}
+
+          {/* ── ACTIVITY TAB ──────────────────────────────────────────── */}
+          {mainTab === "activity" && (
+            <div>
+              <div className="flex items-center justify-between px-4 py-2.5 border-b border-border/40">
+                <span className="text-[9px] text-muted-dim tracking-widest uppercase">
+                  {loading ? "…" : `${totalOrders} orders`}
+                </span>
+                <span className="text-[9px] text-muted-dim border border-border px-2 py-0.5">
+                  stored locally · click to reveal proof
+                </span>
+              </div>
+
+              {loading ? (
+                <div className="border border-border divide-y divide-border">
+                  <SkeletonRow /><SkeletonRow /><SkeletonRow />
+                </div>
+              ) : error ? (
+                <div className="border border-danger/20 p-6 text-center space-y-2">
+                  <p className="text-danger text-[11px]">{error}</p>
+                  <button onClick={loadProfile} className="text-[10px] text-muted hover:text-text border border-border px-3 py-1">↻ RETRY</button>
+                </div>
+              ) : orders.length === 0 ? (
+                <div className="border border-border p-10 text-center space-y-3">
+                  <div className="w-8 h-8 border border-border flex items-center justify-center mx-auto">
+                    <div className="w-2 h-2 bg-muted/30" />
+                  </div>
+                  <p className="text-muted text-[11px] tracking-widest uppercase">No orders yet</p>
+                  <p className="text-muted-dim text-[10px]">
+                    Place a sealed-bid order on any market — it will appear here
+                  </p>
+                  <Link
+                    href="/"
+                    className="inline-block mt-1 text-[10px] text-accent/70 hover:text-accent border border-accent/20 hover:border-accent/40 px-3 py-1"
+                  >
+                    Browse markets →
+                  </Link>
+                </div>
+              ) : (
+                <div className="border border-border divide-y divide-border">
+                  {orders.map((order) => (
+                    <ActivityRow
+                      key={`${order.commitment}-${order.batchId}`}
+                      order={order}
+                    />
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
       </div>
 
-      {/* ── Footer ───────────────────────────────────────────────────────── */}
+      {/* ── Footer ────────────────────────────────────────────────────────── */}
       <footer className="border-t border-border px-6 py-3 flex items-center justify-between">
         <span className="text-[10px] text-muted-dim tracking-widest">
           Predacy · Private Prediction Markets
@@ -749,6 +1151,34 @@ export default function ProfileClient() {
           <span className="text-accent/30">●</span> No address or amount in any order event
         </span>
       </footer>
+
+      {/* ── Toast ─────────────────────────────────────────────────────────── */}
+      {toast && (
+        <div
+          key={toast.id}
+          className={clsx(
+            "fixed bottom-6 left-1/2 -translate-x-1/2 z-50",
+            "px-4 py-3 border text-[11px] tracking-wide animate-slide-up",
+            "shadow-lg max-w-xs w-full",
+            toast.type === "success"
+              ? "bg-surface border-accent/40 text-accent"
+              : "bg-surface border-danger/40 text-danger",
+          )}
+        >
+          <div className="flex items-center gap-2">
+            {toast.type === "success" ? (
+              <svg className="w-3.5 h-3.5 flex-shrink-0" viewBox="0 0 14 14" fill="none">
+                <path d="M2 7l3.5 3.5L12 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="square" />
+              </svg>
+            ) : (
+              <svg className="w-3.5 h-3.5 flex-shrink-0" viewBox="0 0 14 14" fill="none">
+                <path d="M2 2l10 10M12 2L2 12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="square" />
+              </svg>
+            )}
+            {toast.message}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
