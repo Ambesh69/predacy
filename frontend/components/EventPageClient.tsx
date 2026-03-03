@@ -12,6 +12,7 @@ import WalletButton from "@/components/WalletButton";
 import BatchTimer from "@/components/BatchTimer";
 import OrderForm from "@/components/OrderForm";
 import PositionsPanel from "@/components/PositionsPanel";
+import OrderbookPanel from "@/components/OrderbookPanel";
 import type { Market } from "@/lib/polymarket";
 import {
   filterAndDeduplicateMarkets,
@@ -452,6 +453,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   const [balanceVersion, setBalanceVersion] = useState(0);
   const [orderSealed, setOrderSealed] = useState(false);
   const [activeTab, setActiveTab] = useState<"order" | "positions">("order");
+  const [leftTab, setLeftTab]     = useState<"outcomes" | "orderbook">("outcomes");
   const [claimLoading, setClaimLoading] = useState(false);
   const [historicalMarketIds, setHistoricalMarketIds] = useState<`0x${string}`[]>([]);
   const selectedMarketId = selectedMarket?.conditionId;
@@ -1039,15 +1041,41 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
           {/* Chart pinned at top of left column */}
           <MultiOutcomeChart markets={event.markets} />
 
-          {/* Outcome list scrolls below */}
-          <div className="flex-1 overflow-y-auto">
-          {/* Subheader */}
-          <div className="px-5 py-3 border-b border-border">
+          {/* Subheader with Outcomes / Orderbook tab toggle */}
+          <div className="px-5 py-2.5 border-b border-border flex items-center justify-between flex-shrink-0">
             <span className="text-[10px] text-muted tracking-widest uppercase">
-              {sorted.length} Outcomes · select to trade
+              {sorted.length} Outcomes
             </span>
+            <div className="flex border border-border text-[10px] tracking-widest uppercase">
+              <button
+                type="button"
+                onClick={() => setLeftTab("outcomes")}
+                className={clsx(
+                  "px-3 py-1 transition-colors",
+                  leftTab === "outcomes" ? "text-text bg-surface/60" : "text-muted-dim hover:text-muted"
+                )}
+              >
+                Outcomes
+              </button>
+              <button
+                type="button"
+                onClick={() => setLeftTab("orderbook")}
+                className={clsx(
+                  "px-3 py-1 border-l border-border transition-colors",
+                  leftTab === "orderbook" ? "text-text bg-surface/60" : "text-muted-dim hover:text-muted"
+                )}
+              >
+                Orderbook
+              </button>
+            </div>
           </div>
 
+          {/* Tab content */}
+          <div className="flex-1 overflow-y-auto flex flex-col">
+
+          {leftTab === "orderbook" ? (
+            <OrderbookPanel market={selectedMarket} />
+          ) : (
           <div className="divide-y divide-border/40">
             {sorted.length === 0 && (
               <div className="px-5 py-8 text-center">
@@ -1123,7 +1151,8 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
               );
             })}
           </div>
-        </div>{/* end scroll area */}
+          )}{/* end leftTab === "outcomes" */}
+          </div>{/* end flex-1 tab content */}
         </div>{/* end left column */}
 
         {/* ── Trading panel ────────────────────────────────────────────────── */}
