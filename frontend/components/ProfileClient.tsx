@@ -660,9 +660,7 @@ function PositionRow({
                 )}
               </div>
             ) : (
-              <p className="text-[11px] text-muted-dim">
-                {isPending ? "—" : `$${filledUsdc.toFixed(2)}`}
-              </p>
+              <p className="text-[11px] text-muted-dim">—</p>
             )}
           </div>
         </div>
@@ -936,9 +934,10 @@ export default function ProfileClient() {
         uniqueMarketIds.map(async (marketId) => {
           try {
             const conditionId = marketId.slice(2); // strip 0x
-            const r = await fetch(
-              `https://gamma-api.polymarket.com/markets?condition_id=${conditionId}`
-            );
+            // Route through the Next.js server proxy — direct Gamma calls from the
+            // browser are blocked by CORS, which silently drops the catch and leaves
+            // currentYesPrice as undefined.
+            const r = await fetch(`/api/markets?condition_id=${conditionId}`);
             const data = await r.json();
             const prices = JSON.parse(data[0]?.outcomePrices ?? "[]");
             const yesPrice = parseFloat(prices[0] ?? "");
@@ -1010,14 +1009,14 @@ export default function ProfileClient() {
 
       const results = await Promise.allSettled(
         uniqueIds.map((marketId) =>
-          fetch(
-            `https://gamma-api.polymarket.com/markets?condition_id=${marketId.slice(2)}`
-          )
+          fetch(`/api/markets?condition_id=${marketId.slice(2)}`)
             .then((r) => r.json())
             .then((data) => {
               const prices = JSON.parse(data[0]?.outcomePrices ?? "[]");
-              const yesPrice = parseFloat(prices[0] ?? "0");
-              return yesPrice > 0 ? { marketId: marketId.toLowerCase(), yesPrice } : null;
+              const yesPrice = parseFloat(prices[0] ?? "");
+              return (prices.length > 0 && !isNaN(yesPrice))
+                ? { marketId: marketId.toLowerCase(), yesPrice }
+                : null;
             })
             .catch(() => null)
         )
