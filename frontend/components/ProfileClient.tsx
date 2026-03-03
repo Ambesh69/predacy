@@ -933,11 +933,10 @@ export default function ProfileClient() {
       await Promise.allSettled(
         uniqueMarketIds.map(async (marketId) => {
           try {
-            const conditionId = marketId.slice(2); // strip 0x
             // Route through the Next.js server proxy — direct Gamma calls from the
-            // browser are blocked by CORS, which silently drops the catch and leaves
-            // currentYesPrice as undefined.
-            const r = await fetch(`/api/markets?condition_id=${conditionId}`);
+            // browser are blocked by CORS. Gamma expects the full 0x-prefixed
+            // condition_id — do NOT strip the prefix (stripping returns 0 results).
+            const r = await fetch(`/api/markets?condition_id=${marketId}`);
             const data = await r.json();
             const prices = JSON.parse(data[0]?.outcomePrices ?? "[]");
             const yesPrice = parseFloat(prices[0] ?? "");
@@ -1009,7 +1008,7 @@ export default function ProfileClient() {
 
       const results = await Promise.allSettled(
         uniqueIds.map((marketId) =>
-          fetch(`/api/markets?condition_id=${marketId.slice(2)}`)
+          fetch(`/api/markets?condition_id=${marketId}`) // keep 0x prefix
             .then((r) => r.json())
             .then((data) => {
               const prices = JSON.parse(data[0]?.outcomePrices ?? "[]");
