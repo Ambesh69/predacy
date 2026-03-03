@@ -623,12 +623,16 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   // ── Claim position via ZK proof (relayer submits on-chain — no wallet tx needed) ──
   // The relayer generates a ZK proof of order membership and calls claimWithProof.
   // No wallet signing required — the salt in localStorage is the secret credential.
-  const handleClaimPosition = async (batchId: bigint, recipient: `0x${string}`) => {
+  const handleClaimPosition = async (batchId: bigint) => {
     setClaimLoading(true);
     setChainError(null);
     try {
       if (!walletAddress) throw new Error("Wallet not connected");
       const storageKey = `predacy:orders:${walletAddress.toLowerCase()}`;
+      // Read payout address from profile settings (set once on profile page)
+      const recipient = (
+        localStorage.getItem(`predacy:claim-recipient:${walletAddress.toLowerCase()}`) || walletAddress
+      ) as `0x${string}`;
       const storedOrders: Array<{
         commitment: string; salt: string; isBuy: boolean;
         amount: string; limitPrice: string; batchId: string;

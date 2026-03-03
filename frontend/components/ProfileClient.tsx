@@ -288,16 +288,12 @@ function PositionRow({
   onClaim,
   isClaiming,
   claimError,
-  walletAddress,
 }: {
-  order:         OrderEntry;
-  onClaim:       (order: OrderEntry, recipient: `0x${string}`) => Promise<void>;
-  isClaiming:    boolean;
-  claimError?:   string;
-  walletAddress?: `0x${string}`;
+  order:      OrderEntry;
+  onClaim:    (order: OrderEntry) => Promise<void>;
+  isClaiming: boolean;
+  claimError?: string;
 }) {
-  const [confirming, setConfirming] = useState(false);
-  const [recipient,  setRecipient]  = useState("");
 
   const isPending  = order.batchStatus === BatchStatus.OPEN || order.batchStatus === BatchStatus.SETTLING;
   const isSettled  = order.batchStatus === BatchStatus.SETTLED;
@@ -413,65 +409,22 @@ function PositionRow({
         </div>
       </div>
 
-      {/* Claim button / confirm step */}
+      {/* Claim button */}
       {canClaim && (
-        <div className="space-y-1.5">
-          {isClaiming ? (
-            <button
-              disabled
-              className="w-full py-1.5 border border-accent/40 text-accent/60 text-[10px] tracking-widest uppercase opacity-60"
-            >
+        <div className="space-y-1">
+          <button
+            onClick={() => onClaim(order)}
+            disabled={isClaiming}
+            className="w-full py-1.5 border border-accent text-accent text-[10px] tracking-widest uppercase hover:bg-accent/5 transition-colors disabled:opacity-40"
+          >
+            {isClaiming ? (
               <span className="flex items-center justify-center gap-1.5">
                 <span className="w-2.5 h-2.5 border border-current border-t-transparent rounded-full animate-spin" />
                 CLAIMING… (~20s)
               </span>
-            </button>
-          ) : confirming ? (
-            <div className="border border-accent/20 p-3 space-y-2">
-              <p className="text-[9px] text-muted tracking-widest uppercase">
-                Recipient address
-                <span className="ml-1 text-muted-dim normal-case">(visible on-chain — use fresh address for full privacy)</span>
-              </p>
-              <input
-                type="text"
-                value={recipient}
-                onChange={(e) => setRecipient(e.target.value)}
-                placeholder="0x…"
-                className="w-full bg-surface border border-border px-2 py-1.5 text-[10px] font-mono text-text placeholder-muted-dim focus:outline-none focus:border-accent/40"
-              />
-              <div className="flex gap-2">
-                <button
-                  onClick={() => {
-                    const addr = recipient.trim() as `0x${string}`;
-                    if (!/^0x[0-9a-fA-F]{40}$/.test(addr)) return;
-                    setConfirming(false);
-                    void onClaim(order, addr);
-                  }}
-                  disabled={!/^0x[0-9a-fA-F]{40}$/.test(recipient.trim())}
-                  className="flex-1 py-1.5 border border-accent text-accent text-[10px] tracking-widest uppercase hover:bg-accent/5 transition-colors disabled:opacity-30"
-                >
-                  CONFIRM
-                </button>
-                <button
-                  onClick={() => setConfirming(false)}
-                  className="px-4 py-1.5 border border-border text-muted text-[10px] tracking-widest uppercase hover:text-text transition-colors"
-                >
-                  CANCEL
-                </button>
-              </div>
-            </div>
-          ) : (
-            <button
-              onClick={() => {
-                setRecipient(walletAddress ?? "");
-                setConfirming(true);
-              }}
-              className="w-full py-1.5 border border-accent text-accent text-[10px] tracking-widest uppercase hover:bg-accent/5 transition-colors"
-            >
-              CLAIM POSITION
-            </button>
-          )}
-          {claimError && !isClaiming && !confirming && (
+            ) : "CLAIM POSITION"}
+          </button>
+          {claimError && !isClaiming && (
             <p className="text-danger text-[10px] text-center">{claimError}</p>
           )}
         </div>
@@ -494,10 +447,20 @@ export default function ProfileClient() {
   const [error,        setError]        = useState<string | null>(null);
   const [mainTab,      setMainTab]      = useState<"positions" | "activity">("positions");
   const [posTab,       setPosTab]       = useState<"active" | "closed">("active");
-  const [claimingKey,  setClaimingKey]  = useState<string | null>(null);  // commitment key
-  const [claimErrors,  setClaimErrors]  = useState<Record<string, string>>({});
+  const [claimingKey,   setClaimingKey]   = useState<string | null>(null);
+  const [claimErrors,   setClaimErrors]   = useState<Record<string, string>>({});
+  const [claimRecipient, setClaimRecipient] = useState<string>("");
+  const [editingRecipient, setEditingRecipient] = useState(false);
+  const [recipientDraft,   setRecipientDraft]   = useState("");
   const [toast, setToast] = useState<{ id: number; message: string; type: "success" | "error" } | null>(null);
   const toastIdRef = useRef(0);
+
+  // Load saved payout address from localStorage when wallet connects
+  useEffect(() => {
+    if (!walletAddress) return;
+    const saved = localStorage.getItem(`predacy:claim-recipient:${walletAddress.toLowerCase()}`);
+    setClaimRecipient(saved ?? "");
+  }, [walletAddress]);
 
   function pushToast(message: string, type: "success" | "error") {
     const id = ++toastIdRef.current;
@@ -763,8 +726,9 @@ export default function ProfileClient() {
 
   // ── Claim handler ─────────────────────────────────────────────────────────
 
-  const handleClaim = async (order: OrderEntry, recipient: `0x${string}`) => {
+  const handleClaim = async (order: OrderEntry) => {
     if (!walletAddress) return;
+    const recipient = (claimRecipient || walletAddress) as `0x${string}`;
     const key = order.commitment.toLowerCase();
     setClaimingKey(key);
     setClaimErrors((prev) => { const n = { ...prev }; delete n[key]; return n; });
@@ -935,26 +899,114 @@ export default function ProfileClient() {
 
       <div className="flex-1 px-4 md:px-8 py-6 max-w-4xl mx-auto w-full space-y-6">
         {/* ── Address card ──────────────────────────────────────────────── */}
-        <div className="border border-border p-4 flex items-center gap-4 flex-wrap">
-          <div className="w-2 h-2 rounded-full bg-accent animate-pulse flex-shrink-0" />
-          <div className="flex-1 min-w-0">
-            <p className="text-[10px] text-muted tracking-widest uppercase mb-0.5">
-              Wallet Address
-            </p>
-            <p className="hash-text text-sm text-text break-all">
-              {walletAddress}
-            </p>
+        <div className="border border-border divide-y divide-border/50">
+          {/* Wallet address row */}
+          <div className="p-4 flex items-center gap-4 flex-wrap">
+            <div className="w-2 h-2 rounded-full bg-accent animate-pulse flex-shrink-0" />
+            <div className="flex-1 min-w-0">
+              <p className="text-[10px] text-muted tracking-widest uppercase mb-0.5">
+                Wallet Address
+              </p>
+              <p className="hash-text text-sm text-text break-all">
+                {walletAddress}
+              </p>
+            </div>
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <CopyButton value={walletAddress ?? ""} label="copy address" />
+              <a
+                href={`${EXPLORER}/address/${walletAddress}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[10px] text-accent/70 hover:text-accent transition-colors border border-accent/20 hover:border-accent/40 px-2 py-1 tracking-wider"
+              >
+                POLYGONSCAN ↗
+              </a>
+            </div>
           </div>
-          <div className="flex items-center gap-2 flex-shrink-0">
-            <CopyButton value={walletAddress ?? ""} label="copy address" />
-            <a
-              href={`${EXPLORER}/address/${walletAddress}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-[10px] text-accent/70 hover:text-accent transition-colors border border-accent/20 hover:border-accent/40 px-2 py-1 tracking-wider"
-            >
-              POLYGONSCAN ↗
-            </a>
+
+          {/* Payout address row */}
+          <div className="p-4">
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex-1 min-w-0">
+                <p className="text-[10px] text-muted tracking-widest uppercase mb-0.5">
+                  Claim Payout Address
+                </p>
+                {editingRecipient ? (
+                  <div className="space-y-2 mt-1.5">
+                    <input
+                      type="text"
+                      value={recipientDraft}
+                      onChange={(e) => setRecipientDraft(e.target.value)}
+                      placeholder={walletAddress}
+                      autoFocus
+                      className="w-full bg-surface border border-border px-2 py-1.5 text-[10px] font-mono text-text placeholder-muted-dim focus:outline-none focus:border-accent/40"
+                    />
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => {
+                          const addr = recipientDraft.trim();
+                          if (addr && !/^0x[0-9a-fA-F]{40}$/.test(addr)) return;
+                          if (walletAddress) {
+                            const key = `predacy:claim-recipient:${walletAddress.toLowerCase()}`;
+                            if (addr) {
+                              localStorage.setItem(key, addr);
+                              setClaimRecipient(addr);
+                            } else {
+                              localStorage.removeItem(key);
+                              setClaimRecipient("");
+                            }
+                          }
+                          setEditingRecipient(false);
+                        }}
+                        disabled={recipientDraft.trim() !== "" && !/^0x[0-9a-fA-F]{40}$/.test(recipientDraft.trim())}
+                        className="px-3 py-1 border border-accent text-accent text-[9px] tracking-widest uppercase hover:bg-accent/5 transition-colors disabled:opacity-30"
+                      >
+                        SAVE
+                      </button>
+                      <button
+                        onClick={() => setEditingRecipient(false)}
+                        className="px-3 py-1 border border-border text-muted text-[9px] tracking-widest uppercase hover:text-text transition-colors"
+                      >
+                        CANCEL
+                      </button>
+                      {claimRecipient && (
+                        <button
+                          onClick={() => {
+                            if (walletAddress) localStorage.removeItem(`predacy:claim-recipient:${walletAddress.toLowerCase()}`);
+                            setClaimRecipient("");
+                            setRecipientDraft("");
+                            setEditingRecipient(false);
+                          }}
+                          className="ml-auto text-[9px] text-muted-dim hover:text-danger transition-colors tracking-widest"
+                        >
+                          RESET
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <p className="hash-text text-sm text-text break-all mt-0.5">
+                    {claimRecipient || walletAddress}
+                  </p>
+                )}
+                {!editingRecipient && (
+                  <p className="text-[9px] text-muted-dim mt-1">
+                    {claimRecipient && claimRecipient.toLowerCase() !== walletAddress?.toLowerCase()
+                      ? <span className="text-accent/60">↳ custom address set — payouts routed privately</span>
+                      : <span>↳ use a fresh address for full claim privacy</span>
+                    }
+                  </p>
+                )}
+              </div>
+              {!editingRecipient && (
+                <button
+                  onClick={() => { setRecipientDraft(claimRecipient); setEditingRecipient(true); }}
+                  className="flex-shrink-0 text-[10px] text-muted hover:text-text border border-border hover:border-border-bright px-2 py-1 tracking-widest transition-colors"
+                >
+                  EDIT
+                </button>
+              )}
+            </div>
           </div>
         </div>
 
@@ -1150,7 +1202,6 @@ export default function ProfileClient() {
                         onClaim={handleClaim}
                         isClaiming={claimingKey === o.commitment.toLowerCase()}
                         claimError={claimErrors[o.commitment.toLowerCase()]}
-                        walletAddress={walletAddress}
                       />
                     ))}
                   </div>
@@ -1176,7 +1227,6 @@ export default function ProfileClient() {
                         order={o}
                         onClaim={handleClaim}
                         isClaiming={false}
-                        walletAddress={walletAddress}
                       />
                     ))}
                   </div>
