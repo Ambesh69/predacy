@@ -22,15 +22,11 @@ function formatPrice(p: number): string {
 }
 
 function formatShares(s: number): string {
-  if (s >= 1_000_000) return (s / 1_000_000).toFixed(1) + "M";
-  if (s >= 1_000)     return (s / 1_000).toFixed(1) + "k";
-  return s.toFixed(0);
+  return s.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 function formatUSD(usd: number): string {
-  if (usd >= 1_000_000) return "$" + (usd / 1_000_000).toFixed(1) + "M";
-  if (usd >= 1_000)     return "$" + (usd / 1_000).toFixed(1) + "k";
-  return "$" + usd.toFixed(0);
+  return "$" + usd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 function buildRows(raw: { price: number; size: number }[]) {
