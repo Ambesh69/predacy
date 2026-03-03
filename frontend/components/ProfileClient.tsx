@@ -929,7 +929,7 @@ export default function ProfileClient() {
             <div className="flex items-start justify-between gap-4">
               <div className="flex-1 min-w-0">
                 <p className="text-[10px] text-muted tracking-widest uppercase mb-0.5">
-                  Claim Payout Address
+                  Payout Address
                 </p>
                 {editingRecipient ? (
                   <div className="space-y-2 mt-1.5">
