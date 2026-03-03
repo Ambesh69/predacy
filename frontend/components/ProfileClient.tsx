@@ -842,6 +842,20 @@ export default function ProfileClient() {
   const settledOrders = orders.filter((o) => o.batchStatus === BatchStatus.SETTLED);
   const totalVolume   = orders.reduce((s, o) => s + o.rawAmount, 0n);
   const totalOrders   = orders.length;
+
+  // P&L: sum over settled positions that have live price data
+  const pnlPositions = settledOrders.filter(
+    (o) => o.shares != null && o.currentYesPrice != null && o.filledAmount != null
+  );
+  const hasPnlData = !enriching && pnlPositions.length > 0;
+  const totalPnl = pnlPositions.reduce((sum, o) => {
+    const currentValue = (o.shares ?? 0) * (o.currentYesPrice ?? 0);
+    const cost = Number(o.filledAmount ?? 0n) / 1e6;
+    return sum + currentValue - cost;
+  }, 0);
+  const pnlDisplay = hasPnlData
+    ? (totalPnl >= 0 ? `+$${totalPnl.toFixed(2)}` : `-$${Math.abs(totalPnl).toFixed(2)}`)
+    : (enriching ? "…" : "—");
   const shortAddr     = walletAddress
     ? `${walletAddress.slice(0, 6)}…${walletAddress.slice(-4)}`
     : "";
@@ -957,23 +971,45 @@ export default function ProfileClient() {
 
             {/* Stats strip */}
             <div className="flex items-start flex-wrap gap-y-4 divide-x divide-border w-full md:w-auto">
-              {([
-                { label: "BALANCE", value: usdcBalance === null ? "—" : `$${(Number(usdcBalance) / 1e6).toFixed(2)}`, sub: "available",    accent: false },
-                { label: "VOLUME",  value: `$${(Number(totalVolume) / 1e6).toFixed(2)}`,                              sub: "total placed", accent: false },
-                { label: "ORDERS",  value: loading ? "—" : String(totalOrders),                                       sub: "sealed bids",  accent: false },
-                { label: "PRIVACY", value: "ZK ✓",                                                                    sub: "proof system", accent: true  },
-              ] as const).map((stat) => (
-                <div key={stat.label} className="px-5 first:pl-0 md:first:pl-5">
-                  <p className="text-[9px] text-muted tracking-widest uppercase mb-1">{stat.label}</p>
-                  <p
-                    className={`text-xl font-black leading-tight ${stat.accent ? "text-accent" : "text-text"}`}
-                    style={{ fontFamily: "var(--font-display)" }}
-                  >
-                    {stat.value}
-                  </p>
-                  <p className="text-[9px] text-muted-dim mt-0.5">{stat.sub}</p>
-                </div>
-              ))}
+              {/* BALANCE */}
+              <div className="px-5 first:pl-0 md:first:pl-5">
+                <p className="text-[9px] text-muted tracking-widest uppercase mb-1">BALANCE</p>
+                <p className="text-xl font-black leading-tight text-text" style={{ fontFamily: "var(--font-display)" }}>
+                  {usdcBalance === null ? "—" : `$${(Number(usdcBalance) / 1e6).toFixed(2)}`}
+                </p>
+                <p className="text-[9px] text-muted-dim mt-0.5">available</p>
+              </div>
+              {/* P&L */}
+              <div className="px-5">
+                <p className="text-[9px] text-muted tracking-widest uppercase mb-1">P&amp;L</p>
+                <p
+                  className={clsx(
+                    "text-xl font-black leading-tight",
+                    !hasPnlData ? "text-muted" :
+                    totalPnl >= 0 ? "text-accent" : "text-danger"
+                  )}
+                  style={{ fontFamily: "var(--font-display)" }}
+                >
+                  {pnlDisplay}
+                </p>
+                <p className="text-[9px] text-muted-dim mt-0.5">open positions</p>
+              </div>
+              {/* ORDERS */}
+              <div className="px-5">
+                <p className="text-[9px] text-muted tracking-widest uppercase mb-1">ORDERS</p>
+                <p className="text-xl font-black leading-tight text-text" style={{ fontFamily: "var(--font-display)" }}>
+                  {loading ? "—" : String(totalOrders)}
+                </p>
+                <p className="text-[9px] text-muted-dim mt-0.5">sealed bids</p>
+              </div>
+              {/* PRIVACY */}
+              <div className="px-5">
+                <p className="text-[9px] text-muted tracking-widest uppercase mb-1">PRIVACY</p>
+                <p className="text-xl font-black leading-tight text-accent" style={{ fontFamily: "var(--font-display)" }}>
+                  ZK ✓
+                </p>
+                <p className="text-[9px] text-muted-dim mt-0.5">proof system</p>
+              </div>
             </div>
 
           </div>
