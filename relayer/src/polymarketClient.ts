@@ -5,6 +5,12 @@ import type { PolymarketMarket } from "./types.js";
 const CLOB_API  = "https://clob.polymarket.com";
 const GAMMA_API = "https://gamma-api.polymarket.com";
 
+// Gamma API returns some fields as JSON-encoded strings — parse them.
+function normalizeMarket(m: any): PolymarketMarket {
+  const parse = (v: any) => (typeof v === "string" ? JSON.parse(v) : v);
+  return { ...m, tokens: parse(m.tokens) ?? [], outcomes: parse(m.outcomes) ?? [], outcomePrices: parse(m.outcomePrices) ?? [] };
+}
+
 /**
  * Polymarket CLOB REST API client.
  *
@@ -35,7 +41,7 @@ export class PolymarketClient {
     const res = await axios.get(`${GAMMA_API}/markets`, {
       params: { limit, offset, active: true, closed: false },
     });
-    return res.data;
+    return (res.data ?? []).map(normalizeMarket);
   }
 
   /** Get a single market by condition ID */
@@ -44,7 +50,7 @@ export class PolymarketClient {
       params: { condition_id: conditionId },
     });
     if (!res.data?.length) throw new Error(`Market not found: ${conditionId}`);
-    return res.data[0];
+    return normalizeMarket(res.data[0]);
   }
 
   /** Get the current mid-price for a token (YES or NO token ID) */
