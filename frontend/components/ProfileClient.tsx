@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
 import {
-  createPublicClient, http, parseAbiItem,
+  createPublicClient, createWalletClient, custom, http, parseAbiItem,
   keccak256, encodeAbiParameters,
 } from "viem";
 import { clsx } from "clsx";
@@ -483,11 +483,27 @@ export default function ProfileClient() {
         storedOrders = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
       } catch { /* ignore quota / parse errors */ }
 
-      // 2a. Fetch remote history from relayer (non-blocking on failure)
+      // 2a. Fetch remote history from relayer (authenticated: signed timestamp proves wallet ownership)
+      //     Only Alice can read Alice's history — relayer verifies EIP-191 signature before returning data.
       try {
         const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
-        if (relayerUrl) {
-          const resp = await fetch(`${relayerUrl}/history/${walletAddress.toLowerCase()}`);
+        const wallet     = wallets[0];
+        if (relayerUrl && wallet) {
+          const timestamp = Date.now().toString();
+          const addr      = walletAddress.toLowerCase();
+          const message   = `Predacy history access for ${addr} at ${timestamp}`;
+
+          // Sign with the connected wallet — proves to the relayer we own this address
+          const provider    = await wallet.getEthereumProvider();
+          const walletClient = createWalletClient({ account: walletAddress, chain: ACTIVE_CHAIN, transport: custom(provider) });
+          const signature   = await walletClient.signMessage({ account: walletAddress, message });
+
+          const resp = await fetch(`${relayerUrl}/history/${addr}`, {
+            headers: {
+              "X-Timestamp": timestamp,
+              "X-Signature": signature,
+            },
+          });
           if (resp.ok) {
             const { orders: remoteOrders } = await resp.json() as { orders: StoredOrder[] };
             if (Array.isArray(remoteOrders) && remoteOrders.length > 0) {
@@ -687,7 +703,7 @@ export default function ProfileClient() {
       setLoading(false);
       setEnriching(false);
     }
-  }, [walletAddress]);
+  }, [walletAddress, wallets]);
 
   useEffect(() => {
     if (ready && authenticated && walletAddress) {

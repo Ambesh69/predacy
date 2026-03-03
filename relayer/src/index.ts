@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { createServer } from "node:http";
-import { createPublicClient, http, parseAbiItem } from "viem";
+import { createPublicClient, http, parseAbiItem, recoverMessageAddress } from "viem";
 import { polygon, polygonAmoy } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 import { createWalletClient } from "viem";
@@ -486,8 +486,12 @@ const server = createServer((req, res) => {
   }
 
   // GET /history/:walletAddress
-  // Returns all stored order summaries for a wallet address (cross-device history sync).
-  // No auth required — caller must already know their own wallet address.
+  // Returns order summaries for a wallet. Requires a signed timestamp to prove
+  // the requester controls the wallet — so only Alice can read Alice's history.
+  //
+  // Headers:
+  //   X-Timestamp : Unix milliseconds (string). Must be within ±5 minutes of server time.
+  //   X-Signature : EIP-191 personal_sign of "Predacy history access for {wallet} at {timestamp}"
   if (req.method === "GET" && req.url?.startsWith("/history/")) {
     const walletAddr = req.url.slice(9).toLowerCase(); // strip leading /history/
     if (!/^0x[0-9a-f]{40}$/.test(walletAddr)) {
@@ -496,6 +500,25 @@ const server = createServer((req, res) => {
     }
     (async () => {
       try {
+        // ── Auth: verify signed timestamp ────────────────────────────────────
+        const tsHeader  = req.headers["x-timestamp"] as string | undefined;
+        const sigHeader = req.headers["x-signature"] as string | undefined;
+        if (!tsHeader || !sigHeader) {
+          send(401, { error: "Missing X-Timestamp / X-Signature headers" });
+          return;
+        }
+        const ts = parseInt(tsHeader, 10);
+        if (isNaN(ts) || Math.abs(Date.now() - ts) > 5 * 60 * 1000) {
+          send(401, { error: "Timestamp expired or invalid (±5 min window)" });
+          return;
+        }
+        const message   = `Predacy history access for ${walletAddr} at ${tsHeader}`;
+        const recovered = await recoverMessageAddress({ message, signature: sigHeader as `0x${string}` });
+        if (recovered.toLowerCase() !== walletAddr) {
+          send(401, { error: "Signature does not match wallet address" });
+          return;
+        }
+        // ── Fetch from Redis ─────────────────────────────────────────────────
         const r = await getHistoryRedis();
         if (!r) { send(200, { orders: [] }); return; }
         const raw = await r.hgetall(`predacy:wallet-history:${walletAddr}`) as Record<string, string> | null;
