@@ -11,7 +11,7 @@ export const CONTRACTS = {
   },
   // Polygon Amoy testnet
   [polygonAmoy.id]: {
-    batchVault: "0x2A3fa469D3F80ca64624B22EFed72a5FC89E6759" as `0x${string}`, // v4: +claimWithProof, +claimMerkleRoot
+    batchVault: "0xC1D662460ce44144b64c68D010B0B7Ae4690e32d" as `0x${string}`, // v5: fix _buildMerkleRoot (n=512 hardcoded, was dynamic)
     usdc:       "0x3a863f9483217Ec2A909580747c3b5a299462b7A" as `0x${string}`, // MockUSDC (EIP-3009)
     ctf:        "0xCa35b74F92432A4c8A51452AA36f6beE7d503D07" as `0x${string}`, // MockCTF
   },
