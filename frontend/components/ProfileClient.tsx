@@ -1310,9 +1310,9 @@ export default function ProfileClient() {
             <div className="flex items-start gap-0 divide-x divide-border">
               <div className="pr-5">
                 <p className="text-base font-black text-text leading-tight" style={{ fontFamily: "var(--font-display)" }}>
-                  {enriching ? "…" : `$${positionsValue.toFixed(2)}`}
+                  {usdcBalance === null ? "…" : `$${(Number(usdcBalance) / 1e6).toFixed(2)}`}
                 </p>
-                <p className="text-[10px] text-muted-dim mt-0.5">Positions Value</p>
+                <p className="text-[10px] text-muted-dim mt-0.5">USDC Balance</p>
               </div>
               <div className="px-5">
                 <p className="text-base font-black text-text leading-tight" style={{ fontFamily: "var(--font-display)" }}>
@@ -1444,7 +1444,7 @@ export default function ProfileClient() {
               )}
             </p>
             <p className="text-[10px] text-muted-dim mb-4">
-              All-Time · {usdcBalance !== null ? `$${(Number(usdcBalance) / 1e6).toFixed(2)} balance` : "…"}
+              All-Time P&amp;L
             </p>
 
             {/* Sparkline */}
