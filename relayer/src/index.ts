@@ -41,6 +41,15 @@ const baseConfig = {
 
 const PORT = parseInt(process.env.PORT ?? "3001");
 
+// ── Batch cap constants ────────────────────────────────────────────────────────
+// Batch closes early when EITHER cap is hit — whichever comes first.
+// MAX_BATCH_USD: max combined USDC notional per batch (prevents Polymarket price impact)
+// MAX_BATCH_ORDERS: max order count per batch (limits proof complexity)
+const MAX_BATCH_USD_MICRO = BigInt(
+  Math.round(parseFloat(process.env.MAX_BATCH_USD ?? "5000") * 1_000_000),
+); // default $5,000
+const MAX_BATCH_ORDERS = parseInt(process.env.MAX_BATCH_ORDERS ?? "50");
+
 // Optional pre-warm market from env (backward-compat with old MARKET_ID single-market setup)
 const PRE_WARM_MARKET_ID = process.env.MARKET_ID
   ? (process.env.MARKET_ID as `0x${string}`)
@@ -49,13 +58,14 @@ const PRE_WARM_MARKET_ID = process.env.MARKET_ID
 // ── Per-market state ───────────────────────────────────────────────────────────
 
 interface MarketState {
-  processor:       BatchProcessor;
-  currentBatchId:  bigint | null;   // currently OPEN batch (accepting orders)
-  settlingBatchId: bigint | null;   // batch being proved/settled in background
-  processingBatch: boolean;
-  openingBatch:    boolean;
-  closingBatch:    boolean;
-  settleFailures:  Map<string, number>;
+  processor:            BatchProcessor;
+  currentBatchId:       bigint | null;   // currently OPEN batch (accepting orders)
+  settlingBatchId:      bigint | null;   // batch being proved/settled in background
+  processingBatch:      boolean;
+  openingBatch:         boolean;
+  closingBatch:         boolean;
+  settleFailures:       Map<string, number>;
+  batchRunningUsdMicro: bigint;          // running USDC sum for current batch (6-dec)
 }
 
 /** activeMarkets: marketId (lowercase hex) → MarketState */
@@ -79,13 +89,14 @@ function makeConfig(marketId: `0x${string}`): RelayerConfig {
 
 function createMarketState(marketId: `0x${string}`): MarketState {
   return {
-    processor:       new BatchProcessor(makeConfig(marketId)),
-    currentBatchId:  null,
-    settlingBatchId: null,
-    processingBatch: false,
-    openingBatch:    false,
-    closingBatch:    false,
-    settleFailures:  new Map(),
+    processor:            new BatchProcessor(makeConfig(marketId)),
+    currentBatchId:       null,
+    settlingBatchId:      null,
+    processingBatch:      false,
+    openingBatch:         false,
+    closingBatch:         false,
+    settleFailures:       new Map(),
+    batchRunningUsdMicro: 0n,
   };
 }
 
@@ -289,6 +300,21 @@ const server = createServer((req, res) => {
         // Return the ACTUAL on-chain batchId (not the one from the request body,
         // which may be stale/0 when the client submits before its first poll).
         send(200, { ok: true, batchId: actualBatchId.toString(), orders });
+
+        // ── Batch cap check: early close if USD or order count cap is hit ──────
+        // Increment running USD for this batch and check both caps.
+        // We fire-and-forget sealBatch so the response has already been sent.
+        state.batchRunningUsdMicro += BigInt(amount);
+        const capHitUsd    = state.batchRunningUsdMicro >= MAX_BATCH_USD_MICRO;
+        const capHitOrders = orders >= MAX_BATCH_ORDERS;
+        if ((capHitUsd || capHitOrders) && !state.closingBatch && !state.processingBatch && state.currentBatchId !== null) {
+          const reason = capHitUsd
+            ? `$${(Number(state.batchRunningUsdMicro) / 1e6).toFixed(2)} >= $${Number(MAX_BATCH_USD_MICRO) / 1e6} USD cap`
+            : `${orders} >= ${MAX_BATCH_ORDERS} orders cap`;
+          console.log(`[Relayer] Batch ${state.currentBatchId} (${marketId}) cap hit: ${reason} — early close`);
+          sealBatch(state, marketId as `0x${string}`, mktKey)
+            .catch((e) => console.error(`[Relayer] Early close error (${marketId}):`, (e as any).message));
+        }
 
         // ── Wallet history: store compact summary for cross-device access ──────
         // Keyed by walletAddress (real connected wallet) + commitment hash.
@@ -529,6 +555,35 @@ const server = createServer((req, res) => {
     return;
   }
 
+  // GET /batch-status?marketId=0x...
+  // Returns running USD + order count for the current open batch.
+  // Used by the frontend BatchTimer to show a capacity progress bar.
+  if (req.method === "GET" && req.url?.startsWith("/batch-status")) {
+    const url      = new URL(req.url, "http://localhost");
+    const marketId = url.searchParams.get("marketId");
+    if (!marketId) { send(400, { error: "Missing query param: marketId" }); return; }
+    const key      = marketId.toLowerCase();
+    const mktState = activeMarkets.get(key);
+    if (!mktState || mktState.currentBatchId === null) {
+      send(404, { error: "Market not active — send an order first to open a batch" }); return;
+    }
+    (async () => {
+      try {
+        const orderCount = await mktState.processor.orderCount(mktState.currentBatchId!);
+        send(200, {
+          batchId:    mktState.currentBatchId!.toString(),
+          runningUsd: Number(mktState.batchRunningUsdMicro) / 1_000_000,
+          maxUsd:     Number(MAX_BATCH_USD_MICRO) / 1_000_000,
+          maxOrders:  MAX_BATCH_ORDERS,
+          orderCount,
+        });
+      } catch (e: any) {
+        send(500, { error: e.message });
+      }
+    })();
+    return;
+  }
+
   send(404, { error: "Not found" });
 });
 
@@ -546,7 +601,7 @@ server.listen(PORT, () => {
 console.log("[Relayer] Starting Predacy relayer (multi-market mode)...");
 console.log(`[Relayer] Vault:   ${baseConfig.vaultAddress}`);
 console.log(`[Relayer] Chain:   ${chainId === polygon.id ? "Polygon" : "Polygon Amoy"}`);
-console.log(`[Relayer] Window:  ${baseConfig.batchWindowMs / 1000}s`);
+console.log(`[Relayer] Window:  ${baseConfig.batchWindowMs / 1000}s (early-close: $${Number(MAX_BATCH_USD_MICRO) / 1e6} USD or ${MAX_BATCH_ORDERS} orders)`);
 
 if (missingVars.length > 0) {
   console.error(`[Relayer] ⚠ Missing env vars: ${missingVars.join(", ")} — add them in Railway Variables tab`);
@@ -683,6 +738,62 @@ async function onSettleFail(state: MarketState, marketKey: string, batchId: bigi
   }
 }
 
+/**
+ * Seal the current batch for a market (timer expiry OR cap hit) and pipeline
+ * the next one. Safe to fire-and-forget from the /order handler.
+ *
+ * Flow: closeBatch() → openBatch() (pipeline) → processBatch() (background)
+ */
+async function sealBatch(state: MarketState, marketId: `0x${string}`, marketKey: string): Promise<void> {
+  if (state.closingBatch || state.processingBatch || state.currentBatchId === null) return;
+  state.closingBatch         = true;
+  state.batchRunningUsdMicro = 0n;   // reset for the next batch
+  const closingId = state.currentBatchId;
+
+  try {
+    await state.processor.closeBatch();
+  } catch (err) {
+    console.error(`[Relayer] sealBatch closeBatch (${marketKey}) failed:`, err);
+    state.closingBatch = false;
+    return;
+  }
+
+  // Pipeline: open next batch immediately so new orders don't have to wait
+  state.openingBatch = true;
+  try {
+    state.currentBatchId = await state.processor.openBatch(marketId);
+    batchToMarket.set(state.currentBatchId.toString(), marketKey);
+    console.log(`[Relayer] Opened batch ${state.currentBatchId} for market ${marketKey} (pipelined)`);
+  } catch (err: any) {
+    if (err.message?.includes("batch already open")) {
+      state.currentBatchId = await publicClient.readContract({
+        address:      baseConfig.vaultAddress,
+        abi:          BATCH_VAULT_ABI,
+        functionName: "getCurrentBatchId",
+        args:         [marketId],
+      }) as bigint;
+      batchToMarket.set(state.currentBatchId.toString(), marketKey);
+      console.log(`[Relayer] Next batch already open: ${state.currentBatchId} (market ${marketKey})`);
+    } else {
+      console.error(`[Relayer] openBatch (pipeline, ${marketKey}) failed:`, err);
+    }
+  } finally {
+    state.openingBatch = false;
+    state.closingBatch = false;
+  }
+
+  // Settle old batch in background — ZK proof generation is non-blocking
+  if (!state.processingBatch) {
+    state.processingBatch = true;
+    state.settlingBatchId = closingId;
+    console.log(`[Relayer] Settling batch ${closingId} (market ${marketKey}) in background`);
+    state.processor.processBatch(closingId)
+      .then(() => { state.settleFailures.delete(closingId.toString()); })
+      .catch((err) => onSettleFail(state, marketKey, closingId, err))
+      .finally(() => { state.processingBatch = false; state.settlingBatchId = null; });
+  }
+}
+
 const poll = async () => {
   if (missingVars.length > 0) return;
   try {
@@ -722,57 +833,9 @@ const poll = async () => {
 
           // Auto-close once window has elapsed AND there's at least one order
           if (nowSec >= Number(batchInfo.openedAt) + windowSec && batchInfo.commitmentCount > 0n) {
-            state.closingBatch = true;
-            const closingId = state.currentBatchId!;
-            console.log(`[Relayer] Batch ${closingId} (market ${marketKey}) window expired (${batchInfo.commitmentCount} orders) — closing`);
-            try {
-              await state.processor.closeBatch();
-            } catch (err) {
-              console.error(`[Relayer] closeBatch (market ${marketKey}) failed:`, err);
-              state.closingBatch = false;
-              continue;
-            }
-
-            // Pipeline: immediately open next batch so users can submit without waiting for proof
-            state.openingBatch = true;
-            try {
-              state.currentBatchId = await state.processor.openBatch(marketKey as `0x${string}`);
-              batchToMarket.set(state.currentBatchId.toString(), marketKey);
-              console.log(`[Relayer] Opened batch ${state.currentBatchId} for market ${marketKey} (pipelined)`);
-            } catch (err: any) {
-              if (err.message?.includes("batch already open")) {
-                state.currentBatchId = await publicClient.readContract({
-                  address: baseConfig.vaultAddress,
-                  abi:     BATCH_VAULT_ABI,
-                  functionName: "getCurrentBatchId",
-                  args:    [marketKey as `0x${string}`],
-                }) as bigint;
-                batchToMarket.set(state.currentBatchId.toString(), marketKey);
-                console.log(`[Relayer] Next batch already open: ${state.currentBatchId} (market ${marketKey})`);
-              } else {
-                console.error(`[Relayer] openBatch (pipeline, market ${marketKey}) failed:`, err);
-              }
-            } finally {
-              state.openingBatch = false;
-              state.closingBatch = false;
-            }
-
-            // Settle old batch in background — ZK proof generation is non-blocking
-            if (!state.processingBatch) {
-              state.processingBatch = true;
-              state.settlingBatchId = closingId;
-              console.log(`[Relayer] Settling batch ${closingId} (market ${marketKey}) in background`);
-              state.processor.processBatch(closingId)
-                .then(() => {
-                  state.settleFailures.delete(closingId.toString());
-                  console.log(`[Relayer] Batch ${closingId} (market ${marketKey}) settled`);
-                })
-                .catch((err) => onSettleFail(state, marketKey, closingId, err))
-                .finally(() => {
-                  state.processingBatch = false;
-                  state.settlingBatchId = null;
-                });
-            }
+            console.log(`[Relayer] Batch ${state.currentBatchId} (market ${marketKey}) window expired (${batchInfo.commitmentCount} orders) — closing`);
+            sealBatch(state, marketKey as `0x${string}`, marketKey)
+              .catch((err) => console.error(`[Relayer] sealBatch (timer, ${marketKey}) failed:`, (err as any).message));
           }
         } else if (batchInfo.status === SETTLING) {
           // Fallback: batch found SETTLING without a background promise (edge case / stale state)

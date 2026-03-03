@@ -12,6 +12,8 @@ interface BatchTimerProps {
   status: number;         // 0=OPEN, 1=SETTLING, 2=SETTLED
   clearingPrice?: bigint;
   mini?: boolean;         // compact horizontal strip mode
+  maxBatchUsd?: number;   // USD cap for early close (default: 5000)
+  maxBatchOrders?: number; // order count cap (default: 50)
 }
 
 const RADIUS        = 54;
@@ -30,6 +32,8 @@ export default function BatchTimer({
   status,
   clearingPrice,
   mini = false,
+  maxBatchUsd = 5000,
+  maxBatchOrders = 50,
 }: BatchTimerProps) {
   const [remaining, setRemaining] = useState(batchWindow);
   const [progress, setProgress]   = useState(1);
@@ -75,6 +79,13 @@ export default function BatchTimer({
     minimumFractionDigits: 0,
     maximumFractionDigits: 0,
   });
+
+  // Capacity: how full is the batch (USD-based, 0–100%)
+  const capacityPct   = Math.min(100, (Number(totalDeposited) / 1_000_000 / maxBatchUsd) * 100);
+  const capacityColor = capacityPct >= 80 ? "#FF3355" : capacityPct >= 50 ? "#FFB800" : "#4D83FF";
+  const maxUsdDisplay = maxBatchUsd >= 1000
+    ? `$${(maxBatchUsd / 1000).toFixed(0)}k`
+    : `$${maxBatchUsd}`;
 
   const statusLabel =
     status === 0
@@ -170,18 +181,21 @@ export default function BatchTimer({
             </span>
           </div>
 
-          <div className="flex gap-3 text-[10px] text-muted-dim tabular-nums flex-wrap">
-            <span>
+          <div className="flex gap-3 text-[10px] tabular-nums flex-wrap">
+            <span className="text-muted-dim">
               <span className={clsx(isOpen ? "text-accent" : "text-text")}>{commitmentCount}</span>
               {" orders"}
             </span>
-            <span>${volumeDisplay} locked</span>
+            <span style={{ color: isOpen && capacityPct >= 80 ? "#FF3355" : isOpen && capacityPct >= 50 ? "#FFB800" : "" }}
+              className={clsx("text-muted-dim")}>
+              ${volumeDisplay} / {maxUsdDisplay}
+            </span>
             {status === 2 && clearingPrice !== undefined && clearingPrice > 0n && (
               <span className="text-blue glow-blue">@ {(Number(clearingPrice) / 10_000).toFixed(1)}¢</span>
             )}
           </div>
 
-          {/* Thin progress bar */}
+          {/* Time progress bar */}
           <div className="h-[2px] rounded-full overflow-hidden" style={{ background: "#13131F" }}>
             <div
               className="h-full rounded-full transition-all duration-200"
@@ -192,6 +206,20 @@ export default function BatchTimer({
               }}
             />
           </div>
+
+          {/* Capacity bar — shows batch USD fill vs $5k cap */}
+          {status === 0 && (
+            <div className="h-[2px] rounded-full overflow-hidden" style={{ background: "#13131F" }}>
+              <div
+                className="h-full rounded-full transition-all duration-500"
+                style={{
+                  width: `${capacityPct}%`,
+                  background: capacityColor,
+                  boxShadow: `0 0 4px ${capacityColor}40`,
+                }}
+              />
+            </div>
+          )}
         </div>
       </div>
     );
@@ -285,9 +313,23 @@ export default function BatchTimer({
           </span>
         </div>
         <div className="flex items-center justify-between">
-          <span className="text-muted text-xs">volume locked</span>
-          <span className="text-text text-xs font-medium tabular-nums">${volumeDisplay}</span>
+          <span className="text-muted text-xs">batch capacity</span>
+          <span className="text-xs font-medium tabular-nums" style={{ color: isOpen && capacityPct >= 80 ? "#FF3355" : isOpen && capacityPct >= 50 ? "#FFB800" : "" }}>
+            ${volumeDisplay} / {maxUsdDisplay}
+          </span>
         </div>
+        {status === 0 && (
+          <div className="h-[2px] rounded-full overflow-hidden" style={{ background: "#13131F" }}>
+            <div
+              className="h-full rounded-full transition-all duration-500"
+              style={{
+                width: `${capacityPct}%`,
+                background: capacityColor,
+                boxShadow: `0 0 4px ${capacityColor}`,
+              }}
+            />
+          </div>
+        )}
         {status === 2 && clearingPrice !== undefined && (
           <>
             <div className="h-px bg-border" />
