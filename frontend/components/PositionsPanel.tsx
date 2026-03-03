@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { createPublicClient, http } from "viem";
+import { createPublicClient, http, keccak256, encodeAbiParameters } from "viem";
 import { clsx } from "clsx";
 import { BATCH_VAULT_ABI, BatchStatus, getContracts } from "@/lib/contracts";
 import { ACTIVE_CHAIN } from "@/lib/chain";
@@ -117,7 +117,7 @@ export default function PositionsPanel({
 
     // Load all stored orders for this wallet
     let storedOrders: Array<{
-      commitment: string; batchId: string; claimed?: boolean;
+      commitment: string; batchId: string; salt?: string; claimed?: boolean;
     }> = [];
     try {
       const storageKey = `predacy:orders:${walletAddress.toLowerCase()}`;
@@ -150,13 +150,41 @@ export default function PositionsPanel({
 
           if (posRaw.filledAmount === 0n && posRaw.refundAmount === 0n) return;
 
+          // claimWithProof sets usedNullifiers but NOT positionsByCommitment.claimed.
+          // Check usedNullifiers on-chain as the authoritative claimed signal.
+          let claimed = posRaw.claimed || order.claimed === true;
+          if (!claimed && order.salt) {
+            try {
+              const nullifier = keccak256(
+                encodeAbiParameters(
+                  [{ type: "bytes32" }, { type: "uint256" }, { type: "bytes32" }],
+                  [order.commitment as `0x${string}`, id, order.salt as `0x${string}`],
+                )
+              );
+              claimed = await publicClient.readContract({
+                address: contracts.batchVault,
+                abi: BATCH_VAULT_ABI,
+                functionName: "usedNullifiers",
+                args: [nullifier],
+              }) as boolean;
+              if (claimed) {
+                // Persist to localStorage so future loads skip the RPC call
+                try {
+                  const sk = `predacy:orders:${walletAddress.toLowerCase()}`;
+                  const all: Array<Record<string, unknown>> = JSON.parse(localStorage.getItem(sk) ?? "[]");
+                  localStorage.setItem(sk, JSON.stringify(
+                    all.map(o => o.batchId === order.batchId ? { ...o, claimed: true } : o)
+                  ));
+                } catch { /* ignore */ }
+              }
+            } catch { /* RPC hiccup — leave as unclaimed */ }
+          }
+
           results.push({
             batchId: id,
             batchMarketId: batchRaw.marketId,
             batchStatus: batchRaw.status as BatchStatus,
-            // claimWithProof sets usedNullifiers but NOT positionsByCommitment.claimed,
-            // so trust localStorage claimed=true when on-chain returns false.
-            position: { ...posRaw, claimed: posRaw.claimed || order.claimed === true },
+            position: { ...posRaw, claimed },
           });
         } catch { /* batch doesn't exist or RPC hiccup — skip */ }
       })

@@ -193,6 +193,13 @@ export const BATCH_VAULT_ABI = [
     stateMutability: "view",
   },
   {
+    name: "usedNullifiers",
+    type: "function",
+    inputs: [{ name: "nullifier", type: "bytes32" }],
+    outputs: [{ name: "", type: "bool" }],
+    stateMutability: "view",
+  },
+  {
     name: "BATCH_WINDOW",
     type: "function",
     inputs: [],
