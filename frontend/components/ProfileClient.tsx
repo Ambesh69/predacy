@@ -879,12 +879,14 @@ export default function ProfileClient() {
       await Promise.allSettled(
         settledEntries.map(async (entry) => {
           try {
-            const pos = await publicClient.readContract({
-              address:      contracts.batchVault,
-              abi:          BATCH_VAULT_ABI,
-              functionName: "getPosition",
-              args:         [entry.batchId, entry.commitment],
-            }) as { filledAmount: bigint; refundAmount: bigint; isBuy: boolean; claimed: boolean };
+            const pos = await withRetry(() =>
+              publicClient.readContract({
+                address:      contracts.batchVault,
+                abi:          BATCH_VAULT_ABI,
+                functionName: "getPosition",
+                args:         [entry.batchId, entry.commitment],
+              }) as Promise<{ filledAmount: bigint; refundAmount: bigint; isBuy: boolean; claimed: boolean }>
+            );
 
             // usedNullifiers is authoritative for claimed state
             let claimed = pos.claimed || entry.claimed === true;
@@ -896,12 +898,14 @@ export default function ProfileClient() {
                     [entry.commitment, entry.batchId, entry.salt as `0x${string}`],
                   )
                 );
-                claimed = await publicClient.readContract({
-                  address:      contracts.batchVault,
-                  abi:          BATCH_VAULT_ABI,
-                  functionName: "usedNullifiers",
-                  args:         [nullifier],
-                }) as boolean;
+                claimed = await withRetry(() =>
+                  publicClient.readContract({
+                    address:      contracts.batchVault,
+                    abi:          BATCH_VAULT_ABI,
+                    functionName: "usedNullifiers",
+                    args:         [nullifier],
+                  }) as Promise<boolean>
+                );
                 if (claimed) {
                   try {
                     const sk = `predacy:orders:${walletAddress.toLowerCase()}`;
@@ -937,8 +941,9 @@ export default function ProfileClient() {
             );
             const data = await r.json();
             const prices = JSON.parse(data[0]?.outcomePrices ?? "[]");
-            const yesPrice = parseFloat(prices[0] ?? "0");
-            if (yesPrice > 0) priceMap.set(marketId.toLowerCase(), yesPrice);
+            const yesPrice = parseFloat(prices[0] ?? "");
+            // Store any valid number incl. 0 (resolved-NO markets sit near 0 but shouldn't be excluded)
+            if (prices.length > 0 && !isNaN(yesPrice)) priceMap.set(marketId.toLowerCase(), yesPrice);
           } catch { /* non-fatal */ }
         })
       );
@@ -1145,12 +1150,15 @@ export default function ProfileClient() {
     ? (totalPnl >= 0 ? `+$${totalPnl.toFixed(2)}` : `-$${Math.abs(totalPnl).toFixed(2)}`)
     : (enriching ? "…" : "—");
 
-  // Current value of live (unresolved) positions
+  // Current value of unclaimed settled positions (shares × current outcome price).
+  // Claimed positions are excluded — those shares are already redeemed into the USDC balance.
   const positionsValue = settledOrders.reduce((sum, o) => {
+    if (o.claimed) return sum; // already redeemed — value sits in USDC balance instead
     if (!o.shares || o.currentYesPrice == null) return sum;
     const outcomePrice = o.isBuy ? o.currentYesPrice : 1 - o.currentYesPrice;
     return sum + o.shares * outcomePrice;
   }, 0);
+  const hasUnclaimedSettled = settledOrders.some((o) => !o.claimed && o.shares != null);
 
   // Biggest single-position win (max positive P&L across all settled positions)
   const biggestWin = pnlPositions.reduce((best, o) => {
@@ -1316,9 +1324,13 @@ export default function ProfileClient() {
               </div>
               <div className="px-5">
                 <p className="text-base font-black text-text leading-tight" style={{ fontFamily: "var(--font-display)" }}>
-                  {hasPnlData && biggestWin > 0 ? `$${biggestWin.toFixed(2)}` : "—"}
+                  {enriching
+                    ? "…"
+                    : hasUnclaimedSettled
+                      ? `$${positionsValue.toFixed(2)}`
+                      : "—"}
                 </p>
-                <p className="text-[10px] text-muted-dim mt-0.5">Biggest Win</p>
+                <p className="text-[10px] text-muted-dim mt-0.5">Positions Value</p>
               </div>
               <div className="px-5">
                 <p className="text-base font-black text-text leading-tight" style={{ fontFamily: "var(--font-display)" }}>
