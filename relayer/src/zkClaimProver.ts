@@ -240,7 +240,7 @@ export class ZKClaimProver {
     const { createRequire }          = await import("module");
     const _require                   = createRequire(import.meta.url);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const circuit                    = _require("../circuits/claim.json") as any;
+    const circuit                    = _require("../../circuits/claim/target/claim.json") as any;
 
     const bbPath = process.env.BB_PATH ?? `${process.env.HOME}/.bb/bb`;
     const api    = await Barretenberg.new({ bbPath });

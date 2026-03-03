@@ -6,30 +6,30 @@
 //
 // Privacy guarantee:
 //   - Commitment hash = keccak256(marketId, isBuy, amount, limitPrice, salt)
-//     — NO trader address in the hash.  The 256-bit salt is the secret credential.
+//     - NO trader address in the hash.  The 256-bit salt is the secret credential.
 //   - The Merkle proof shows membership without revealing the leaf index publicly.
 //   - The nullifier = keccak256(commitment ++ batchId ++ salt) prevents double-claim
 //     while keeping the salt secret.
 //
 // Public inputs (verified by BatchVault.claimWithProof):
-//   batch_id        — must match the batchId passed to the contract
-//   commitment_root — must match batch.claimMerkleRoot (binary Merkle root)
-//   clearing_price  — must match batch.clearingPrice
-//   nullifier       — checked against usedNullifiers[]
-//   recipient       — address that receives the payout (chosen by prover)
-//   fills           — whether the order filled
-//   fill_amount     — USDC or YES tokens received
-//   refund_amount   — assets returned if unfilled
-//   is_buy_out      — order direction (echoed from private input)
+//   batch_id        - must match the batchId passed to the contract
+//   commitment_root - must match batch.claimMerkleRoot (binary Merkle root)
+//   clearing_price  - must match batch.clearingPrice
+//   nullifier       - checked against usedNullifiers[]
+//   recipient       - address that receives the payout (chosen by prover)
+//   fills           - whether the order filled
+//   fill_amount     - USDC or YES tokens received
+//   refund_amount   - assets returned if unfilled
+//   is_buy_out      - order direction (echoed from private input)
 //
-// Private inputs (witness — never revealed on-chain):
-//   market_id       — the market condition ID (bytes32)
-//   is_buy          — order direction
-//   amount          — USDC (6 decimals) for buys; YES token count for sells
-//   limit_price     — 6-decimal fixed point limit price
-//   salt            — 32-byte random secret chosen at order time
-//   merkle_path     — DEPTH sibling hashes from leaf to root
-//   leaf_index      — position of this commitment in the batch's Merkle tree
+// Private inputs (witness - never revealed on-chain):
+//   market_id       - the market condition ID (bytes32)
+//   is_buy          - order direction
+//   amount          - USDC (6 decimals) for buys; YES token count for sells
+//   limit_price     - 6-decimal fixed point limit price
+//   salt            - 32-byte random secret chosen at order time
+//   merkle_path     - DEPTH sibling hashes from leaf to root
+//   leaf_index      - position of this commitment in the batch's Merkle tree
 
 use keccak256::keccak256;
 
@@ -38,7 +38,7 @@ use keccak256::keccak256;
 global DEPTH: u32 = 9;
 global PRICE_DECIMALS: u64 = 1_000_000;
 
-// ── Helper: u64 → big-endian bytes32 (ABI-encoded right-aligned uint256) ─────
+// -- Helper: u64 -> big-endian bytes32 (ABI-encoded right-aligned uint256) ----
 
 fn u64_to_bytes32(value: u64) -> [u8; 32] {
     let mut result: [u8; 32] = [0; 32];
@@ -53,7 +53,7 @@ fn u64_to_bytes32(value: u64) -> [u8; 32] {
     result
 }
 
-// ── Helper: concatenate three 32-byte arrays into 96 bytes ───────────────────
+// -- Helper: concatenate three 32-byte arrays into 96 bytes -------------------
 
 fn concat96(a: [u8; 32], b: [u8; 32], c: [u8; 32]) -> [u8; 96] {
     let mut out: [u8; 96] = [0; 96];
@@ -65,12 +65,12 @@ fn concat96(a: [u8; 32], b: [u8; 32], c: [u8; 32]) -> [u8; 96] {
     out
 }
 
-// ── Commitment hash (NO trader address) ──────────────────────────────────────
+// -- Commitment hash (NO trader address) --------------------------------------
 //
 // Matches BatchVault._verifyCommitments() post-upgrade:
 //   keccak256(abi.encode(marketId, isBuy, amount, limitPrice, salt))
 //   = keccak256(bytes32 ++ bytes32_bool ++ bytes32_uint ++ bytes32_uint ++ bytes32)
-//   = 5 × 32 bytes = 160 bytes total
+//   = 5 * 32 bytes = 160 bytes total
 
 fn compute_commitment(
     market_id:   [u8; 32],
@@ -111,11 +111,11 @@ fn compute_commitment(
     keccak256(encoded, 160)
 }
 
-// ── Standard binary Merkle verification ──────────────────────────────────────
+// -- Standard binary Merkle verification --------------------------------------
 //
 // Recomputes the root given a leaf hash, the sibling path, and the leaf index.
 // Hashing: keccak256(abi.encode(left, right)) = keccak256(64 bytes).
-// Ordering: leaf_index bit i == 0 → current is left child, sibling is right.
+// Ordering: leaf_index bit i == 0 -> current is left child, sibling is right.
 
 fn merkle_verify(
     leaf:        [u8; 32],
@@ -126,17 +126,18 @@ fn merkle_verify(
 
     for depth in 0..9 {
         let sibling = path[depth];
-        let is_right_child = ((leaf_index >> (depth as u8)) & 1) == 1;
+        // leaf_index bit `depth`: 0 = left child, 1 = right child
+        let is_right_child = ((leaf_index >> depth) & 1) == 1;
 
         let mut pair: [u8; 64] = [0; 64];
         if is_right_child {
-            // current is right child — sibling is left
+            // current is right child - sibling is left
             for i in 0..32 {
                 pair[i]      = sibling[i];
                 pair[32 + i] = current[i];
             }
         } else {
-            // current is left child — sibling is right
+            // current is left child - sibling is right
             for i in 0..32 {
                 pair[i]      = current[i];
                 pair[32 + i] = sibling[i];
@@ -148,10 +149,10 @@ fn merkle_verify(
     current
 }
 
-// ── Main circuit ─────────────────────────────────────────────────────────────
+// -- Main circuit -------------------------------------------------------------
 
 fn main(
-    // ── Private witness (never revealed on-chain) ────────────────────────────
+    // -- Private witness (never revealed on-chain) ----------------------------
     market_id:   [u8; 32],      // market condition ID
     is_buy:      bool,          // order direction
     amount:      u64,           // USDC (buy) or YES tokens (sell), 6 decimals
@@ -160,35 +161,40 @@ fn main(
     merkle_path: [[u8; 32]; 9], // sibling hashes from leaf to root (DEPTH = 9)
     leaf_index:  u32,           // position of this commitment in the batch tree
 
-    // ── Public outputs (checked on-chain by BatchVault.claimWithProof) ───────
+    // -- Public outputs (checked on-chain by BatchVault.claimWithProof) -------
     batch_id:        pub u64,        // batch ID
     commitment_root: pub [u8; 32],   // batch.claimMerkleRoot
     clearing_price:  pub u64,        // batch.clearingPrice
     nullifier:       pub [u8; 32],   // used for double-claim prevention
-    recipient:       pub [u8; 20],   // payout destination address
+    recipient:       pub [u8; 20],   // payout destination address (unconstrained - prover chooses)
     fills:           pub bool,       // whether this order filled
     fill_amount:     pub u64,        // payout amount if filled
     refund_amount:   pub u64,        // refund amount if unfilled
     is_buy_out:      pub bool,       // echoes is_buy for the contract to branch on
 ) {
-    // ── 1. Recompute commitment (no trader address) ───────────────────────────
+    // Use recipient to suppress unused variable warning.
+    // The contract reads recipient from public inputs to route the payout;
+    // the circuit makes no constraints on it (prover chooses the recipient).
+    let _r = recipient;
+
+    // -- 1. Recompute commitment (no trader address) ---------------------------
     let commitment = compute_commitment(market_id, is_buy, amount, limit_price, salt);
 
-    // ── 2. Verify Merkle membership ───────────────────────────────────────────
+    // -- 2. Verify Merkle membership ------------------------------------------
     let computed_root = merkle_verify(commitment, merkle_path, leaf_index);
     assert(computed_root == commitment_root, "Merkle proof invalid");
 
-    // ── 3. Compute nullifier and assert it matches the public input ───────────
+    // -- 3. Compute nullifier and assert it matches the public input -----------
     //    nullifier = keccak256(commitment ++ batchId_bytes32 ++ salt)
     let batch_id_bytes = u64_to_bytes32(batch_id);
     let null_input = concat96(commitment, batch_id_bytes, salt);
     let expected_null = keccak256(null_input, 96);
     assert(expected_null == nullifier, "Nullifier mismatch");
 
-    // ── 4. Echo is_buy ────────────────────────────────────────────────────────
+    // -- 4. Echo is_buy --------------------------------------------------------
     assert(is_buy_out == is_buy, "is_buy_out must match is_buy");
 
-    // ── 5. Verify fill decision ───────────────────────────────────────────────
+    // -- 5. Verify fill decision -----------------------------------------------
     //    Buy fills if limit_price >= clearing_price
     //    Sell fills if limit_price <= clearing_price
     let order_fills: bool = if is_buy {
@@ -198,7 +204,7 @@ fn main(
     };
     assert(order_fills == fills, "Fill decision mismatch");
 
-    // ── 6. Verify fill/refund amounts ─────────────────────────────────────────
+    // -- 6. Verify fill/refund amounts ----------------------------------------
     if fills {
         if is_buy {
             // Filled buy: all USDC amount was spent, refund = 0
@@ -213,7 +219,7 @@ fn main(
     } else {
         assert(fill_amount == 0, "fill_amount must be 0 for unfilled order");
         if is_buy {
-            // Unfilled buy: EIP-3009 deferred — USDC was never deposited, nothing to refund
+            // Unfilled buy: EIP-3009 deferred - USDC was never deposited, nothing to refund
             assert(refund_amount == 0, "refund_amount must be 0 for unfilled buy (EIP-3009)");
         } else {
             // Unfilled sell: full YES token refund
@@ -222,7 +228,7 @@ fn main(
     }
 }
 
-// ── Unit tests ────────────────────────────────────────────────────────────────
+// -- Unit tests ---------------------------------------------------------------
 
 #[test]
 fn test_compute_commitment_deterministic() {
