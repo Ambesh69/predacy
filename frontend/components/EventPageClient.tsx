@@ -642,6 +642,17 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       if (receipt.status === "reverted") {
         throw new Error("Claim transaction reverted — the batch may not be fully settled yet. Try again in a few seconds.");
       }
+
+      // Persist claimed=true to localStorage so scanHistory shows CLAIMED ✓
+      // even though claimWithProof only sets usedNullifiers (not positionsByCommitment.claimed).
+      try {
+        const allOrders: Array<Record<string, unknown>> = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
+        const updated = allOrders.map((o) =>
+          o.batchId === batchId.toString() ? { ...o, claimed: true } : o
+        );
+        localStorage.setItem(storageKey, JSON.stringify(updated));
+      } catch { /* ignore storage errors */ }
+
       setBalanceVersion(v => v + 1);
     } catch (e: any) {
       if (e?.code !== 4001) setChainError(e.message ?? "Claim failed");

@@ -117,7 +117,7 @@ export default function PositionsPanel({
 
     // Load all stored orders for this wallet
     let storedOrders: Array<{
-      commitment: string; batchId: string;
+      commitment: string; batchId: string; claimed?: boolean;
     }> = [];
     try {
       const storageKey = `predacy:orders:${walletAddress.toLowerCase()}`;
@@ -154,7 +154,9 @@ export default function PositionsPanel({
             batchId: id,
             batchMarketId: batchRaw.marketId,
             batchStatus: batchRaw.status as BatchStatus,
-            position: posRaw,
+            // claimWithProof sets usedNullifiers but NOT positionsByCommitment.claimed,
+            // so trust localStorage claimed=true when on-chain returns false.
+            position: { ...posRaw, claimed: posRaw.claimed || order.claimed === true },
           });
         } catch { /* batch doesn't exist or RPC hiccup — skip */ }
       })
