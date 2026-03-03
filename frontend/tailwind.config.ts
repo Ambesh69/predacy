@@ -32,8 +32,13 @@ const config: Config = {
         "flicker": "flicker 4s linear infinite",
         "scan": "scan 8s linear infinite",
         "glow-accent": "glowAccent 2s ease-in-out infinite alternate",
+        "slide-up": "slideUp 0.2s ease-out",
       },
       keyframes: {
+        slideUp: {
+          "0%":   { opacity: "0", transform: "translateY(8px)" },
+          "100%": { opacity: "1", transform: "translateY(0)" },
+        },
         flicker: {
           "0%, 100%": { opacity: "1" },
           "92%": { opacity: "1" },

@@ -270,8 +270,12 @@ export default function PositionsPanel({
             </div>
           )
         ) : currentBatchStatus === BatchStatus.SETTLING ? (
-          <div className="border border-blue/20 bg-blue/5 p-3">
-            <p className="text-blue/70 text-[11px] tracking-wide animate-pulse">Batch settling…</p>
+          <div className="border border-blue/20 bg-blue/5 p-3 space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 border border-blue/60 border-t-transparent rounded-full animate-spin" />
+              <p className="text-blue/70 text-[11px] tracking-wide">Relayer computing clearing price…</p>
+            </div>
+            <p className="text-[10px] text-muted-dim">Usually takes 10–30 seconds</p>
           </div>
         ) : currentPosition === null ? (
           <div className="border border-border p-3 animate-pulse">
@@ -410,7 +414,12 @@ function PositionCard({ batchId, batchStatus, position, onClaim, isClaiming, cla
               "CLAIM POSITION"
             )}
           </button>
-          {claimError && (
+          {isClaiming && (
+            <p className="text-[9px] text-muted-dim text-center">
+              Generating ZK proof + awaiting tx confirmation (~20s)
+            </p>
+          )}
+          {claimError && !isClaiming && (
             <p className="text-danger text-[10px]">{claimError}</p>
           )}
         </>

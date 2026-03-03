@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, use } from "react";
+import { useState, useEffect, useRef, use } from "react";
 import Link from "next/link";
 import { clsx } from "clsx";
 import {
@@ -415,6 +415,23 @@ interface EventData {
   category?: string; tags?: string[]; markets: Market[];
 }
 
+// ── Claim error parser ─────────────────────────────────────────────────────────
+// Converts verbose viem/relayer error strings into user-friendly messages.
+function cleanClaimError(raw: string): string {
+  if (raw.includes("AlreadyClaimed"))      return "This position has already been claimed.";
+  if (raw.includes("BatchNotSettled") || raw.includes("not yet settled"))
+                                           return "The batch hasn't settled yet — try again in a few seconds.";
+  if (raw.includes("NothingToClaim"))      return "Nothing to claim (order was unfilled or amount is zero).";
+  if (raw.includes("ZKProofInvalid"))      return "ZK proof failed verification. Please try again.";
+  if (raw.includes("ClaimVerifierNotSet")) return "Claim verifier not configured on-chain.";
+  if (raw.includes("CommitmentMismatch"))  return "Order data doesn't match the on-chain record.";
+  if (raw.includes("not found in local storage")) return "Order data missing from this browser — cannot claim.";
+  if (raw.includes("transaction reverted")) return "Claim reverted — batch may not be fully settled. Try again.";
+  // Trim verbose viem boilerplate
+  if (raw.length > 100) return "Claim failed — please try again.";
+  return raw;
+}
+
 // ── Main component ─────────────────────────────────────────────────────────────
 export default function EventPageClient({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -438,6 +455,15 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   const [claimLoading, setClaimLoading] = useState(false);
   const [historicalMarketIds, setHistoricalMarketIds] = useState<`0x${string}`[]>([]);
   const selectedMarketId = selectedMarket?.conditionId;
+
+  // ── Toast notifications ──────────────────────────────────────────────────────
+  const [toast, setToast] = useState<{ id: number; message: string; type: "success" | "error" } | null>(null);
+  const toastIdRef = useRef(0);
+  const pushToast = (message: string, type: "success" | "error") => {
+    const id = ++toastIdRef.current;
+    setToast({ id, message, type });
+    setTimeout(() => setToast((prev) => (prev?.id === id ? null : prev)), 4000);
+  };
 
   // ── Wallet ───────────────────────────────────────────────────────────────────
   const { authenticated, login } = usePrivy();
@@ -544,7 +570,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     setChainError(null);
 
     fetchBatch();
-    const iv = setInterval(fetchBatch, 5000);
+    const iv = setInterval(fetchBatch, 2000);
     return () => { cancelled = true; clearInterval(iv); };
   }, [selectedMarketId]);
 
@@ -654,8 +680,12 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       } catch { /* ignore storage errors */ }
 
       setBalanceVersion(v => v + 1);
+      pushToast("Position claimed — payout sent to wallet.", "success");
     } catch (e: any) {
-      if (e?.code !== 4001) setChainError(e.message ?? "Claim failed");
+      if (e?.code !== 4001) {
+        setChainError(e.message ?? "Claim failed");
+        pushToast(cleanClaimError(e.message ?? "Claim failed"), "error");
+      }
       throw e;
     } finally {
       setClaimLoading(false);
@@ -1281,6 +1311,34 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
           <span className="text-accent/30">●</span> No position info leaks on-chain
         </span>
       </footer>
+
+      {/* Toast notification */}
+      {toast && (
+        <div
+          key={toast.id}
+          className={clsx(
+            "fixed bottom-6 left-1/2 -translate-x-1/2 z-50",
+            "px-4 py-3 border text-[11px] tracking-wide animate-slide-up",
+            "shadow-lg max-w-xs w-full",
+            toast.type === "success"
+              ? "bg-surface border-accent/40 text-accent"
+              : "bg-surface border-danger/40 text-danger",
+          )}
+        >
+          <div className="flex items-center gap-2">
+            {toast.type === "success" ? (
+              <svg className="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+              </svg>
+            ) : (
+              <svg className="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            )}
+            {toast.message}
+          </div>
+        </div>
+      )}
 
     </div>
   );
