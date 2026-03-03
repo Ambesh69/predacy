@@ -5,7 +5,7 @@ import { computeClearingPrice, computeFillsAtPrice } from "./clearingPrice.js";
 import { ZKProver } from "./zkProver.js";
 import { PolymarketClient } from "./polymarketClient.js";
 import { createOrderStore, type OrderStore } from "./orderStore.js";
-import type { Order, Commitment, BatchInfo, TransferAuth } from "./types.js";
+import type { Order, Commitment, BatchInfo, TransferAuth, RequeueAuth } from "./types.js";
 
 // Polygon Amoy requires min 25 gwei priority fee. Apply to every write.
 const AMOY_GAS = {
@@ -466,7 +466,7 @@ export class BatchProcessor {
    * is included in settleBatch(). The contract calls IUSDC.transferWithAuthorization()
    * to pull USDC from the user's wallet — no relayer capital needed.
    */
-  async processBatch(batchId: bigint): Promise<void> {
+  async processBatch(batchId: bigint): Promise<{ excludedOrders: Array<{ order: Order; commitment: `0x${string}` }> }> {
     console.log(`[BatchProcessor] Processing batch ${batchId}`);
 
     // 1. Fetch on-chain batch info + commitments
@@ -501,6 +501,14 @@ export class BatchProcessor {
 
     if (commitments.length === 0) {
       console.log(`[BatchProcessor] Empty batch — settling to advance lifecycle`);
+    }
+
+    // Build commitment-hash → order map for excluded-order tracking below.
+    // (orders[] and commitments[] are aligned when completeness check passes.)
+    const orderByCommitmentHash = new Map<string, Order>();
+    for (const order of orders) {
+      const hash = this._computeCommitmentHash(batchInfo.marketId, order);
+      orderByCommitmentHash.set(hash.toLowerCase(), order);
     }
 
     // 3. Compute internal batch clearing price
@@ -612,10 +620,17 @@ export class BatchProcessor {
     // 7. Build EIP-3009 TransferAuth[] — one per order (parallel to orders[]).
     //    For filled buy orders: use stored TransferAuth (pulls USDC from user's wallet).
     //    For sell orders / unfilled buy orders: zero struct (contract skips these).
-    const auths = orders.map((order) => {
+    //    Track excluded buy orders that have pre-signed requeue sigs for auto-requeue.
+    const excludedOrders: Array<{ order: Order; commitment: `0x${string}` }> = [];
+
+    const auths = orders.map((order, i) => {
       const isFilled = order.isBuy
         ? order.limitPrice >= effectiveClearingPrice
         : order.limitPrice <= effectiveClearingPrice;
+
+      if (!isFilled && order.isBuy && order.requeueAuths && order.requeueAuths.length > 0) {
+        excludedOrders.push({ order, commitment: commitments[i].hash });
+      }
 
       if (order.isBuy && isFilled && order.transferAuth) {
         console.log(`[BatchProcessor] Including TransferAuth for filled buy order (ephemeral=${order.trader})`);
@@ -667,6 +682,77 @@ export class BatchProcessor {
 
     // Clean up order store
     await this.store.delete(batchId.toString());
+
+    if (excludedOrders.length > 0) {
+      console.log(`[BatchProcessor] ${excludedOrders.length} buy order(s) excluded — will be requeued to next batch`);
+    }
+
+    return { excludedOrders };
+  }
+
+  /**
+   * Requeue excluded buy orders to the currently-open batch using pre-signed requeue sigs.
+   *
+   * Called by index.ts after processBatch() settles a batch. Each excluded order has
+   * up to 2 pre-signed CommitOrder EIP-712 sigs (signed by the ephemeral wallet at
+   * original submission time). Since batchId is no longer in the EIP-712 message (v6
+   * contract), these sigs are valid for any batch — the relayer just calls commitOrderFor
+   * with the next available requeue sig, routing the order into the newly-opened batch.
+   *
+   * Zero user interaction required — all sigs were created silently in-browser using
+   * the ephemeral private key (no MetaMask popup).
+   */
+  async requeueExcludedOrders(
+    excludedOrders: Array<{ order: Order; commitment: `0x${string}` }>,
+  ): Promise<void> {
+    for (const { order, commitment } of excludedOrders) {
+      if (!order.isBuy) continue; // sell order requeue is not supported (YES tokens pre-deposited)
+      if (!order.requeueAuths || order.requeueAuths.length === 0) {
+        console.log(`[BatchProcessor] No requeue auths remaining for ${commitment} — cannot auto-requeue`);
+        continue;
+      }
+
+      // Pop the first available requeue auth (FIFO — nonce order matters)
+      const [requeueAuth, ...remainingAuths] = order.requeueAuths;
+
+      try {
+        console.log(`[BatchProcessor] Requeueing excluded order ${commitment} (ephemeral=${requeueAuth.ephemeral}, nonce=${requeueAuth.nonce})`);
+
+        const hash = await this._write({
+          address:      this.config.vaultAddress,
+          abi:          BATCH_VAULT_ABI,
+          functionName: "commitOrderFor",
+          args: [
+            commitment,
+            order.amount,
+            requeueAuth.ephemeral,
+            requeueAuth.nonce,
+            requeueAuth.deadline,
+            requeueAuth.signature,
+            this.config.marketId,
+          ],
+          ...AMOY_GAS,
+        });
+
+        await this.publicClient.waitForTransactionReceipt({ hash });
+
+        // Determine the new batch ID (the currently-open batch for this market)
+        const newBatchId = await this.publicClient.readContract({
+          address:      this.config.vaultAddress,
+          abi:          BATCH_VAULT_ABI,
+          functionName: "getCurrentBatchId",
+          args:         [this.config.marketId],
+        }) as bigint;
+
+        // Save order under new batch with remaining requeue auths (may be 0 or 1 left)
+        const updatedOrder: Order = { ...order, requeueAuths: remainingAuths };
+        await this.store.save(newBatchId.toString(), commitment.toLowerCase(), updatedOrder);
+
+        console.log(`[BatchProcessor] Requeued ${commitment} → batch ${newBatchId} (${remainingAuths.length} requeue auth(s) remaining)`);
+      } catch (err: any) {
+        console.error(`[BatchProcessor] Failed to requeue ${commitment}:`, err.message);
+      }
+    }
   }
 
   // ─── Helpers ───────────────────────────────────────────────────────────────

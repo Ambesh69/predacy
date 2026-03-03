@@ -1,4 +1,4 @@
-import type { Order, TransferAuth } from "./types.js";
+import type { Order, TransferAuth, RequeueAuth } from "./types.js";
 
 // ── Interface ─────────────────────────────────────────────────────────────────
 
@@ -12,6 +12,24 @@ export interface OrderStore {
 // ── Serialization helpers ─────────────────────────────────────────────────────
 // bigint fields (amount, limitPrice, transferAuth.validAfter, transferAuth.validBefore)
 // cannot be JSON.stringify'd directly — convert to strings.
+
+function serializeRequeueAuth(auth: RequeueAuth): object {
+  return {
+    ephemeral: auth.ephemeral,
+    nonce:     auth.nonce.toString(),
+    deadline:  auth.deadline.toString(),
+    signature: auth.signature,
+  };
+}
+
+function deserializeRequeueAuth(raw: any): RequeueAuth {
+  return {
+    ephemeral: raw.ephemeral as `0x${string}`,
+    nonce:     BigInt(raw.nonce),
+    deadline:  BigInt(raw.deadline),
+    signature: raw.signature as `0x${string}`,
+  };
+}
 
 function serializeAuth(auth: TransferAuth): object {
   return {
@@ -40,9 +58,10 @@ function deserializeAuth(raw: any): TransferAuth {
 function serialize(order: Order): string {
   return JSON.stringify({
     ...order,
-    amount:      order.amount.toString(),
-    limitPrice:  order.limitPrice.toString(),
+    amount:       order.amount.toString(),
+    limitPrice:   order.limitPrice.toString(),
     transferAuth: order.transferAuth ? serializeAuth(order.transferAuth) : undefined,
+    requeueAuths: order.requeueAuths?.map(serializeRequeueAuth),
   });
 }
 
@@ -50,9 +69,10 @@ function deserialize(raw: string): Order {
   const o = JSON.parse(raw);
   return {
     ...o,
-    amount:      BigInt(o.amount),
-    limitPrice:  BigInt(o.limitPrice),
+    amount:       BigInt(o.amount),
+    limitPrice:   BigInt(o.limitPrice),
     transferAuth: o.transferAuth ? deserializeAuth(o.transferAuth) : undefined,
+    requeueAuths: o.requeueAuths?.map(deserializeRequeueAuth),
   };
 }
 

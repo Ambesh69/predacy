@@ -747,17 +747,52 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
 
       setSubmitStep("signing");
 
+      // Sign the primary CommitOrder (nonce N) — no batchId in v6 contract.
+      // batchId removed from EIP-712 so the same sig structure works for any batch,
+      // enabling the relayer to auto-requeue excluded orders without user interaction.
+      const COMMIT_ORDER_TYPES = {
+        CommitOrder: [
+          { name: "commitment", type: "bytes32" },
+          { name: "amount",     type: "uint256" },
+          { name: "nonce",      type: "uint256" },
+          { name: "deadline",   type: "uint256" },
+        ],
+      } as const;
+      const COMMIT_ORDER_DOMAIN = {
+        name: "BatchVault", version: "1", chainId: BigInt(ACTIVE_CHAIN.id), verifyingContract: contracts.batchVault,
+      } as const;
+
       const signature = await ephemeralWalletClient.signTypedData({
         account: ephemeralAccount,
-        domain: { name: "BatchVault", version: "1", chainId: BigInt(ACTIVE_CHAIN.id), verifyingContract: contracts.batchVault },
-        types: { CommitOrder: [
-          { name: "commitment", type: "bytes32" }, { name: "amount",  type: "uint256" },
-          { name: "batchId",    type: "uint256" }, { name: "nonce",   type: "uint256" },
-          { name: "deadline",   type: "uint256" },
-        ]},
+        domain:  COMMIT_ORDER_DOMAIN,
+        types:   COMMIT_ORDER_TYPES,
         primaryType: "CommitOrder",
-        message: { commitment: actualCommitment, amount: params.amount, batchId: batch.batchId, nonce: ephemeralNonce, deadline },
+        message: { commitment: actualCommitment, amount: params.amount, nonce: ephemeralNonce, deadline },
       });
+
+      // Pre-sign 2 requeue CommitOrders (nonce+1, nonce+2) silently with the ephemeral key.
+      // These are invisible to the user — pure JS crypto, no MetaMask popup, ~2ms total.
+      // If this order is excluded at clearing price, the relayer uses these to requeue
+      // the order automatically into the next batch (up to 2 times).
+      const requeueDeadline = BigInt(Math.floor(Date.now() / 1000) + 7 * 24 * 3600); // 7-day requeue window
+      const requeueSig1 = await ephemeralWalletClient.signTypedData({
+        account: ephemeralAccount,
+        domain:  COMMIT_ORDER_DOMAIN,
+        types:   COMMIT_ORDER_TYPES,
+        primaryType: "CommitOrder",
+        message: { commitment: actualCommitment, amount: params.amount, nonce: ephemeralNonce + 1n, deadline: requeueDeadline },
+      });
+      const requeueSig2 = await ephemeralWalletClient.signTypedData({
+        account: ephemeralAccount,
+        domain:  COMMIT_ORDER_DOMAIN,
+        types:   COMMIT_ORDER_TYPES,
+        primaryType: "CommitOrder",
+        message: { commitment: actualCommitment, amount: params.amount, nonce: ephemeralNonce + 2n, deadline: requeueDeadline },
+      });
+      const requeueAuths = [
+        { ephemeral: ephemeralAddress, nonce: (ephemeralNonce + 1n).toString(), deadline: requeueDeadline.toString(), signature: requeueSig1 },
+        { ephemeral: ephemeralAddress, nonce: (ephemeralNonce + 2n).toString(), deadline: requeueDeadline.toString(), signature: requeueSig2 },
+      ];
 
       const nonceBytes = new Uint8Array(32);
       crypto.getRandomValues(nonceBytes);
@@ -802,6 +837,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
           nonce:          ephemeralNonce.toString(),
           deadline:       deadline.toString(),
           transferAuth,
+          requeueAuths,
           // Cross-device history sync: relayer stores summary keyed by real wallet
           walletAddress:  walletAddress ?? null,
           marketQuestion: selectedMarket.question ?? null,
@@ -868,16 +904,19 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
 
     setSubmitStep("signing");
 
+    // Sell orders: sign CommitOrder without batchId (v6 contract removes it).
+    // No requeue sigs for sells — YES tokens are pre-deposited so requeue is not applicable.
     const signature = await walletClient.signTypedData({
       account: walletAddress!,
       domain: { name: "BatchVault", version: "1", chainId: BigInt(ACTIVE_CHAIN.id), verifyingContract: contracts.batchVault },
       types: { CommitOrder: [
-        { name: "commitment", type: "bytes32" }, { name: "amount",  type: "uint256" },
-        { name: "batchId",    type: "uint256" }, { name: "nonce",   type: "uint256" },
+        { name: "commitment", type: "bytes32" },
+        { name: "amount",     type: "uint256" },
+        { name: "nonce",      type: "uint256" },
         { name: "deadline",   type: "uint256" },
       ]},
       primaryType: "CommitOrder",
-      message: { commitment: params.commitment, amount: params.amount, batchId: batch.batchId, nonce, deadline },
+      message: { commitment: params.commitment, amount: params.amount, nonce, deadline },
     });
 
     const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;

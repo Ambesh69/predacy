@@ -359,13 +359,47 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
             const actualCommitment = computeCommitment({ marketId: id as `0x${string}`, isBuy: params.isBuy, amount: params.amount, limitPrice: params.limitPrice, salt: params.salt });
             const ephemeralNonce = await publicClient.readContract({ address: contracts.batchVault, abi: BATCH_VAULT_ABI, functionName: "nonces", args: [ephemeralAddress] }) as bigint;
 
+            // v6 contract: batchId removed from CommitOrder EIP-712 — sig valid for any batch.
+            const COMMIT_ORDER_TYPES = {
+              CommitOrder: [
+                { name: "commitment", type: "bytes32" },
+                { name: "amount",     type: "uint256" },
+                { name: "nonce",      type: "uint256" },
+                { name: "deadline",   type: "uint256" },
+              ],
+            } as const;
+            const COMMIT_ORDER_DOMAIN = {
+              name: "BatchVault", version: "1", chainId: BigInt(ACTIVE_CHAIN.id), verifyingContract: contracts.batchVault,
+            } as const;
+
             const signature = await ephemeralWalletClient.signTypedData({
               account: ephemeralAccount,
-              domain: { name: "BatchVault", version: "1", chainId: BigInt(ACTIVE_CHAIN.id), verifyingContract: contracts.batchVault },
-              types: { CommitOrder: [{ name: "commitment", type: "bytes32" }, { name: "amount", type: "uint256" }, { name: "batchId", type: "uint256" }, { name: "nonce", type: "uint256" }, { name: "deadline", type: "uint256" }] },
+              domain:  COMMIT_ORDER_DOMAIN,
+              types:   COMMIT_ORDER_TYPES,
               primaryType: "CommitOrder",
-              message: { commitment: actualCommitment, amount: params.amount, batchId, nonce: ephemeralNonce, deadline },
+              message: { commitment: actualCommitment, amount: params.amount, nonce: ephemeralNonce, deadline },
             });
+
+            // Pre-sign 2 requeue sigs silently — invisible to user, ~2ms, no MetaMask popup.
+            const requeueDeadline = BigInt(Math.floor(Date.now() / 1000) + 7 * 24 * 3600);
+            const requeueSig1 = await ephemeralWalletClient.signTypedData({
+              account: ephemeralAccount,
+              domain:  COMMIT_ORDER_DOMAIN,
+              types:   COMMIT_ORDER_TYPES,
+              primaryType: "CommitOrder",
+              message: { commitment: actualCommitment, amount: params.amount, nonce: ephemeralNonce + 1n, deadline: requeueDeadline },
+            });
+            const requeueSig2 = await ephemeralWalletClient.signTypedData({
+              account: ephemeralAccount,
+              domain:  COMMIT_ORDER_DOMAIN,
+              types:   COMMIT_ORDER_TYPES,
+              primaryType: "CommitOrder",
+              message: { commitment: actualCommitment, amount: params.amount, nonce: ephemeralNonce + 2n, deadline: requeueDeadline },
+            });
+            const requeueAuths = [
+              { ephemeral: ephemeralAddress, nonce: (ephemeralNonce + 1n).toString(), deadline: requeueDeadline.toString(), signature: requeueSig1 },
+              { ephemeral: ephemeralAddress, nonce: (ephemeralNonce + 2n).toString(), deadline: requeueDeadline.toString(), signature: requeueSig2 },
+            ];
 
             const nonceBytes = new Uint8Array(32);
             crypto.getRandomValues(nonceBytes);
@@ -392,7 +426,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
             const resp = await fetch(`${relayerUrl}/order`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ marketId: id, batchId: batchId.toString(), signer: ephemeralAddress, isBuy: true, isSell: false, amount: params.amount.toString(), limitPrice: params.limitPrice.toString(), salt: params.salt, commitment: actualCommitment, signature, nonce: ephemeralNonce.toString(), deadline: deadline.toString(), transferAuth }),
+              body: JSON.stringify({ marketId: id, batchId: batchId.toString(), signer: ephemeralAddress, isBuy: true, isSell: false, amount: params.amount.toString(), limitPrice: params.limitPrice.toString(), salt: params.salt, commitment: actualCommitment, signature, nonce: ephemeralNonce.toString(), deadline: deadline.toString(), transferAuth, requeueAuths }),
             });
 
             const relayerData = await resp.json().catch(() => ({}));
@@ -593,32 +627,49 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       setSubmitStep("signing");
 
       // 6. Sign CommitOrder EIP-712 from ephemeral key — no MetaMask popup!
+      //    v6 contract: batchId removed from CommitOrder type — sig valid for any batch,
+      //    enabling automatic requeue of excluded orders into the next batch.
+      const COMMIT_ORDER_TYPES = {
+        CommitOrder: [
+          { name: "commitment", type: "bytes32" },
+          { name: "amount",     type: "uint256" },
+          { name: "nonce",      type: "uint256" },
+          { name: "deadline",   type: "uint256" },
+        ],
+      } as const;
+      const COMMIT_ORDER_DOMAIN = {
+        name: "BatchVault", version: "1", chainId: BigInt(ACTIVE_CHAIN.id), verifyingContract: contracts.batchVault,
+      } as const;
+
       const signature = await ephemeralWalletClient.signTypedData({
-        account: ephemeralAccount,
-        domain: {
-          name:              "BatchVault",
-          version:           "1",
-          chainId:           BigInt(ACTIVE_CHAIN.id),
-          verifyingContract: contracts.batchVault,
-        },
-        types: {
-          CommitOrder: [
-            { name: "commitment", type: "bytes32" },
-            { name: "amount",     type: "uint256" },
-            { name: "batchId",    type: "uint256" },
-            { name: "nonce",      type: "uint256" },
-            { name: "deadline",   type: "uint256" },
-          ],
-        },
+        account:     ephemeralAccount,
+        domain:      COMMIT_ORDER_DOMAIN,
+        types:       COMMIT_ORDER_TYPES,
         primaryType: "CommitOrder",
-        message: {
-          commitment: actualCommitment,
-          amount:     params.amount,
-          batchId:    batch.batchId,
-          nonce:      ephemeralNonce,
-          deadline,
-        },
+        message: { commitment: actualCommitment, amount: params.amount, nonce: ephemeralNonce, deadline },
       });
+
+      // Pre-sign 2 requeue sigs (nonce+1, nonce+2) silently — invisible to user, ~2ms.
+      // If this order is excluded at clearing, the relayer auto-requeues it (up to 2 times).
+      const requeueDeadline = BigInt(Math.floor(Date.now() / 1000) + 7 * 24 * 3600);
+      const requeueSig1 = await ephemeralWalletClient.signTypedData({
+        account:     ephemeralAccount,
+        domain:      COMMIT_ORDER_DOMAIN,
+        types:       COMMIT_ORDER_TYPES,
+        primaryType: "CommitOrder",
+        message: { commitment: actualCommitment, amount: params.amount, nonce: ephemeralNonce + 1n, deadline: requeueDeadline },
+      });
+      const requeueSig2 = await ephemeralWalletClient.signTypedData({
+        account:     ephemeralAccount,
+        domain:      COMMIT_ORDER_DOMAIN,
+        types:       COMMIT_ORDER_TYPES,
+        primaryType: "CommitOrder",
+        message: { commitment: actualCommitment, amount: params.amount, nonce: ephemeralNonce + 2n, deadline: requeueDeadline },
+      });
+      const requeueAuths = [
+        { ephemeral: ephemeralAddress, nonce: (ephemeralNonce + 1n).toString(), deadline: requeueDeadline.toString(), signature: requeueSig1 },
+        { ephemeral: ephemeralAddress, nonce: (ephemeralNonce + 2n).toString(), deadline: requeueDeadline.toString(), signature: requeueSig2 },
+      ];
 
       // 7. Sign EIP-3009 TransferWithAuthorization from ephemeral key — no MetaMask popup!
       //    from = ephemeralAddress: USDC moves ephemeral → vault at settlement (NOT realWallet!)
@@ -692,6 +743,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
           nonce:        ephemeralNonce.toString(),
           deadline:     deadline.toString(),
           transferAuth,
+          requeueAuths,
         }),
       });
 
@@ -781,7 +833,9 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
 
     setSubmitStep("signing");
 
-    // Step 3 — sign CommitOrder EIP-712 from real wallet (MetaMask popup)
+    // Step 3 — sign CommitOrder EIP-712 from real wallet (MetaMask popup).
+    // v6 contract: batchId removed from type — no requeue sigs for sells
+    // (YES tokens are pre-deposited; requeue is buy-order-only).
     const signature = await walletClient.signTypedData({
       account: walletAddress!,
       domain: {
@@ -794,7 +848,6 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         CommitOrder: [
           { name: "commitment", type: "bytes32" },
           { name: "amount",     type: "uint256" },
-          { name: "batchId",    type: "uint256" },
           { name: "nonce",      type: "uint256" },
           { name: "deadline",   type: "uint256" },
         ],
@@ -803,7 +856,6 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       message: {
         commitment: params.commitment,
         amount:     params.amount,
-        batchId:    batch.batchId,
         nonce,
         deadline,
       },

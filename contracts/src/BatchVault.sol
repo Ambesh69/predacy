@@ -133,8 +133,15 @@ contract BatchVault {
     );
     /// @notice Traders sign this struct to delegate commitment submission to the relayer.
     ///         Used for BOTH buy orders (commitOrderFor) and sell orders (commitSellOrderFor).
+    ///
+    /// @dev  v6 change: batchId removed from the signed message.
+    ///       Previously the sig was batch-specific, which prevented the relayer from
+    ///       resubmitting excluded orders to the next batch without a fresh user signature.
+    ///       Now the sig is valid for whichever batch is currently open for the given marketId,
+    ///       so the frontend can pre-sign 2 requeue sigs (nonce+1, nonce+2) at submission time
+    ///       and the relayer auto-requeues excluded buy orders — zero extra UX friction.
     bytes32 public constant COMMITMENT_TYPEHASH = keccak256(
-        "CommitOrder(bytes32 commitment,uint256 amount,uint256 batchId,uint256 nonce,uint256 deadline)"
+        "CommitOrder(bytes32 commitment,uint256 amount,uint256 nonce,uint256 deadline)"
     );
 
     address public immutable usdc;
@@ -328,12 +335,10 @@ contract BatchVault {
         if (block.timestamp > deadline) revert SignatureExpired();
         if (nonce != nonces[signer]) revert InvalidSignature();
 
-        uint256 batchId = currentBatchIdByMarket[marketId];
         bytes32 structHash = keccak256(abi.encode(
             COMMITMENT_TYPEHASH,
             commitment,
             amount,
-            batchId,
             nonce,
             deadline
         ));
@@ -388,12 +393,10 @@ contract BatchVault {
         if (block.timestamp > deadline) revert SignatureExpired();
         if (nonce != nonces[signer]) revert InvalidSignature();
 
-        uint256 batchId = currentBatchIdByMarket[marketId];
         bytes32 structHash = keccak256(abi.encode(
             COMMITMENT_TYPEHASH,
             commitment,
             yesAmount,
-            batchId,
             nonce,
             deadline
         ));

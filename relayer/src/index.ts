@@ -266,9 +266,26 @@ const server = createServer((req, res) => {
             } else {
               console.warn(`[Relayer] Buy order from ${signer} has no transferAuth — settlement will fail if this order fills`);
             }
+
+            // Parse pre-signed requeue authorizations (optional, buy orders only).
+            // Frontend pre-signs 2 CommitOrder sigs with nonce+1 and nonce+2 at submission time.
+            // If this order is excluded at clearing, the relayer uses these to auto-requeue
+            // the order into the next batch — zero extra UX friction for the user.
+            let requeueAuths = undefined;
+            if (Array.isArray(data.requeueAuths) && data.requeueAuths.length > 0) {
+              requeueAuths = data.requeueAuths.map((ra: any) => ({
+                ephemeral: ra.ephemeral as `0x${string}`,
+                nonce:     BigInt(ra.nonce),
+                deadline:  BigInt(ra.deadline),
+                signature: ra.signature as `0x${string}`,
+              }));
+              console.log(`[Relayer] Stored ${requeueAuths.length} requeue auth(s) for order from ${signer}`);
+            }
+
+            const orderWithRequeue = requeueAuths ? { ...order, requeueAuths } : order;
             await processor.submitCommitmentFor(
               BigInt(batchId),
-              order,
+              orderWithRequeue,
               commitment        as `0x${string}`,
               signer            as `0x${string}`,
               BigInt(nonce),
@@ -788,7 +805,16 @@ async function sealBatch(state: MarketState, marketId: `0x${string}`, marketKey:
     state.settlingBatchId = closingId;
     console.log(`[Relayer] Settling batch ${closingId} (market ${marketKey}) in background`);
     state.processor.processBatch(closingId)
-      .then(() => { state.settleFailures.delete(closingId.toString()); })
+      .then(async ({ excludedOrders }) => {
+        state.settleFailures.delete(closingId.toString());
+        // Auto-requeue excluded buy orders into the newly-opened batch.
+        // Each excluded order carries pre-signed CommitOrder sigs (nonce+1, nonce+2)
+        // signed by the ephemeral wallet at submission time — no user interaction needed.
+        if (excludedOrders.length > 0) {
+          console.log(`[Relayer] Auto-requeueing ${excludedOrders.length} excluded order(s) for market ${marketKey}`);
+          await state.processor.requeueExcludedOrders(excludedOrders);
+        }
+      })
       .catch((err) => onSettleFail(state, marketKey, closingId, err))
       .finally(() => { state.processingBatch = false; state.settlingBatchId = null; });
   }
@@ -848,7 +874,13 @@ const poll = async () => {
           state.settlingBatchId = settlingId;
           console.log(`[Relayer] Batch ${settlingId} (market ${marketKey}) is SETTLING — processing`);
           state.processor.processBatch(settlingId)
-            .then(() => { state.settleFailures.delete(settlingId.toString()); })
+            .then(async ({ excludedOrders }) => {
+              state.settleFailures.delete(settlingId.toString());
+              if (excludedOrders.length > 0) {
+                console.log(`[Relayer] Auto-requeueing ${excludedOrders.length} excluded order(s) for market ${marketKey}`);
+                await state.processor.requeueExcludedOrders(excludedOrders);
+              }
+            })
             .catch((err) => onSettleFail(state, marketKey, settlingId, err))
             .finally(() => { state.processingBatch = false; state.settlingBatchId = null; });
         } else if (batchInfo.status === SETTLED && !state.openingBatch) {

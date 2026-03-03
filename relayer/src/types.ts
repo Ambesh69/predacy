@@ -11,6 +11,20 @@ export interface TransferAuth {
   s:           `0x${string}`; // ECDSA component
 }
 
+/// @notice Pre-signed CommitOrder requeue authorization.
+///         Frontend pre-signs 2 extra CommitOrder EIP-712 sigs (nonce+1, nonce+2)
+///         at order submission time using the ephemeral wallet.
+///         If the order is excluded at clearing, the relayer uses these to resubmit
+///         automatically to the next batch — zero extra UX friction for the user.
+///         (batchId is no longer part of the CommitOrder EIP-712 type in v6 contract,
+///          so each sig is valid for whatever batch is currently open.)
+export interface RequeueAuth {
+  ephemeral: `0x${string}`; // ephemeral wallet address (signer)
+  nonce:     bigint;        // on-chain nonce[ephemeral] at signing time
+  deadline:  bigint;        // signature expiry unix timestamp
+  signature: `0x${string}`; // EIP-712 CommitOrder sig (no batchId field)
+}
+
 export interface Order {
   trader:       `0x${string}`;
   isBuy:        boolean;
@@ -18,6 +32,7 @@ export interface Order {
   limitPrice:   bigint;        // 6-decimal fixed point (e.g. 650000n = $0.65)
   salt:         `0x${string}`;
   transferAuth?: TransferAuth; // EIP-3009 auth for buy orders — collected at settlement
+  requeueAuths?: RequeueAuth[]; // pre-signed sigs for auto-requeue (buy orders only)
 }
 
 export interface Commitment {
