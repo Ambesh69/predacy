@@ -213,6 +213,14 @@ export const BATCH_VAULT_ABI = [
     outputs: [{ name: "", type: "uint256" }],
     stateMutability: "view",
   },
+  // Custom errors (needed for viem to decode revert reasons)
+  { name: "AlreadyClaimed",      type: "error", inputs: [] },
+  { name: "BatchNotSettled",     type: "error", inputs: [] },
+  { name: "BatchNotOpen",        type: "error", inputs: [] },
+  { name: "CommitmentMismatch",  type: "error", inputs: [] },
+  { name: "ZKProofInvalid",      type: "error", inputs: [] },
+  { name: "NothingToClaim",      type: "error", inputs: [] },
+  { name: "ClaimVerifierNotSet", type: "error", inputs: [] },
   // Events
   {
     name: "OrderCommitted",
