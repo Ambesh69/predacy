@@ -623,7 +623,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   // ── Claim position via ZK proof (relayer submits on-chain — no wallet tx needed) ──
   // The relayer generates a ZK proof of order membership and calls claimWithProof.
   // No wallet signing required — the salt in localStorage is the secret credential.
-  const handleClaimPosition = async (batchId: bigint) => {
+  const handleClaimPosition = async (batchId: bigint, recipient: `0x${string}`) => {
     setClaimLoading(true);
     setChainError(null);
     try {
@@ -653,7 +653,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
           amount:     myOrder.amount,
           limitPrice: myOrder.limitPrice,
           salt:       myOrder.salt,
-          recipient:  walletAddress,   // payout goes to connected wallet
+          recipient,   // chosen by user — visible on-chain, use fresh address for privacy
         }),
       });
 

@@ -288,12 +288,17 @@ function PositionRow({
   onClaim,
   isClaiming,
   claimError,
+  walletAddress,
 }: {
-  order:      OrderEntry;
-  onClaim:    (order: OrderEntry) => Promise<void>;
-  isClaiming: boolean;
-  claimError?: string;
+  order:         OrderEntry;
+  onClaim:       (order: OrderEntry, recipient: `0x${string}`) => Promise<void>;
+  isClaiming:    boolean;
+  claimError?:   string;
+  walletAddress?: `0x${string}`;
 }) {
+  const [confirming, setConfirming] = useState(false);
+  const [recipient,  setRecipient]  = useState("");
+
   const isPending  = order.batchStatus === BatchStatus.OPEN || order.batchStatus === BatchStatus.SETTLING;
   const isSettled  = order.batchStatus === BatchStatus.SETTLED;
   const canClaim   = isSettled && !order.claimed && (order.filledAmount ?? 0n) > 0n;
@@ -408,22 +413,65 @@ function PositionRow({
         </div>
       </div>
 
-      {/* Claim button */}
+      {/* Claim button / confirm step */}
       {canClaim && (
-        <div className="space-y-1">
-          <button
-            onClick={() => onClaim(order)}
-            disabled={isClaiming}
-            className="w-full py-1.5 border border-accent text-accent text-[10px] tracking-widest uppercase hover:bg-accent/5 transition-colors disabled:opacity-40"
-          >
-            {isClaiming ? (
+        <div className="space-y-1.5">
+          {isClaiming ? (
+            <button
+              disabled
+              className="w-full py-1.5 border border-accent/40 text-accent/60 text-[10px] tracking-widest uppercase opacity-60"
+            >
               <span className="flex items-center justify-center gap-1.5">
                 <span className="w-2.5 h-2.5 border border-current border-t-transparent rounded-full animate-spin" />
                 CLAIMING… (~20s)
               </span>
-            ) : "CLAIM POSITION"}
-          </button>
-          {claimError && !isClaiming && (
+            </button>
+          ) : confirming ? (
+            <div className="border border-accent/20 p-3 space-y-2">
+              <p className="text-[9px] text-muted tracking-widest uppercase">
+                Recipient address
+                <span className="ml-1 text-muted-dim normal-case">(visible on-chain — use fresh address for full privacy)</span>
+              </p>
+              <input
+                type="text"
+                value={recipient}
+                onChange={(e) => setRecipient(e.target.value)}
+                placeholder="0x…"
+                className="w-full bg-surface border border-border px-2 py-1.5 text-[10px] font-mono text-text placeholder-muted-dim focus:outline-none focus:border-accent/40"
+              />
+              <div className="flex gap-2">
+                <button
+                  onClick={() => {
+                    const addr = recipient.trim() as `0x${string}`;
+                    if (!/^0x[0-9a-fA-F]{40}$/.test(addr)) return;
+                    setConfirming(false);
+                    void onClaim(order, addr);
+                  }}
+                  disabled={!/^0x[0-9a-fA-F]{40}$/.test(recipient.trim())}
+                  className="flex-1 py-1.5 border border-accent text-accent text-[10px] tracking-widest uppercase hover:bg-accent/5 transition-colors disabled:opacity-30"
+                >
+                  CONFIRM
+                </button>
+                <button
+                  onClick={() => setConfirming(false)}
+                  className="px-4 py-1.5 border border-border text-muted text-[10px] tracking-widest uppercase hover:text-text transition-colors"
+                >
+                  CANCEL
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => {
+                setRecipient(walletAddress ?? "");
+                setConfirming(true);
+              }}
+              className="w-full py-1.5 border border-accent text-accent text-[10px] tracking-widest uppercase hover:bg-accent/5 transition-colors"
+            >
+              CLAIM POSITION
+            </button>
+          )}
+          {claimError && !isClaiming && !confirming && (
             <p className="text-danger text-[10px] text-center">{claimError}</p>
           )}
         </div>
@@ -715,7 +763,7 @@ export default function ProfileClient() {
 
   // ── Claim handler ─────────────────────────────────────────────────────────
 
-  const handleClaim = async (order: OrderEntry) => {
+  const handleClaim = async (order: OrderEntry, recipient: `0x${string}`) => {
     if (!walletAddress) return;
     const key = order.commitment.toLowerCase();
     setClaimingKey(key);
@@ -742,7 +790,7 @@ export default function ProfileClient() {
           amount:     myOrder.amount,
           limitPrice: myOrder.limitPrice,
           salt:       myOrder.salt,
-          recipient:  walletAddress,
+          recipient,
         }),
       });
 
@@ -1102,6 +1150,7 @@ export default function ProfileClient() {
                         onClaim={handleClaim}
                         isClaiming={claimingKey === o.commitment.toLowerCase()}
                         claimError={claimErrors[o.commitment.toLowerCase()]}
+                        walletAddress={walletAddress}
                       />
                     ))}
                   </div>
@@ -1127,6 +1176,7 @@ export default function ProfileClient() {
                         order={o}
                         onClaim={handleClaim}
                         isClaiming={false}
+                        walletAddress={walletAddress}
                       />
                     ))}
                   </div>

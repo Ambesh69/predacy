@@ -34,7 +34,7 @@ interface PositionsPanelProps {
   currentBatchId:          bigint;
   currentBatchStatus:      BatchStatus;
   currentBatchCommitments: Array<{ hash: `0x${string}`; amount?: bigint }>;
-  onClaim:                 (batchId: bigint) => Promise<void>;
+  onClaim:                 (batchId: bigint, recipient: `0x${string}`) => Promise<void>;
   onMarketIdsFound?:       (ids: `0x${string}`[]) => void;
 }
 
@@ -88,7 +88,8 @@ interface PositionRowProps {
   clearingPrice:  bigint;
   marketQuestion?: string;
   shares?:        number;
-  onClaim:        (batchId: bigint) => Promise<void>;
+  walletAddress:  `0x${string}`;
+  onClaim:        (batchId: bigint, recipient: `0x${string}`) => Promise<void>;
   isClaiming:     boolean;
   claimError?:    string;
   isActive:       boolean;  // true = unclaimed settled; false = closed
@@ -96,8 +97,11 @@ interface PositionRowProps {
 
 function PositionRow({
   batchId, position, clearingPrice, marketQuestion, shares,
-  onClaim, isClaiming, claimError, isActive,
+  walletAddress, onClaim, isClaiming, claimError, isActive,
 }: PositionRowProps) {
+  const [confirming,  setConfirming]  = useState(false);
+  const [recipient,   setRecipient]   = useState<string>("");
+
   const avgCents    = clearingPrice > 0n ? (Number(clearingPrice) / 1e4).toFixed(1) : "—";
   const filledUsdc  = Number(position.filledAmount) / 1e6;
   const sharesDisp  = shares != null ? shares.toFixed(1) : "—";
@@ -135,23 +139,57 @@ function PositionRow({
 
       {/* Claimed / Claim button */}
       {isActive ? (
-        <div className="space-y-1">
-          <button
-            onClick={() => onClaim(batchId)}
-            disabled={isClaiming}
-            className="w-full py-1.5 border border-accent text-accent text-[10px] tracking-widest uppercase hover:bg-accent/5 transition-colors disabled:opacity-40"
-          >
-            {isClaiming ? (
+        <div className="space-y-1.5">
+          {!confirming && !isClaiming ? (
+            <button
+              onClick={() => { setRecipient(walletAddress); setConfirming(true); }}
+              className="w-full py-1.5 border border-accent text-accent text-[10px] tracking-widest uppercase hover:bg-accent/5 transition-colors"
+            >
+              CLAIM POSITION
+            </button>
+          ) : confirming ? (
+            <div className="space-y-1.5 border border-border/60 p-2">
+              <p className="text-[9px] text-muted-dim leading-snug">
+                Payout recipient — <span className="text-yellow-400/80">visible on-chain</span>. Use a fresh address for full privacy.
+              </p>
+              <input
+                type="text"
+                value={recipient}
+                onChange={(e) => setRecipient(e.target.value)}
+                placeholder="0x..."
+                className="w-full bg-bg border border-border text-[10px] text-text font-mono px-2 py-1 outline-none focus:border-accent/40"
+              />
+              <div className="flex gap-1.5">
+                <button
+                  onClick={() => {
+                    if (/^0x[0-9a-fA-F]{40}$/.test(recipient)) {
+                      setConfirming(false);
+                      onClaim(batchId, recipient as `0x${string}`);
+                    }
+                  }}
+                  disabled={!/^0x[0-9a-fA-F]{40}$/.test(recipient)}
+                  className="flex-1 py-1 border border-accent text-accent text-[9px] tracking-widest uppercase hover:bg-accent/5 transition-colors disabled:opacity-40"
+                >
+                  CONFIRM
+                </button>
+                <button
+                  onClick={() => setConfirming(false)}
+                  className="px-3 py-1 border border-border text-muted text-[9px] tracking-widest uppercase hover:bg-surface/40 transition-colors"
+                >
+                  CANCEL
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button disabled className="w-full py-1.5 border border-accent text-accent text-[10px] tracking-widest uppercase opacity-40">
               <span className="flex items-center justify-center gap-1.5">
                 <span className="w-2.5 h-2.5 border border-current border-t-transparent rounded-full animate-spin" />
                 CLAIMING…
               </span>
-            ) : "CLAIM POSITION"}
-          </button>
+            </button>
+          )}
           {isClaiming && (
-            <p className="text-[9px] text-muted-dim text-center">
-              Generating ZK proof + awaiting tx (~20s)
-            </p>
+            <p className="text-[9px] text-muted-dim text-center">Generating ZK proof + awaiting tx (~20s)</p>
           )}
           {claimError && !isClaiming && (
             <p className="text-danger text-[10px]">{claimError}</p>
@@ -397,12 +435,12 @@ export default function PositionsPanel({
     scanHistory();
   }, [scanHistory]);
 
-  const handleClaim = async (batchId: bigint) => {
+  const handleClaim = async (batchId: bigint, recipient: `0x${string}`) => {
     setClaimingBatchId(batchId);
     const key = batchId.toString();
     setClaimErrors((prev) => { const n = { ...prev }; delete n[key]; return n; });
     try {
-      await onClaim(batchId);
+      await onClaim(batchId, recipient);
       if (batchId === currentBatchId) {
         setCurrentPosition((p) => p ? { ...p, claimed: true } : p);
       } else {
@@ -537,6 +575,7 @@ export default function PositionsPanel({
                   batchId={currentBatchId}
                   position={currentPosition}
                   clearingPrice={0n}
+                  walletAddress={walletAddress}
                   onClaim={handleClaim}
                   isClaiming={claimingBatchId === currentBatchId}
                   claimError={claimErrors[currentBatchId.toString()]}
@@ -564,6 +603,7 @@ export default function PositionsPanel({
                     clearingPrice={hp.clearingPrice}
                     marketQuestion={hp.marketQuestion}
                     shares={hp.shares}
+                    walletAddress={walletAddress}
                     onClaim={handleClaim}
                     isClaiming={claimingBatchId === hp.batchId}
                     claimError={claimErrors[hp.batchId.toString()]}
@@ -592,6 +632,7 @@ export default function PositionsPanel({
                     clearingPrice={hp.clearingPrice}
                     marketQuestion={hp.marketQuestion}
                     shares={hp.shares}
+                    walletAddress={walletAddress}
                     onClaim={handleClaim}
                     isClaiming={false}
                     isActive={false}
