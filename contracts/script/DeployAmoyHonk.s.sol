@@ -5,34 +5,42 @@ import "forge-std/Script.sol";
 import "../src/mocks/MockUSDC.sol";
 import "../src/mocks/MockCTF.sol";
 import "../src/BatchVerifier.sol";
+import "../src/PublicInputAdapter.sol";
 import "../src/BatchVault.sol";
+// Note: ClaimVerifier.sol not imported — naming conflict with BatchVerifier.sol.
+// Deployed via vm.deployCode() instead.
 
-/// @notice Deploy Predacy to Polygon Amoy with the REAL HonkVerifier.
+/// @notice Fresh deploy to Polygon Amoy with real ZK verifiers (end-to-end test).
 ///
-/// Use this to validate that USE_REAL_ZK=true proof generation works end-to-end
-/// before deploying to mainnet. Uses mock USDC + CTF (Amoy has no real Polymarket).
+/// Use this to validate the full ZK pipeline before deploying to mainnet.
+/// Uses mock USDC + CTF (Amoy has no real Polymarket).
 ///
-/// Note: Deploys 4 library/verifier contracts (all < 24 KB after split):
-///   ZKTranscriptLib, RelationsLib, CommitmentSchemeLib, HonkVerifier
-///   Forge auto-links them during broadcast — no manual library management needed.
+/// Deploys:
+///   ZKTranscriptLib, RelationsLib, CommitmentSchemeLib (auto-linked by Forge)
+///   HonkVerifier (batch), PublicInputAdapter, ClaimHonkVerifier, BatchVault
+///
+/// Why PublicInputAdapter:
+///   BatchVault.settleBatch() builds 6 public inputs; HonkVerifier.verify() expects 37.
+///   The adapter expands commitmentRoot to 32 byte fields and appends orderCount.
+///   Relayer supplies orderCount via adapter.setPendingOrderCount(n) before settleBatch().
 ///
 /// Prerequisites:
-///   - Deployer wallet needs ~0.1 MATIC on Polygon Amoy
-///     Faucet: https://faucet.polygon.technology/
+///   - ~0.15 MATIC on Polygon Amoy (faucet: https://faucet.polygon.technology/)
 ///   - PRIVATE_KEY set in contracts/.env
 ///
 /// Usage:
 ///   cd contracts
-///   forge script script/DeployAmoyHonk.s.sol \
+///   FOUNDRY_PROFILE=size forge script script/DeployAmoyHonk.s.sol \
 ///     --rpc-url $POLYGON_AMOY_RPC \
 ///     --broadcast \
 ///     --private-key $PRIVATE_KEY
 ///
 /// After deployment:
-///   1. Update relayer .env: VAULT_ADDRESS, CHAIN_ID=80002, USE_REAL_ZK=true
-///   2. Run relayer locally and submit a test order
-///   3. Confirm settleBatch() succeeds (HonkVerifier.verify() returns true)
-///   4. If it passes → deploy DeployMainnet.s.sol to Polygon mainnet
+///   1. Update relayer .env with printed VAULT_ADDRESS, ADAPTER_ADDRESS
+///   2. Set USE_REAL_ZK=true, CHAIN_ID=80002
+///   3. Run relayer locally and submit a test order
+///   4. Confirm settleBatch() succeeds (HonkVerifier.verify() returns true)
+///   5. If it passes → deploy DeployMainnet.s.sol to Polygon mainnet
 contract DeployAmoyHonk is Script {
     function run() external {
         uint256 deployerKey = vm.envUint("PRIVATE_KEY");
@@ -42,30 +50,37 @@ contract DeployAmoyHonk is Script {
 
         // 1. Mock USDC — 6 decimals, public mint() for testing
         MockUSDC usdc = new MockUSDC();
-        console.log("MockUSDC:           ", address(usdc));
+        console.log("MockUSDC:                 ", address(usdc));
 
         // 2. Mock CTF — minimal Gnosis Conditional Token Framework
         MockCTF ctf = new MockCTF();
-        console.log("MockCTF:            ", address(ctf));
+        console.log("MockCTF:                  ", address(ctf));
 
-        // 3. Real HonkVerifier (+ auto-deployed ZKTranscriptLib, RelationsLib, CommitmentSchemeLib)
-        //    Generated from circuits/batch_clearing/src/main.nr. Forge broadcasts all 4 contracts.
-        //    This is the critical test: settleBatch() must pass verify() with a real proof.
-        HonkVerifier verifier = new HonkVerifier();
-        console.log("HonkVerifier:       ", address(verifier));
+        // 3. Batch clearing ZK verifier
+        //    Forge auto-links ZKTranscriptLib, RelationsLib, CommitmentSchemeLib.
+        HonkVerifier batchVerifier = new HonkVerifier();
+        console.log("HonkVerifier (batch):     ", address(batchVerifier));
 
-        // 4. BatchVault — deployer is the relayer for this test deploy
+        // 4. PublicInputAdapter — expands 6 inputs from settleBatch() to 37 for HonkVerifier.
+        PublicInputAdapter adapter = new PublicInputAdapter(address(batchVerifier), deployer);
+        console.log("PublicInputAdapter:       ", address(adapter));
+
+        // 5. Claim ZK verifier — vault passes 11 inputs directly, no adapter needed.
+        //    Deployed via vm.deployCode() to avoid naming conflicts with BatchVerifier.sol.
+        address claimVerifier = deployCode("ClaimVerifier.sol:ClaimHonkVerifier");
+        console.log("ClaimHonkVerifier (claim):", claimVerifier);
+
+        // 6. BatchVault — deployer is relayer for this test deploy
         BatchVault vault = new BatchVault(
             address(usdc),
             address(ctf),
-            deployer,        // relayer = deployer wallet for testing
-            address(verifier),
-            address(verifier) // claimVerifier — same mock for now, update after claim circuit deploy
+            deployer,             // relayer = deployer wallet for testing
+            address(adapter),     // batch verifier: PublicInputAdapter wrapping HonkVerifier
+            claimVerifier
         );
-        console.log("BatchVault:         ", address(vault));
+        console.log("BatchVault:               ", address(vault));
 
-        // 5. Open first batch with marketId = bytes32(0) (generic test market)
-        //    Pass matching marketId to relayer: MARKET_ID=0x000...0
+        // 7. Open first batch with marketId = bytes32(0) (generic test market)
         vault.openBatch(bytes32(0));
         console.log("Batch #1 opened with marketId = bytes32(0)");
 
@@ -73,6 +88,8 @@ contract DeployAmoyHonk is Script {
 
         console.log("\n=== Update relayer .env with these values ===");
         console.log("VAULT_ADDRESS=", address(vault));
+        console.log("ADAPTER_ADDRESS=", address(adapter));
+        console.log("CLAIM_VERIFIER=", claimVerifier);
         console.log("CHAIN_ID=80002");
         console.log("RPC_URL=https://rpc-amoy.polygon.technology/");
         console.log("MARKET_ID=0x0000000000000000000000000000000000000000000000000000000000000000");
