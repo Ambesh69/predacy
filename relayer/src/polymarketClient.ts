@@ -8,7 +8,7 @@ const GAMMA_API = "https://gamma-api.polymarket.com";
 // Gamma API returns some fields as JSON-encoded strings — parse them.
 function normalizeMarket(m: any): PolymarketMarket {
   const parse = (v: any) => (typeof v === "string" ? JSON.parse(v) : v);
-  return { ...m, tokens: parse(m.tokens) ?? [], outcomes: parse(m.outcomes) ?? [], outcomePrices: parse(m.outcomePrices) ?? [] };
+  return { ...m, tokens: parse(m.tokens) ?? [], outcomes: parse(m.outcomes) ?? [], outcomePrices: parse(m.outcomePrices) ?? [], clobTokenIds: parse(m.clobTokenIds) ?? [] };
 }
 
 /**

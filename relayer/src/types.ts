@@ -72,4 +72,5 @@ export interface PolymarketMarket {
   closed: boolean;
   endDate: string;
   tokens: Array<{ token_id: string; outcome: string }>;
+  clobTokenIds?: string[];
 }

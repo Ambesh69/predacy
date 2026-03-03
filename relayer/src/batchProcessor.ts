@@ -517,7 +517,10 @@ export class BatchProcessor {
     if (this.config.polymarket.apiKey) {
       try {
         const market = await this.polymarket.getMarket(batchInfo.marketId.slice(2));
-        cachedYesToken = market.tokens.find((t) => t.outcome === "Yes")?.token_id;
+        cachedYesToken =
+          market.tokens.find((t) => t.outcome?.toLowerCase() === "yes")?.token_id ??
+          market.clobTokenIds?.[0];
+        console.log(`[BatchProcessor] tokens=${JSON.stringify(market.tokens)}, clobTokenIds=${JSON.stringify(market.clobTokenIds)}, yesToken=${cachedYesToken}`);
         if (!cachedYesToken) throw new Error("YES token not found for market");
 
         if (effectiveClearingPrice === 0n) {
