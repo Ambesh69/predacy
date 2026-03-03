@@ -33,8 +33,6 @@ import { createRequire } from "module";
 import {
   encodeAbiParameters,
   keccak256,
-  getAddress,
-  type Address,
 } from "viem";
 import { fileURLToPath } from "url";
 import path from "path";
@@ -44,7 +42,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
 /** Must match MAX_ORDERS in circuits/batch_clearing/src/main.nr */
-const CIRCUIT_MAX_ORDERS = 64;
+const CIRCUIT_MAX_ORDERS = 8;
 
 /** Convert a hex string to a number[] of byte values (for circuit inputs). */
 function hexToByteArray(hex: string, expectedLen: number): number[] {
@@ -59,7 +57,8 @@ function hexToByteArray(hex: string, expectedLen: number): number[] {
 
 /**
  * Compute an order commitment matching BatchVault._makeCommitment() in Solidity:
- *   keccak256(abi.encode(marketId, isBuy, amount, limitPrice, salt, trader))
+ *   keccak256(abi.encode(marketId, isBuy, amount, limitPrice, salt))
+ * No trader address — matches the privacy-preserving commitment scheme.
  */
 function computeCommitment(
   marketId: `0x${string}`,
@@ -67,7 +66,6 @@ function computeCommitment(
   amount: bigint,
   limitPrice: bigint,
   salt: `0x${string}`,
-  trader: Address,
 ): `0x${string}` {
   const encoded = encodeAbiParameters(
     [
@@ -76,9 +74,8 @@ function computeCommitment(
       { type: "uint256" }, // amount
       { type: "uint256" }, // limitPrice
       { type: "bytes32" }, // salt
-      { type: "address" }, // trader
     ],
-    [marketId, isBuy, amount, limitPrice, salt, trader],
+    [marketId, isBuy, amount, limitPrice, salt],
   );
   return keccak256(encoded);
 }
@@ -130,16 +127,15 @@ async function main(): Promise<void> {
   //   1 buy order: 1 USDC at 65c clearing price.
   //   buy fills (limit_price 650000 >= clearing_price 650000), no sell side.
   const marketId      = ("0x" + "00".repeat(32)) as `0x${string}`;
-  // getAddress() applies EIP-55 checksum (required by viem's type checker)
-  const trader        = getAddress("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
   const salt          = ("0x" + "01".repeat(32)) as `0x${string}`;
   const amount        = BigInt(1_000_000);  // 1.000000 USDC (6 decimals)
   const limitPrice    = BigInt(650_000);    // 0.650000 (65c)
   const clearingPrice = BigInt(650_000);    // buy fills: limit_price >= clearing_price
 
   // Commitment for the one real order (matches compute_commitment() in Noir circuit)
+  // No trader address — privacy-preserving commitment scheme.
   const commitment = computeCommitment(
-    marketId, true, amount, limitPrice, salt, trader,
+    marketId, true, amount, limitPrice, salt,
   );
 
   // Commitment root with 1 real order
@@ -147,14 +143,13 @@ async function main(): Promise<void> {
 
   process.stderr.write(
     `[generateTestProof] Test order:\n` +
-    `  trader=${trader}, amount=${amount}, limit_price=${limitPrice}\n` +
+    `  amount=${amount}, limit_price=${limitPrice}\n` +
     `  commitment=${commitment}\n` +
     `  commitment_root=${commitmentRoot}\n`,
   );
 
-  // Build circuit order arrays (1 real + 63 padding)
+  // Build circuit order arrays (1 real + 7 padding, MAX_ORDERS=8)
   const realOrder = {
-    trader:      hexToByteArray(trader, 20),
     is_buy:      true,
     amount:      amount.toString(),
     limit_price: limitPrice.toString(),
@@ -162,7 +157,6 @@ async function main(): Promise<void> {
     is_padding:  false,
   };
   const paddingOrder = {
-    trader:      Array(20).fill(0) as number[],
     is_buy:      false,
     amount:      "0",
     limit_price: "0",
@@ -170,7 +164,7 @@ async function main(): Promise<void> {
     is_padding:  true,
   };
 
-  const orders = [realOrder, ...Array(CIRCUIT_MAX_ORDERS - 1).fill(paddingOrder)];
+  const orders = [realOrder, ...Array(CIRCUIT_MAX_ORDERS - 1).fill(paddingOrder)] as typeof realOrder[];
 
   // Commitment slots: first slot has the real commitment, rest are zero
   const commitmentSlots = [
