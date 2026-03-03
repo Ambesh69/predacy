@@ -79,6 +79,30 @@ function timeAgo(ts: number) {
   if (hrs < 24)  return `${hrs}h ago`;
   return `${Math.floor(hrs / 24)}d ago`;
 }
+// Retry an async RPC call up to `attempts` times with linear back-off.
+async function withRetry<T>(fn: () => Promise<T>, attempts = 3, baseMs = 900): Promise<T> {
+  for (let i = 0; i < attempts; i++) {
+    try { return await fn(); } catch (e) {
+      if (i === attempts - 1) throw e;
+      await new Promise((r) => setTimeout(r, baseMs * (i + 1)));
+    }
+  }
+  throw new Error("unreachable");
+}
+
+// Convert raw viem / network error messages into short, readable sentences.
+function cleanRpcError(raw: string): string {
+  if (/timed out|timeout/i.test(raw))
+    return "RPC request timed out — the testnet node is slow. Click ↻ Retry.";
+  if (/rate.?limit|429/i.test(raw))
+    return "RPC rate-limited — wait a few seconds, then retry.";
+  if (/network|fetch failed|ECONNREFUSED/i.test(raw))
+    return "Network error — check your connection and retry.";
+  if (/user rejected|denied/i.test(raw))
+    return "Signature rejected.";
+  return "Failed to load profile — click ↻ Retry.";
+}
+
 function cleanClaimError(raw: string): string {
   if (raw.includes("AlreadyClaimed"))     return "Already claimed.";
   if (raw.includes("NothingToClaim"))     return "Nothing to claim for this order.";
@@ -712,14 +736,16 @@ export default function ProfileClient() {
     try {
       const contracts = getContracts(ACTIVE_CHAIN.id);
 
-      // 1. USDC balance
-      const balance = await publicClient.readContract({
-        address: contracts.usdc,
-        abi: ERC20_ABI,
-        functionName: "balanceOf",
-        args: [walletAddress],
-      }) as bigint;
-      setUsdcBalance(balance);
+      // 1. USDC balance — non-blocking: RPC timeout here won't kill the rest of the load.
+      //    Retried 3× with back-off before giving up; shows "—" in UI on failure.
+      withRetry(() =>
+        publicClient.readContract({
+          address: contracts.usdc,
+          abi: ERC20_ABI,
+          functionName: "balanceOf",
+          args: [walletAddress],
+        }) as Promise<bigint>
+      ).then(setUsdcBalance).catch(() => { /* show "—" in header, rest of profile still loads */ });
 
       // 2. Load orders from localStorage + merge with relayer remote history
       //    so the same wallet shows all orders on any device.
@@ -946,8 +972,8 @@ export default function ProfileClient() {
       setOrders(enriched);
       setEnriching(false);
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : "Failed to load profile";
-      setError(msg);
+      const raw = e instanceof Error ? e.message : "Failed to load profile";
+      setError(cleanRpcError(raw));
       setLoading(false);
       setEnriching(false);
     }
