@@ -34,8 +34,7 @@ interface OrderFormProps {
   candidateMarketIds?: `0x${string}`[];  // all market IDs from batch history to check balance against
 }
 
-const PRICE_STEP = 10_000;
-const MARKET_BUY_LIMIT  = 999_999n; // max valid price (99.9999¢) — fills at any clearing price
+const PRICE_STEP        = 10_000;
 const MARKET_SELL_LIMIT = 0n;
 
 /** Compute the YES token ID for a given market (mirrors BatchVault._getYesTokenId).
@@ -85,7 +84,32 @@ export default function OrderForm({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [showPrivacy, setShowPrivacy] = useState(false);
+  const [showPrivacy,  setShowPrivacy]  = useState(false);
+
+  // ── Slippage (market orders) ─────────────────────────────────────────────
+  const [slippageBps, setSlippageBpsState] = useState<number>(() => {
+    if (typeof window === "undefined") return 200;
+    return parseInt(localStorage.getItem("predacy_slippage_bps") ?? "200");
+  });
+  const [showSlippage,       setShowSlippage]       = useState(false);
+  const [customSlippageInput, setCustomSlippageInput] = useState<string>(() => {
+    if (typeof window === "undefined") return "2.0";
+    const stored = parseInt(localStorage.getItem("predacy_slippage_bps") ?? "200");
+    return (stored / 100).toFixed(1);
+  });
+  const setSlippageBps = (bps: number) => {
+    setSlippageBpsState(bps);
+    localStorage.setItem("predacy_slippage_bps", String(bps));
+  };
+
+  // Derived from market props — needed before effectiveLimitPrice
+  const yesPrice = parseFloat(market.outcomePrices[0]);
+  const noPrice  = parseFloat(market.outcomePrices[1] ?? (1 - yesPrice).toFixed(4));
+
+  // Market buy limit: current yes price + user slippage tolerance, capped at 99.9999¢
+  const marketBuyLimit = BigInt(
+    Math.min(999_999, Math.ceil(yesPrice * (1 + slippageBps / 10_000) * 1_000_000))
+  );
 
   // YES balance for sell mode
   const [yesBalance, setYesBalance] = useState<bigint | null>(null);
@@ -94,7 +118,7 @@ export default function OrderForm({
 
   const effectiveLimitPrice = mode === "sell"
     ? (orderType === "market" ? MARKET_SELL_LIMIT : BigInt(limitPrice))
-    : (orderType === "market" ? (isBuy ? MARKET_BUY_LIMIT : MARKET_SELL_LIMIT) : BigInt(limitPrice));
+    : (orderType === "market" ? (isBuy ? marketBuyLimit : MARKET_SELL_LIMIT) : BigInt(limitPrice));
 
   const updateCommitment = useCallback(() => {
     if (!walletAddress) return;
@@ -104,12 +128,12 @@ export default function OrderForm({
       const effLP = mode === "sell"
         ? (orderType === "market" ? MARKET_SELL_LIMIT : BigInt(limitPrice))
         : (orderType === "market"
-          ? (isBuy ? MARKET_BUY_LIMIT : MARKET_SELL_LIMIT)
+          ? (isBuy ? marketBuyLimit : MARKET_SELL_LIMIT)
           : BigInt(limitPrice));
       const isOrderBuy = mode === "buy" ? isBuy : false; // sell mode always isBuy=false
       setCommitment(computeCommitment({ marketId, isBuy: isOrderBuy, amount: amountParsed, limitPrice: effLP, salt }));
     } catch { /* ignore parse errors while typing */ }
-  }, [walletAddress, amountDisplay, isBuy, limitPrice, orderType, marketId, salt, mode]);
+  }, [walletAddress, amountDisplay, isBuy, limitPrice, orderType, marketId, salt, mode, marketBuyLimit]);
 
   useEffect(() => { updateCommitment(); }, [updateCommitment]);
 
@@ -169,8 +193,6 @@ export default function OrderForm({
     }
   };
 
-  const yesPrice  = parseFloat(market.outcomePrices[0]);
-  const noPrice   = parseFloat(market.outcomePrices[1] ?? (1 - yesPrice).toFixed(4));
   const pricePercent = (limitPrice / 10_000).toFixed(1);
   const priceDiff    = ((limitPrice / 1_000_000) - yesPrice) * 100;
 
@@ -557,6 +579,87 @@ export default function OrderForm({
                   </p>
                 </div>
                 <span className="text-[10px] text-muted-dim pb-0.5">(+{potentialPct.toFixed(0)}%)</span>
+              </div>
+            )}
+
+            {/* Slippage tolerance — market orders only */}
+            {orderType === "market" && (
+              <div className="pt-0.5">
+                <button
+                  type="button"
+                  onClick={() => setShowSlippage(v => !v)}
+                  className="flex items-center gap-1.5 text-[10px] text-muted-dim hover:text-muted transition-colors w-full"
+                >
+                  <svg className="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+                      d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                  </svg>
+                  <span>Max slippage:</span>
+                  <span className={clsx("font-medium tabular-nums", slippageBps > 500 ? "text-amber-400" : "text-text")}>
+                    {(slippageBps / 100).toFixed(1)}%
+                  </span>
+                  <svg
+                    className={clsx("ml-auto w-2.5 h-2.5 transition-transform flex-shrink-0", showSlippage && "rotate-180")}
+                    fill="none" stroke="currentColor" viewBox="0 0 24 24"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+
+                {showSlippage && (
+                  <div className="mt-2 space-y-2">
+                    {/* Presets + custom input */}
+                    <div className="flex items-center gap-1">
+                      {[50, 100, 200, 500].map((bps) => (
+                        <button
+                          key={bps}
+                          type="button"
+                          onClick={() => { setSlippageBps(bps); setCustomSlippageInput((bps / 100).toFixed(1)); }}
+                          className={clsx(
+                            "flex-1 py-1 text-[10px] border transition-colors",
+                            slippageBps === bps
+                              ? "border-accent text-accent bg-accent/5"
+                              : "border-border text-muted-dim hover:border-border-bright hover:text-muted"
+                          )}
+                        >
+                          {(bps / 100).toFixed(1)}%
+                        </button>
+                      ))}
+                      <div className={clsx(
+                        "flex items-center border bg-surface transition-colors ml-0.5",
+                        ![50, 100, 200, 500].includes(slippageBps) ? "border-accent" : "border-border"
+                      )}>
+                        <input
+                          type="number" min={0.1} max={50} step={0.1}
+                          value={customSlippageInput}
+                          onChange={(e) => {
+                            setCustomSlippageInput(e.target.value);
+                            const v = parseFloat(e.target.value);
+                            if (!isNaN(v) && v >= 0.1 && v <= 50) setSlippageBps(Math.round(v * 100));
+                          }}
+                          className="w-10 bg-transparent px-1.5 py-1 text-[10px] text-text focus:outline-none tabular-nums"
+                          placeholder="…"
+                        />
+                        <span className="pr-1.5 text-[10px] text-muted-dim">%</span>
+                      </div>
+                    </div>
+
+                    {/* Ceiling + hint */}
+                    <p className="text-[10px] text-muted-dim">
+                      Max fill price:{" "}
+                      <span className="text-text tabular-nums">
+                        {((Number(marketBuyLimit) / 1_000_000) * 100).toFixed(2)}¢
+                      </span>
+                      &nbsp;·&nbsp;
+                      {slippageBps > 500
+                        ? <span className="text-amber-400">High — may fill at a worse price</span>
+                        : slippageBps <= 100
+                        ? "Conservative — may not fill in busy batches"
+                        : "Fills in most batches"}
+                    </p>
+                  </div>
+                )}
               </div>
             )}
 
