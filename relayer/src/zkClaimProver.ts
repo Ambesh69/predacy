@@ -94,6 +94,18 @@ export class ZKClaimProver {
     // 3. Build Merkle path
     const merklePath = BatchProcessor.getMerklePath(params.allCommitments, leafIndex);
 
+    // Debug: verify relayer-built root matches on-chain claimMerkleRoot
+    const { keccak256: _keccak256, encodeAbiParameters: _enc } = await import("viem");
+    const treeNodes = BatchProcessor.buildMerkleTree(params.allCommitments);
+    const relayerRoot = treeNodes[1];
+    console.log(`[ZKClaimProver] commitment:       ${commitment}`);
+    console.log(`[ZKClaimProver] leafIndex:        ${leafIndex}`);
+    console.log(`[ZKClaimProver] allCommitments:   ${params.allCommitments.length}`);
+    console.log(`[ZKClaimProver] relayerRoot:      ${relayerRoot}`);
+    console.log(`[ZKClaimProver] onChainRoot:      ${params.claimMerkleRoot}`);
+    console.log(`[ZKClaimProver] rootsMatch:       ${relayerRoot.toLowerCase() === params.claimMerkleRoot.toLowerCase()}`);
+    console.log(`[ZKClaimProver] merklePath[0]:    ${merklePath[0]}`);
+
     // 4. Compute nullifier
     const nullifier = this._computeNullifier(commitment, params.batchId, params.salt);
 
