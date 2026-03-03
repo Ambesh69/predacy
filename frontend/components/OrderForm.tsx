@@ -89,12 +89,12 @@ export default function OrderForm({
   // ── Slippage (market orders) ─────────────────────────────────────────────
   const [slippageBps, setSlippageBpsState] = useState<number>(() => {
     if (typeof window === "undefined") return 200;
-    return parseInt(localStorage.getItem("predacy_slippage_bps") ?? "200");
+    return parseInt(localStorage.getItem("predacy_slippage_bps") ?? "50");
   });
   const [showSlippage,       setShowSlippage]       = useState(false);
   const [customSlippageInput, setCustomSlippageInput] = useState<string>(() => {
-    if (typeof window === "undefined") return "2.0";
-    const stored = parseInt(localStorage.getItem("predacy_slippage_bps") ?? "200");
+    if (typeof window === "undefined") return "0.5";
+    const stored = parseInt(localStorage.getItem("predacy_slippage_bps") ?? "50");
     return (stored / 100).toFixed(1);
   });
   const setSlippageBps = (bps: number) => {
