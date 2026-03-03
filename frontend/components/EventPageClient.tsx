@@ -437,6 +437,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   const [activeTab, setActiveTab] = useState<"order" | "positions">("order");
   const [claimLoading, setClaimLoading] = useState(false);
   const [historicalMarketIds, setHistoricalMarketIds] = useState<`0x${string}`[]>([]);
+  const selectedMarketId = selectedMarket?.conditionId;
 
   // ── Wallet ───────────────────────────────────────────────────────────────────
   const { authenticated, login } = usePrivy();
@@ -485,25 +486,24 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       (a, b) => parseFloat(b.outcomePrices?.[0] ?? "0") - parseFloat(a.outcomePrices?.[0] ?? "0"),
     );
     if (top.length > 0) setSelectedMarket(top[0]);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [event]);
+  }, [event, selectedMarket]);
 
   // ── Pre-warm batch for selected market ──────────────────────────────────────
   useEffect(() => {
-    if (!selectedMarket) return;
+    if (!selectedMarketId) return;
     const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
     if (!relayerUrl) return;
     fetch(`${relayerUrl}/warm`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ marketId: selectedMarket.conditionId }),
+      body: JSON.stringify({ marketId: selectedMarketId }),
     }).catch(() => {});
-  }, [selectedMarket?.conditionId]);
+  }, [selectedMarketId]);
 
   // ── Batch state polling for selected market ──────────────────────────────────
   useEffect(() => {
-    if (!selectedMarket) return;
-    const marketId = selectedMarket.conditionId as `0x${string}`;
+    if (!selectedMarketId) return;
+    const marketId = selectedMarketId as `0x${string}`;
     let cancelled  = false;
 
     const fetchBatch = async () => {
@@ -546,7 +546,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     fetchBatch();
     const iv = setInterval(fetchBatch, 5000);
     return () => { cancelled = true; clearInterval(iv); };
-  }, [selectedMarket?.conditionId]);
+  }, [selectedMarketId]);
 
   // Auto-switch to My Positions when the batch settles so the user sees the
   // claim button immediately without having to refresh or click a tab.
