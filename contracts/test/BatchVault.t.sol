@@ -311,11 +311,19 @@ contract BatchVaultTest is Test {
         netSellYes = clearingPrice > 0 ? netSellUSDC * PRICE_DECIMALS / clearingPrice : 0;
     }
 
-    /// @dev Build the 9-element publicInputs array for claimWithProof.
+    /// @dev Build the 11-element publicInputs array for claimWithProof.
     ///      Mirrors the circuit's public output layout:
-    ///        [0] batchId, [1] claimMerkleRoot, [2] clearingPrice,
-    ///        [3] nullifier, [4] recipient, [5] fills,
-    ///        [6] fillAmount, [7] refundAmount, [8] isBuy
+    ///        [0]  batchId
+    ///        [1]  commitment_root_hi  (high 128 bits of claimMerkleRoot)
+    ///        [2]  commitment_root_lo  (low  128 bits of claimMerkleRoot)
+    ///        [3]  clearingPrice
+    ///        [4]  nullifier_hi        (high 128 bits of nullifier)
+    ///        [5]  nullifier_lo        (low  128 bits of nullifier)
+    ///        [6]  recipient
+    ///        [7]  fills
+    ///        [8]  fillAmount
+    ///        [9]  refundAmount
+    ///        [10] isBuy
     function _buildClaimPublicInputs(
         uint256 batchId,
         bytes32 claimMerkleRoot,
@@ -329,16 +337,20 @@ contract BatchVaultTest is Test {
         bool    isBuy
     ) internal pure returns (bytes32[] memory inputs) {
         bytes32 nullifier = keccak256(abi.encode(commitment, batchId, salt));
-        inputs = new bytes32[](9);
-        inputs[0] = bytes32(batchId);
-        inputs[1] = claimMerkleRoot;
-        inputs[2] = bytes32(clearingPrice);
-        inputs[3] = nullifier;
-        inputs[4] = bytes32(uint256(uint160(recipient)));
-        inputs[5] = bytes32(fills ? uint256(1) : 0);
-        inputs[6] = bytes32(fillAmount);
-        inputs[7] = bytes32(refundAmount);
-        inputs[8] = bytes32(isBuy ? uint256(1) : 0);
+        inputs = new bytes32[](11);
+        inputs[0]  = bytes32(batchId);
+        // Split claimMerkleRoot into hi/lo u128 pairs
+        inputs[1]  = bytes32(uint256(claimMerkleRoot) >> 128);
+        inputs[2]  = bytes32(uint256(claimMerkleRoot) & type(uint128).max);
+        inputs[3]  = bytes32(clearingPrice);
+        // Split nullifier into hi/lo u128 pairs
+        inputs[4]  = bytes32(uint256(nullifier) >> 128);
+        inputs[5]  = bytes32(uint256(nullifier) & type(uint128).max);
+        inputs[6]  = bytes32(uint256(uint160(recipient)));
+        inputs[7]  = bytes32(fills ? uint256(1) : 0);
+        inputs[8]  = bytes32(fillAmount);
+        inputs[9]  = bytes32(refundAmount);
+        inputs[10] = bytes32(isBuy ? uint256(1) : 0);
     }
 
     // ─── Tests: batch lifecycle ────────────────────────────────────────────

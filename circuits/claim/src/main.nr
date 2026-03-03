@@ -12,15 +12,21 @@
 //     while keeping the salt secret.
 //
 // Public inputs (verified by BatchVault.claimWithProof):
-//   batch_id        - must match the batchId passed to the contract
-//   commitment_root - must match batch.claimMerkleRoot (binary Merkle root)
-//   clearing_price  - must match batch.clearingPrice
-//   nullifier       - checked against usedNullifiers[]
-//   recipient       - address that receives the payout (chosen by prover)
-//   fills           - whether the order filled
-//   fill_amount     - USDC or YES tokens received
-//   refund_amount   - assets returned if unfilled
-//   is_buy_out      - order direction (echoed from private input)
+//   batch_id            - must match the batchId passed to the contract
+//   commitment_root_hi  - high 128 bits of batch.claimMerkleRoot
+//   commitment_root_lo  - low  128 bits of batch.claimMerkleRoot
+//   clearing_price      - must match batch.clearingPrice
+//   nullifier_hi        - high 128 bits of nullifier (checked against usedNullifiers[])
+//   nullifier_lo        - low  128 bits of nullifier
+//   recipient           - address that receives the payout (chosen by prover, as Field)
+//   fills               - whether the order filled
+//   fill_amount         - USDC or YES tokens received
+//   refund_amount       - assets returned if unfilled
+//   is_buy_out          - order direction (echoed from private input)
+//
+// NOTE: bytes32 values (keccak256 hashes) are split into two u128 halves so that
+// each public output fits in a single BN254 field element.  The contract reassembles
+// them: bytes32 v = bytes32((uint256(hi) << 128) | uint256(lo)).
 //
 // Private inputs (witness - never revealed on-chain):
 //   market_id       - the market condition ID (bytes32)
@@ -65,9 +71,35 @@ fn concat96(a: [u8; 32], b: [u8; 32], c: [u8; 32]) -> [u8; 96] {
     out
 }
 
+// -- Helper: 16 bytes (big-endian) -> u128 ------------------------------------
+
+fn bytes16_to_u128(b: [u8; 16]) -> u128 {
+    let mut result: u128 = 0;
+    for i in 0..16 {
+        result = (result << 8) | (b[i] as u128);
+    }
+    result
+}
+
+// -- Helper: split bytes32 into (hi: u128, lo: u128) --------------------------
+//
+// hi = big-endian interpretation of bytes[0..16]
+// lo = big-endian interpretation of bytes[16..32]
+// Reconstruct in Solidity: bytes32((uint256(hi) << 128) | uint256(lo))
+
+fn split_bytes32(b: [u8; 32]) -> (u128, u128) {
+    let mut hi_bytes: [u8; 16] = [0; 16];
+    let mut lo_bytes: [u8; 16] = [0; 16];
+    for i in 0..16 {
+        hi_bytes[i] = b[i];
+        lo_bytes[i] = b[16 + i];
+    }
+    (bytes16_to_u128(hi_bytes), bytes16_to_u128(lo_bytes))
+}
+
 // -- Commitment hash (NO trader address) --------------------------------------
 //
-// Matches BatchVault._verifyCommitments() post-upgrade:
+// Matches BatchVault._verifyCommitments():
 //   keccak256(abi.encode(marketId, isBuy, amount, limitPrice, salt))
 //   = keccak256(bytes32 ++ bytes32_bool ++ bytes32_uint ++ bytes32_uint ++ bytes32)
 //   = 5 * 32 bytes = 160 bytes total
@@ -162,34 +194,44 @@ fn main(
     leaf_index:  u32,           // position of this commitment in the batch tree
 
     // -- Public outputs (checked on-chain by BatchVault.claimWithProof) -------
-    batch_id:        pub u64,        // batch ID
-    commitment_root: pub [u8; 32],   // batch.claimMerkleRoot
-    clearing_price:  pub u64,        // batch.clearingPrice
-    nullifier:       pub [u8; 32],   // used for double-claim prevention
-    recipient:       pub [u8; 20],   // payout destination address (unconstrained - prover chooses)
-    fills:           pub bool,       // whether this order filled
-    fill_amount:     pub u64,        // payout amount if filled
-    refund_amount:   pub u64,        // refund amount if unfilled
-    is_buy_out:      pub bool,       // echoes is_buy for the contract to branch on
+    // bytes32 values are split into two u128 halves (each fits in BN254 field).
+    // Contract reconstructs: bytes32((uint256(hi) << 128) | uint256(lo)).
+    batch_id:           pub u64,   // batch ID
+    commitment_root_hi: pub u128,  // high 128 bits of batch.claimMerkleRoot
+    commitment_root_lo: pub u128,  // low  128 bits of batch.claimMerkleRoot
+    clearing_price:     pub u64,   // batch.clearingPrice
+    nullifier_hi:       pub u128,  // high 128 bits of nullifier
+    nullifier_lo:       pub u128,  // low  128 bits of nullifier
+    recipient:          pub Field, // payout address as field element (prover chooses)
+    fills:              pub bool,  // whether this order filled
+    fill_amount:        pub u64,   // payout amount if filled
+    refund_amount:      pub u64,   // refund amount if unfilled
+    is_buy_out:         pub bool,  // echoes is_buy for the contract to branch on
 ) {
-    // Use recipient to suppress unused variable warning.
-    // The contract reads recipient from public inputs to route the payout;
-    // the circuit makes no constraints on it (prover chooses the recipient).
-    let _r = recipient;
+    // Suppress unused-variable warning on recipient (circuit makes no constraint on it;
+    // the contract reads it from public inputs to route the payout).
+    let _ = recipient;
 
     // -- 1. Recompute commitment (no trader address) ---------------------------
     let commitment = compute_commitment(market_id, is_buy, amount, limit_price, salt);
 
     // -- 2. Verify Merkle membership ------------------------------------------
     let computed_root = merkle_verify(commitment, merkle_path, leaf_index);
-    assert(computed_root == commitment_root, "Merkle proof invalid");
+
+    // Split the computed root and assert it matches the hi/lo public outputs.
+    let (root_hi, root_lo) = split_bytes32(computed_root);
+    assert(root_hi == commitment_root_hi, "Merkle root hi mismatch");
+    assert(root_lo == commitment_root_lo, "Merkle root lo mismatch");
 
     // -- 3. Compute nullifier and assert it matches the public input -----------
     //    nullifier = keccak256(commitment ++ batchId_bytes32 ++ salt)
     let batch_id_bytes = u64_to_bytes32(batch_id);
     let null_input = concat96(commitment, batch_id_bytes, salt);
     let expected_null = keccak256(null_input, 96);
-    assert(expected_null == nullifier, "Nullifier mismatch");
+
+    let (null_hi, null_lo) = split_bytes32(expected_null);
+    assert(null_hi == nullifier_hi, "Nullifier hi mismatch");
+    assert(null_lo == nullifier_lo, "Nullifier lo mismatch");
 
     // -- 4. Echo is_buy --------------------------------------------------------
     assert(is_buy_out == is_buy, "is_buy_out must match is_buy");
@@ -264,4 +306,21 @@ fn test_u64_to_bytes32_values() {
     for i in 0..29 {
         assert(result[i] == 0, "High bytes must be zero");
     }
+}
+
+#[test]
+fn test_split_bytes32_roundtrip() {
+    // All-ones high half, all-zeros low half
+    let mut b: [u8; 32] = [0; 32];
+    for i in 0..16 { b[i] = 0xFF; }
+    let (hi, lo) = split_bytes32(b);
+    assert(hi == 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF, "hi must be all ones");
+    assert(lo == 0, "lo must be zero");
+
+    // All-zeros high half, all-ones low half
+    let mut b2: [u8; 32] = [0; 32];
+    for i in 16..32 { b2[i] = 0xFF; }
+    let (hi2, lo2) = split_bytes32(b2);
+    assert(hi2 == 0, "hi must be zero");
+    assert(lo2 == 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF, "lo must be all ones");
 }

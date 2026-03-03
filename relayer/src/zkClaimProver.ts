@@ -60,16 +60,22 @@ export class ZKClaimProver {
   /**
    * Generate a ZK claim proof for an order.
    *
-   * Public inputs layout (must match BatchVault.claimWithProof + circuit):
-   *   [0] batchId            (uint256 as bytes32)
-   *   [1] claimMerkleRoot    (bytes32)
-   *   [2] clearingPrice      (uint256 as bytes32)
-   *   [3] nullifier          (bytes32)
-   *   [4] recipient          (address as bytes32)
-   *   [5] fills              (bool: 1 or 0)
-   *   [6] fillAmount         (uint256 as bytes32)
-   *   [7] refundAmount       (uint256 as bytes32)
-   *   [8] isBuy              (bool: 1 or 0)
+   * Public inputs layout (must match BatchVault.claimWithProof + circuit, 11 field elements):
+   *   [0]  batchId              (u64 as bytes32)
+   *   [1]  commitment_root_hi   (high 128 bits of claimMerkleRoot)
+   *   [2]  commitment_root_lo   (low  128 bits of claimMerkleRoot)
+   *   [3]  clearingPrice        (u64 as bytes32)
+   *   [4]  nullifier_hi         (high 128 bits of nullifier)
+   *   [5]  nullifier_lo         (low  128 bits of nullifier)
+   *   [6]  recipient            (address as bytes32, Field element)
+   *   [7]  fills                (bool: 1 or 0)
+   *   [8]  fillAmount           (u64 as bytes32)
+   *   [9]  refundAmount         (u64 as bytes32)
+   *   [10] isBuy                (bool: 1 or 0)
+   *
+   * bytes32 values (keccak256 hashes) are split into two u128 halves because
+   * a full 256-bit value may exceed the BN254 scalar field (~254 bits).
+   * Contract reconstructs: bytes32((uint256(hi) << 128) | uint256(lo))
    */
   async generateProof(params: ClaimProofParams): Promise<ClaimProofOutput> {
     // 1. Compute commitment from preimage
@@ -190,17 +196,29 @@ export class ZKClaimProver {
     refundAmount:    bigint;
     isBuy:           boolean;
   }): `0x${string}`[] {
+    const [rootHi, rootLo] = this._splitBytes32(params.claimMerkleRoot);
+    const [nullHi, nullLo] = this._splitBytes32(params.nullifier);
     return [
-      this._toBytes32(params.batchId),
-      params.claimMerkleRoot,
-      this._toBytes32(params.clearingPrice),
-      params.nullifier,
-      this._addressToBytes32(params.recipient),
-      this._toBytes32(params.fills ? 1n : 0n),
-      this._toBytes32(params.fillAmount),
-      this._toBytes32(params.refundAmount),
-      this._toBytes32(params.isBuy ? 1n : 0n),
+      this._toBytes32(params.batchId),       // [0]  batch_id
+      rootHi,                                // [1]  commitment_root_hi
+      rootLo,                                // [2]  commitment_root_lo
+      this._toBytes32(params.clearingPrice), // [3]  clearing_price
+      nullHi,                                // [4]  nullifier_hi
+      nullLo,                                // [5]  nullifier_lo
+      this._addressToBytes32(params.recipient), // [6]  recipient (Field)
+      this._toBytes32(params.fills ? 1n : 0n),  // [7]  fills
+      this._toBytes32(params.fillAmount),    // [8]  fill_amount
+      this._toBytes32(params.refundAmount),  // [9]  refund_amount
+      this._toBytes32(params.isBuy ? 1n : 0n),  // [10] is_buy_out
     ];
+  }
+
+  /** Split a bytes32 hex string into [hi, lo] u128 parts (each right-aligned in bytes32). */
+  private _splitBytes32(hex: `0x${string}`): [`0x${string}`, `0x${string}`] {
+    const clean = (hex.startsWith("0x") ? hex.slice(2) : hex).padStart(64, "0");
+    const hi = ("0x" + "0".repeat(32) + clean.slice(0, 32)) as `0x${string}`;
+    const lo = ("0x" + "0".repeat(32) + clean.slice(32, 64)) as `0x${string}`;
+    return [hi, lo];
   }
 
   private _toBytes32(value: bigint): `0x${string}` {
@@ -253,6 +271,18 @@ export class ZKClaimProver {
       paddedPath.push(ZERO_BYTES32);
     }
 
+    const { fills, fillAmount, refundAmount } = this._computeFill(params);
+
+    const nullifierHex = keccak256(encodeAbiParameters(
+      [{ type: "bytes32" }, { type: "uint256" }, { type: "bytes32" }],
+      [commitment, params.batchId, params.salt],
+    ));
+
+    // Split bytes32 values into u128 hi/lo pairs for circuit public inputs
+    const rootVal   = BigInt(params.claimMerkleRoot);
+    const nullVal   = BigInt(nullifierHex);
+    const mask128   = (1n << 128n) - 1n;
+
     const witnessInputs = {
       // Private inputs
       market_id:    this._hexToBytes(params.marketId, 32),
@@ -263,21 +293,17 @@ export class ZKClaimProver {
       merkle_path:  paddedPath.map((h) => this._hexToBytes(h as `0x${string}`, 32)),
       leaf_index:   leafIndex.toString(),
       // Public outputs (circuit asserts these match computed values)
-      batch_id:        params.batchId.toString(),
-      commitment_root: this._hexToBytes(params.claimMerkleRoot, 32),
-      clearing_price:  params.clearingPrice.toString(),
-      nullifier:       this._hexToBytes(
-        keccak256(encodeAbiParameters(
-          [{ type: "bytes32" }, { type: "uint256" }, { type: "bytes32" }],
-          [commitment, params.batchId, params.salt],
-        )),
-        32,
-      ),
-      recipient:       this._hexToBytes(params.recipient, 20),
-      fills:           params.limitPrice >= params.clearingPrice,
-      fill_amount:     params.amount.toString(),
-      refund_amount:   "0",
-      is_buy_out:      params.isBuy,
+      batch_id:           params.batchId.toString(),
+      commitment_root_hi: (rootVal >> 128n).toString(),
+      commitment_root_lo: (rootVal & mask128).toString(),
+      clearing_price:     params.clearingPrice.toString(),
+      nullifier_hi:       (nullVal >> 128n).toString(),
+      nullifier_lo:       (nullVal & mask128).toString(),
+      recipient:          BigInt(params.recipient).toString(),
+      fills,
+      fill_amount:        fillAmount.toString(),
+      refund_amount:      refundAmount.toString(),
+      is_buy_out:         params.isBuy,
     };
 
     console.log("[ZKClaimProver] Executing claim circuit...");

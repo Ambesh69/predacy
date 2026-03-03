@@ -558,16 +558,22 @@ contract BatchVault {
     ///           - msg.sender = the relayer (Alice never sends this tx).
     ///           - The recipient can be any address Alice specifies (e.g. a fresh wallet).
     ///
-    ///         Public inputs layout (bytes32[]):
-    ///           [0] batch_id        must equal batchId param
-    ///           [1] commitment_root  must equal batch.claimMerkleRoot
-    ///           [2] clearing_price   must equal batch.clearingPrice
-    ///           [3] nullifier        checked against usedNullifiers
-    ///           [4] recipient        address packed right-aligned in bytes32
-    ///           [5] fills            0 or 1
-    ///           [6] fill_amount      USDC or YES token payout
-    ///           [7] refund_amount    YES tokens for unfilled sell; 0 for buy
-    ///           [8] is_buy           0 or 1
+    ///         Public inputs layout (bytes32[] — 11 field elements):
+    ///           [0]  batch_id            must equal batchId param
+    ///           [1]  commitment_root_hi  high 128 bits of batch.claimMerkleRoot
+    ///           [2]  commitment_root_lo  low  128 bits of batch.claimMerkleRoot
+    ///           [3]  clearing_price      must equal batch.clearingPrice
+    ///           [4]  nullifier_hi        high 128 bits of nullifier
+    ///           [5]  nullifier_lo        low  128 bits of nullifier
+    ///           [6]  recipient           address packed right-aligned in bytes32
+    ///           [7]  fills               0 or 1
+    ///           [8]  fill_amount         USDC or YES token payout
+    ///           [9]  refund_amount       YES tokens for unfilled sell; 0 for buy
+    ///           [10] is_buy              0 or 1
+    ///
+    ///         bytes32 values are split into two u128 halves so each field element
+    ///         fits in the BN254 scalar field (~254 bits).  Reconstructed here as:
+    ///           bytes32 v = bytes32((uint256(hi) << 128) | uint256(lo))
     function claimWithProof(
         uint256 batchId,
         bytes calldata proof,
@@ -577,27 +583,30 @@ contract BatchVault {
 
         Batch storage batch = batches[batchId];
         if (batch.status != BatchStatus.SETTLED) revert BatchNotSettled();
-        if (publicInputs.length < 9) revert CommitmentMismatch();
+        if (publicInputs.length < 11) revert CommitmentMismatch();
+
+        // Reconstruct bytes32 values from hi/lo u128 pairs
+        bytes32 claimMerkleRoot = bytes32((uint256(publicInputs[1]) << 128) | uint256(publicInputs[2]));
+        bytes32 nullifier       = bytes32((uint256(publicInputs[4]) << 128) | uint256(publicInputs[5]));
 
         // Verify public inputs match on-chain state
-        if (uint256(publicInputs[0]) != batchId)             revert CommitmentMismatch();
-        if (publicInputs[1] != batch.claimMerkleRoot)        revert CommitmentMismatch();
-        if (uint256(publicInputs[2]) != batch.clearingPrice) revert CommitmentMismatch();
+        if (uint256(publicInputs[0]) != batchId)      revert CommitmentMismatch();
+        if (claimMerkleRoot != batch.claimMerkleRoot)  revert CommitmentMismatch();
+        if (uint256(publicInputs[3]) != batch.clearingPrice) revert CommitmentMismatch();
 
         // Verify ZK proof
         if (!claimVerifier.verify(proof, publicInputs)) revert ZKProofInvalid();
 
         // Nullifier check (prevents double-claim)
-        bytes32 nullifier = publicInputs[3];
         if (usedNullifiers[nullifier]) revert AlreadyClaimed();
         usedNullifiers[nullifier] = true;
 
         // Decode remaining public inputs
-        address recipient    = address(uint160(uint256(publicInputs[4])));
-        bool fills           = uint256(publicInputs[5]) == 1;
-        uint256 fillAmount   = uint256(publicInputs[6]);
-        uint256 refundAmount = uint256(publicInputs[7]);
-        bool isBuy           = uint256(publicInputs[8]) == 1;
+        address recipient    = address(uint160(uint256(publicInputs[6])));
+        bool fills           = uint256(publicInputs[7]) == 1;
+        uint256 fillAmount   = uint256(publicInputs[8]);
+        uint256 refundAmount = uint256(publicInputs[9]);
+        bool isBuy           = uint256(publicInputs[10]) == 1;
 
         uint256 yesShares = 0;
 
