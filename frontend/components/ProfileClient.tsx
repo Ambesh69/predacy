@@ -381,65 +381,69 @@ function ClosedPositionRow({
   const pnl    = currentValue != null ? currentValue - filledUsdc : null;
   const pnlPct = pnl != null && filledUsdc > 0 ? (pnl / filledUsdc) * 100 : null;
 
-  const currCents = outcomePrice != null
-    ? (outcomePrice * 100).toFixed(1) + "¢"
-    : "—";
+  // Determine Won / Lost from market resolution (price near 0 or 1 means resolved)
+  const isResolved  = outcomePrice != null && (outcomePrice > 0.9 || outcomePrice < 0.1);
+  const won         = isResolved && outcomePrice! > 0.9;
+  const lost        = isResolved && outcomePrice! < 0.1;
 
   return (
     <div className="border-b border-border last:border-b-0 p-4 space-y-3">
-      <div className="flex items-start gap-4">
-        {/* Left: outcome badge + market question + shares */}
-        <div className="flex-1 min-w-0 space-y-1.5">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className={clsx(
-              "text-[9px] tracking-widest uppercase px-1.5 py-0.5 border font-mono",
-              order.isBuy
-                ? "border-accent/30 text-accent bg-accent/5"
-                : "border-danger/30 text-danger bg-danger/5",
-            )}>
-              {order.isBuy ? "YES" : "NO"} {avgCents}
-            </span>
-            {order.claimed && (
-              <span className="text-[9px] tracking-widest uppercase text-accent/50 border border-accent/20 px-1.5 py-0.5">
-                CLAIMED ✓
-              </span>
-            )}
-          </div>
+      <div className="flex items-start gap-3">
+
+        {/* RESULT badge (fixed width, vertically centred) */}
+        <div className="flex-shrink-0 w-16 pt-0.5">
+          {won ? (
+            <div className="flex items-center gap-1.5">
+              <span className="w-5 h-5 rounded-full bg-accent/15 border border-accent/40 flex items-center justify-center text-[10px] text-accent flex-shrink-0">✓</span>
+              <span className="text-[11px] font-medium text-accent">Won</span>
+            </div>
+          ) : lost ? (
+            <div className="flex items-center gap-1.5">
+              <span className="w-5 h-5 rounded-full bg-danger/15 border border-danger/40 flex items-center justify-center text-[10px] text-danger flex-shrink-0">✗</span>
+              <span className="text-[11px] font-medium text-danger">Lost</span>
+            </div>
+          ) : (
+            <span className="text-[10px] text-muted-dim">—</span>
+          )}
+        </div>
+
+        {/* Market info */}
+        <div className="flex-1 min-w-0 space-y-0.5">
           <p className="text-[12px] text-text leading-snug line-clamp-2">
             {order.marketQuestion
               ?? (order.marketId ? shortHash(order.marketId, 14, 8) : `Batch #${order.batchId}`)}
           </p>
-          {order.shares != null && order.shares > 0 && (
-            <p className="text-[10px] text-muted-dim">
-              {order.shares.toFixed(2)} shares
-            </p>
-          )}
+          {/* Polymarket-style subtitle: "58.8 Yes at 34¢" */}
+          <p className="text-[10px] text-muted-dim">
+            {order.shares != null && order.shares > 0
+              ? `${order.shares.toFixed(1)} ${order.isBuy ? "Yes" : "No"} at ${avgCents}`
+              : avgCents}
+            {order.claimed && (
+              <span className="ml-2 text-accent/50">· claimed ✓</span>
+            )}
+          </p>
         </div>
 
-        {/* Right: TRADED | CURRENT | VALUE + P&L */}
+        {/* Right: TOTAL TRADED | AMOUNT WON */}
         <div className="flex items-start gap-5 flex-shrink-0 text-right">
-          <div className="min-w-[60px]">
-            <p className="text-[9px] text-muted-dim tracking-widest uppercase mb-1">TRADED</p>
-            <p className="text-[11px] text-text tabular-nums font-mono">${filledUsdc.toFixed(2)}</p>
+          <div className="min-w-[68px]">
+            <p className="text-[9px] text-muted-dim tracking-widest uppercase mb-1">TOTAL TRADED</p>
+            <p className="text-[12px] text-text tabular-nums font-mono">${filledUsdc.toFixed(2)}</p>
           </div>
-          <div className="min-w-[54px]">
-            <p className="text-[9px] text-muted-dim tracking-widest uppercase mb-1">CURRENT</p>
-            <p className="text-[11px] text-text tabular-nums font-mono">{currCents}</p>
-          </div>
-          <div className="min-w-[76px]">
-            <p className="text-[9px] text-muted-dim tracking-widest uppercase mb-1">VALUE</p>
+          <div className="min-w-[88px]">
+            <p className="text-[9px] text-muted-dim tracking-widest uppercase mb-1">AMOUNT WON</p>
             {currentValue != null ? (
               <div>
-                <p className="text-[11px] text-text tabular-nums font-mono">${currentValue.toFixed(2)}</p>
+                <p className="text-[12px] text-text tabular-nums font-mono">${currentValue.toFixed(2)}</p>
                 {pnl != null && (
-                  <p className={clsx("text-[9px] tabular-nums", pnl >= 0 ? "text-accent" : "text-danger")}>
+                  <p className={clsx("text-[10px] tabular-nums font-medium", pnl >= 0 ? "text-accent" : "text-danger")}>
                     {pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}
-                    {pnlPct != null ? ` (${pnlPct.toFixed(0)}%)` : ""}
+                    {pnlPct != null ? ` (${Math.abs(pnlPct).toFixed(0)}%)` : ""}
                   </p>
                 )}
               </div>
             ) : (
-              <p className="text-[11px] text-muted-dim">—</p>
+              <p className="text-[12px] text-muted-dim">—</p>
             )}
           </div>
         </div>
@@ -1019,12 +1023,26 @@ export default function ProfileClient() {
     ? `${walletAddress.slice(0, 6)}…${walletAddress.slice(-4)}`
     : "";
 
-  // Active: only truly pending orders (not yet settled)
-  const activeOrders = orders.filter((o) =>
+  // Polymarket semantics:
+  // Active  = pending bids (OPEN/SETTLING) + settled positions where underlying market hasn't resolved
+  // Closed  = settled positions where market resolved (price < 5% or > 95%)
+  const activeOrders = orders.filter((o) => {
+    if (o.batchStatus === BatchStatus.OPEN || o.batchStatus === BatchStatus.SETTLING) return true;
+    if (o.batchStatus !== BatchStatus.SETTLED) return false;
+    const yp = o.currentYesPrice;
+    if (yp == null) return true; // no price data yet → treat as active
+    return yp >= 0.05 && yp <= 0.95; // market still live
+  });
+  const closedOrders = orders.filter((o) => {
+    if (o.batchStatus !== BatchStatus.SETTLED) return false;
+    const yp = o.currentYesPrice;
+    return yp != null && (yp < 0.05 || yp > 0.95); // market resolved
+  });
+  // Within active: split pending bids vs settled (live) positions
+  const pendingOrders = activeOrders.filter((o) =>
     o.batchStatus === BatchStatus.OPEN || o.batchStatus === BatchStatus.SETTLING
   );
-  // Closed: all settled orders (whether claimed or not)
-  const closedOrders = orders.filter((o) =>
+  const livePositions = activeOrders.filter((o) =>
     o.batchStatus === BatchStatus.SETTLED
   );
 
@@ -1375,17 +1393,52 @@ export default function ProfileClient() {
                     <div className="w-8 h-8 border border-border flex items-center justify-center mx-auto">
                       <div className="w-2 h-2 bg-muted/30" />
                     </div>
-                    <p className="text-muted text-[11px] tracking-widest uppercase">No open orders</p>
-                    <p className="text-muted-dim text-[10px]">Orders in open or settling batches appear here.</p>
+                    <p className="text-muted text-[11px] tracking-widest uppercase">No active positions</p>
+                    <p className="text-muted-dim text-[10px]">Open bids and live positions appear here.</p>
                     <Link href="/" className="inline-block mt-1 text-[10px] text-accent/70 hover:text-accent border border-accent/20 hover:border-accent/40 px-3 py-1">
                       Browse markets →
                     </Link>
                   </div>
                 ) : (
-                  <div className="border border-border divide-y divide-border">
-                    {activeOrders.map((o) => (
-                      <PendingRow key={o.commitment} order={o} />
-                    ))}
+                  <div className="border border-border">
+                    {/* Pending bids section */}
+                    {pendingOrders.length > 0 && (
+                      <div className="divide-y divide-border">
+                        {pendingOrders.map((o) => (
+                          <PendingRow key={o.commitment} order={o} />
+                        ))}
+                      </div>
+                    )}
+                    {/* Live settled positions (market unresolved) */}
+                    {livePositions.length > 0 && (
+                      <>
+                        {/* Column headers */}
+                        <div className={clsx(
+                          "hidden md:flex items-center gap-4 px-4 py-2 border-border/40",
+                          pendingOrders.length > 0 ? "border-t" : "border-b",
+                        )}>
+                          <div className="flex-1">
+                            <span className="text-[9px] text-muted-dim tracking-widest uppercase">MARKET</span>
+                          </div>
+                          <div className="flex items-center gap-5 flex-shrink-0 text-right">
+                            <span className="min-w-[44px] text-[9px] text-muted-dim tracking-widest uppercase text-right">AVG</span>
+                            <span className="min-w-[54px] text-[9px] text-muted-dim tracking-widest uppercase text-right">CURRENT</span>
+                            <span className="min-w-[68px] text-[9px] text-muted-dim tracking-widest uppercase text-right">VALUE</span>
+                          </div>
+                        </div>
+                        <div className="divide-y divide-border border-t border-border/40">
+                          {livePositions.map((o) => (
+                            <PositionRow
+                              key={o.commitment}
+                              order={o}
+                              onClaim={handleClaim}
+                              isClaiming={claimingKey === o.commitment.toLowerCase()}
+                              claimError={claimErrors[o.commitment.toLowerCase()]}
+                            />
+                          ))}
+                        </div>
+                      </>
+                    )}
                   </div>
                 )
               )}
@@ -1399,19 +1452,21 @@ export default function ProfileClient() {
                 ) : closedOrders.length === 0 ? (
                   <div className="border border-border p-10 text-center">
                     <p className="text-muted text-[11px] tracking-widest uppercase">No closed positions yet</p>
-                    <p className="text-muted-dim text-[10px] mt-2">Settled positions will appear here.</p>
+                    <p className="text-muted-dim text-[10px] mt-2">Positions in resolved markets appear here.</p>
                   </div>
                 ) : (
                   <>
                     {/* Column headers */}
-                    <div className="hidden md:flex items-center gap-4 px-4 py-2 border-b border-border/40">
+                    <div className="hidden md:flex items-center gap-3 px-4 py-2 border-b border-border/40">
+                      <div className="w-16 flex-shrink-0">
+                        <span className="text-[9px] text-muted-dim tracking-widest uppercase">RESULT</span>
+                      </div>
                       <div className="flex-1">
                         <span className="text-[9px] text-muted-dim tracking-widest uppercase">MARKET</span>
                       </div>
                       <div className="flex items-center gap-5 flex-shrink-0 text-right">
-                        <span className="min-w-[60px] text-[9px] text-muted-dim tracking-widest uppercase text-right">TRADED</span>
-                        <span className="min-w-[54px] text-[9px] text-muted-dim tracking-widest uppercase text-right">CURRENT</span>
-                        <span className="min-w-[76px] text-[9px] text-muted-dim tracking-widest uppercase text-right">VALUE</span>
+                        <span className="min-w-[68px] text-[9px] text-muted-dim tracking-widest uppercase text-right">TOTAL TRADED</span>
+                        <span className="min-w-[88px] text-[9px] text-muted-dim tracking-widest uppercase text-right">AMOUNT WON</span>
                       </div>
                     </div>
                     <div className="border border-border divide-y divide-border">
