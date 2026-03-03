@@ -959,6 +959,61 @@ export default function ProfileClient() {
     }
   }, [ready, authenticated, walletAddress, loadProfile]);
 
+  // ── Live price polling (every 15 s) ───────────────────────────────────────
+  // Re-fetches Gamma API prices for all unique market IDs in the current orders
+  // and patches currentYesPrice in-place so P&L / value numbers tick live.
+  // We use a ref to read the latest orders without stale-closure issues.
+  const ordersRef = useRef<OrderEntry[]>([]);
+  useEffect(() => { ordersRef.current = orders; }, [orders]);
+
+  useEffect(() => {
+    if (!authenticated || !walletAddress) return;
+
+    const poll = async () => {
+      const current = ordersRef.current;
+      if (current.length === 0) return;
+
+      const uniqueIds = [...new Set(
+        current.filter((o) => o.marketId).map((o) => o.marketId!)
+      )];
+
+      const results = await Promise.allSettled(
+        uniqueIds.map((marketId) =>
+          fetch(
+            `https://gamma-api.polymarket.com/markets?condition_id=${marketId.slice(2)}`
+          )
+            .then((r) => r.json())
+            .then((data) => {
+              const prices = JSON.parse(data[0]?.outcomePrices ?? "[]");
+              const yesPrice = parseFloat(prices[0] ?? "0");
+              return yesPrice > 0 ? { marketId: marketId.toLowerCase(), yesPrice } : null;
+            })
+            .catch(() => null)
+        )
+      );
+
+      const updated = new Map<string, number>();
+      results.forEach((r) => {
+        if (r.status === "fulfilled" && r.value) {
+          updated.set(r.value.marketId, r.value.yesPrice);
+        }
+      });
+      if (updated.size === 0) return;
+
+      setOrders((prev) =>
+        prev.map((o) => {
+          const key = (o.marketId ?? "").toLowerCase();
+          const fresh = updated.get(key);
+          if (fresh == null || fresh === o.currentYesPrice) return o;
+          return { ...o, currentYesPrice: fresh };
+        })
+      );
+    };
+
+    const id = setInterval(poll, 15_000);
+    return () => clearInterval(id);
+  }, [authenticated, walletAddress]);
+
   // ── Claim handler ─────────────────────────────────────────────────────────
 
   const handleClaim = async (order: OrderEntry) => {
