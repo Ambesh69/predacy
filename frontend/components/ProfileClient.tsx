@@ -483,44 +483,28 @@ export default function ProfileClient() {
         storedOrders = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
       } catch { /* ignore quota / parse errors */ }
 
-      // 2a. Fetch remote history from relayer (authenticated: signed timestamp proves wallet ownership)
-      //     Only Alice can read Alice's history — relayer verifies EIP-191 signature before returning data.
-      //     Signature is cached in sessionStorage for 4 minutes so navigating back to this tab
-      //     never triggers a second wallet popup within the same browser session.
+      // 2a. Fetch remote history from relayer (authenticated: one-time EIP-191 signature proves ownership)
+      //     Signature is stored in localStorage permanently — Alice signs once per device, never again.
+      //     Fixed message (no timestamp) means the same signature works forever.
       try {
         const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
         const wallet     = wallets[0];
         if (relayerUrl && wallet) {
-          const addr      = walletAddress.toLowerCase();
-          const cacheKey  = `predacy:history-auth:${addr}`;
+          const addr     = walletAddress.toLowerCase();
+          const sigKey   = `predacy:history-sig:${addr}`;
+          const message  = `Predacy: authorize history access for ${addr}`;
 
-          // Try to reuse a cached signature from this browser session
-          type AuthCache = { signature: string; timestamp: string; expiry: number };
-          let auth: AuthCache | null = null;
-          try {
-            const cached = sessionStorage.getItem(cacheKey);
-            if (cached) {
-              const parsed = JSON.parse(cached) as AuthCache;
-              if (parsed.expiry > Date.now()) auth = parsed; // still valid
-            }
-          } catch { /* sessionStorage unavailable — will just re-sign */ }
-
-          if (!auth) {
-            // First visit (or cache expired) — ask wallet to sign once
-            const timestamp  = Date.now().toString();
-            const message    = `Predacy history access for ${addr} at ${timestamp}`;
-            const provider   = await wallet.getEthereumProvider();
-            const wc         = createWalletClient({ account: walletAddress, chain: ACTIVE_CHAIN, transport: custom(provider) });
-            const signature  = await wc.signMessage({ account: walletAddress, message });
-            auth = { signature, timestamp, expiry: Date.now() + 4 * 60 * 1000 }; // 4-min TTL
-            try { sessionStorage.setItem(cacheKey, JSON.stringify(auth)); } catch { /* ignore */ }
+          // Reuse stored signature, or sign once and persist it forever
+          let signature = localStorage.getItem(sigKey);
+          if (!signature) {
+            const provider  = await wallet.getEthereumProvider();
+            const wc        = createWalletClient({ account: walletAddress, chain: ACTIVE_CHAIN, transport: custom(provider) });
+            signature       = await wc.signMessage({ account: walletAddress, message });
+            try { localStorage.setItem(sigKey, signature); } catch { /* ignore quota errors */ }
           }
 
           const resp = await fetch(`${relayerUrl}/history/${addr}`, {
-            headers: {
-              "X-Timestamp": auth.timestamp,
-              "X-Signature": auth.signature,
-            },
+            headers: { "X-Signature": signature },
           });
           if (resp.ok) {
             const { orders: remoteOrders } = await resp.json() as { orders: StoredOrder[] };
