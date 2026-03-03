@@ -85,6 +85,7 @@ export default function OrderForm({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showPrivacy, setShowPrivacy] = useState(false);
 
   // YES balance for sell mode
   const [yesBalance, setYesBalance] = useState<bigint | null>(null);
@@ -113,9 +114,6 @@ export default function OrderForm({
   useEffect(() => { updateCommitment(); }, [updateCommitment]);
 
   // Fetch YES balance when switching to sell mode.
-  // Checks ALL candidate market IDs (current batch + historical batches) because the
-  // batch.batchMarketId can differ from where the user's tokens were originally minted.
-  // Sums balances across all distinct conditionIds so nothing is missed.
   useEffect(() => {
     if (mode !== "sell" || !walletAddress || !sellYes) {
       if (!sellYes) setYesBalance(null);
@@ -126,7 +124,6 @@ export default function OrderForm({
     (async () => {
       try {
         const contracts = getContracts(ACTIVE_CHAIN.id);
-        // Collect all unique conditionIds to check: URL market + batch + history
         const allIds = [...new Set([
           market.conditionId as `0x${string}`,
           marketId,
@@ -179,13 +176,11 @@ export default function OrderForm({
 
   // ── Order summary derived values ────────────────────────────────────────────
   const amountNum = parseFloat(amountDisplay || "0") || 0;
-  // Effective fill price for display (limit = slider, market = Polymarket mid)
   const fillPrice = orderType === "limit"
     ? limitPrice / 1_000_000
     : (mode === "sell" ? yesPrice : (isBuy ? yesPrice : noPrice));
-  // Buy: how many YES/NO shares the USDC buys; Sell: USDC proceeds
   const sharesOut    = fillPrice > 0 && amountNum > 0 ? amountNum / fillPrice : 0;
-  const toWin        = sharesOut;          // $1 per share at resolution
+  const toWin        = sharesOut;
   const potentialPct = fillPrice > 0 ? (1 / fillPrice - 1) * 100 : 0;
   const receiveUSDC  = amountNum * fillPrice;
 
@@ -228,19 +223,63 @@ export default function OrderForm({
     );
   }
 
+  // ── Privacy toggle section (shared by both buy + sell) ───────────────────
+  const privacyToggle = (
+    <div>
+      <button
+        type="button"
+        onClick={() => setShowPrivacy(v => !v)}
+        className="flex items-center gap-1.5 text-[10px] text-muted-dim hover:text-muted transition-colors w-full text-left py-1"
+      >
+        <span>🔒</span>
+        <span className="tracking-widest uppercase">Privacy &amp; commitment hash</span>
+        <svg
+          className={clsx("ml-auto w-3 h-3 transition-transform flex-shrink-0", showPrivacy && "rotate-180")}
+          fill="none" stroke="currentColor" viewBox="0 0 24 24"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+      {showPrivacy && (
+        <div className="mt-2 space-y-2">
+          <div className="p-2 border border-border bg-surface/50 relative overflow-hidden">
+            <div className="absolute inset-y-0 left-0 w-1 bg-blue/40" />
+            <p className="hash-text text-[11px] break-all pl-2">
+              {walletAddress ? commitment : "0x" + "?".repeat(64)}
+            </p>
+          </div>
+          <p className="text-[10px] text-muted-dim">
+            This hash — not your order details — is what gets recorded on-chain.
+          </p>
+          {mode === "buy" && (
+            <div className="border border-accent/20 bg-accent/5 px-3 py-2 space-y-1">
+              <p className="text-[10px] text-accent tracking-widest uppercase font-medium">Privacy</p>
+              <div className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-[10px]">
+                <span className="text-accent">✓</span>
+                <span className="text-muted-dim">Wallet address hidden from settlement events</span>
+                <span className="text-accent">✓</span>
+                <span className="text-muted-dim">USDC amount hidden until claim</span>
+                <span className="text-accent">✓</span>
+                <span className="text-muted-dim">Ephemeral address used for on-chain commit</span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <div className="flex flex-col h-full">
 
-      {/* ── Top tabs: Buy | Sell ──────────────────────────────────────────── */}
+      {/* ── Header: BUY | SELL + Market | Limit (one row) ─────────────────── */}
       <div className="flex border-b border-border">
         <button
           type="button"
           onClick={() => setMode("buy")}
           className={clsx(
-            "flex-1 py-3 text-xs tracking-widest uppercase font-medium transition-all duration-150 border-b-2",
-            mode === "buy"
-              ? "border-accent text-accent"
-              : "border-transparent text-muted hover:text-text"
+            "px-4 py-2.5 text-[11px] tracking-widest uppercase font-medium border-b-2 transition-colors",
+            mode === "buy" ? "border-accent text-accent" : "border-transparent text-muted hover:text-text"
           )}
         >
           Buy
@@ -249,24 +288,45 @@ export default function OrderForm({
           type="button"
           onClick={() => setMode("sell")}
           className={clsx(
-            "flex-1 py-3 text-xs tracking-widest uppercase font-medium transition-all duration-150 border-b-2 border-l border-border",
-            mode === "sell"
-              ? "border-danger text-danger"
-              : "border-transparent text-muted hover:text-text"
+            "px-4 py-2.5 text-[11px] tracking-widest uppercase font-medium border-b-2 border-l border-border transition-colors",
+            mode === "sell" ? "border-danger text-danger" : "border-transparent text-muted hover:text-text"
           )}
         >
           Sell
         </button>
+        {/* Market | Limit — right side of same bar */}
+        <div className="ml-auto flex items-stretch border-l border-border">
+          <button
+            type="button"
+            onClick={() => setOrderType("market")}
+            className={clsx(
+              "px-3 text-[10px] tracking-widest uppercase transition-colors",
+              orderType === "market" ? "text-text" : "text-muted-dim hover:text-muted"
+            )}
+          >
+            Market
+          </button>
+          <button
+            type="button"
+            onClick={() => setOrderType("limit")}
+            className={clsx(
+              "px-3 text-[10px] tracking-widest uppercase border-l border-border transition-colors",
+              orderType === "limit" ? "text-text" : "text-muted-dim hover:text-muted"
+            )}
+          >
+            Limit
+          </button>
+        </div>
       </div>
 
       {/* ── YES / NO outcome toggle ───────────────────────────────────────── */}
       {mode === "buy" ? (
-        <div className="grid grid-cols-2 gap-2 p-3 border-b border-border">
+        <div className="grid grid-cols-2 gap-2 px-3 py-2.5 border-b border-border">
           <button
             type="button"
             onClick={() => setIsBuy(true)}
             className={clsx(
-              "py-2.5 px-3 text-xs font-medium tracking-wide transition-all duration-150 rounded-sm",
+              "py-2 px-3 text-xs font-medium tracking-wide transition-all duration-150 rounded-sm",
               isBuy
                 ? "bg-accent text-black"
                 : "bg-surface/60 border border-border text-muted hover:border-border-bright hover:text-text"
@@ -278,7 +338,7 @@ export default function OrderForm({
             type="button"
             onClick={() => setIsBuy(false)}
             className={clsx(
-              "py-2.5 px-3 text-xs font-medium tracking-wide transition-all duration-150 rounded-sm",
+              "py-2 px-3 text-xs font-medium tracking-wide transition-all duration-150 rounded-sm",
               !isBuy
                 ? "bg-danger text-white"
                 : "bg-surface/60 border border-border text-muted hover:border-border-bright hover:text-text"
@@ -288,13 +348,12 @@ export default function OrderForm({
           </button>
         </div>
       ) : (
-        // Sell mode: only YES is supported in V1 (NO token selling is V2)
-        <div className="grid grid-cols-2 gap-2 p-3 border-b border-border">
+        <div className="grid grid-cols-2 gap-2 px-3 py-2.5 border-b border-border">
           <button
             type="button"
             onClick={() => setSellYes(true)}
             className={clsx(
-              "py-2.5 px-3 text-xs font-medium tracking-wide transition-all duration-150 rounded-sm",
+              "py-2 px-3 text-xs font-medium tracking-wide transition-all duration-150 rounded-sm",
               sellYes
                 ? "bg-danger/20 border border-danger/40 text-danger"
                 : "bg-surface/60 border border-border text-muted hover:border-border-bright hover:text-text"
@@ -305,49 +364,27 @@ export default function OrderForm({
           <button
             type="button"
             disabled
-            className="py-2.5 px-3 text-xs font-medium tracking-wide rounded-sm bg-surface/30 border border-border/40 text-muted/40 cursor-not-allowed"
+            className="py-2 px-3 text-xs font-medium tracking-wide rounded-sm bg-surface/30 border border-border/40 text-muted/40 cursor-not-allowed"
           >
             No <span className="text-[10px] opacity-60">V2</span>
           </button>
         </div>
       )}
 
-      {/* ── SELL MODE: native sell form ───────────────────────────────────── */}
+      {/* ── SELL MODE ────────────────────────────────────────────────────── */}
       {mode === "sell" && (
         <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
+          <div className="flex flex-col gap-3 px-3 py-3">
 
-          {/* Order type toggle */}
-          <div className="grid grid-cols-2 border-b border-border">
-            <button type="button" onClick={() => setOrderType("market")}
-              className={clsx("py-1.5 text-[10px] tracking-widest uppercase transition-colors",
-                orderType === "market" ? "text-text bg-surface/60" : "text-muted-dim hover:text-muted")} >
-              Market
-            </button>
-            <button type="button" onClick={() => setOrderType("limit")}
-              className={clsx("py-1.5 text-[10px] tracking-widest uppercase transition-colors border-l border-border",
-                orderType === "limit" ? "text-text bg-surface/60" : "text-muted-dim hover:text-muted")} >
-              Limit
-            </button>
-          </div>
-
-          <div className="flex-1 overflow-y-auto p-4 space-y-5">
             {/* YES Token Amount */}
-            <div className="space-y-2">
+            <div className="space-y-1.5">
               <div className="flex items-center justify-between">
-                <label className="text-[11px] text-muted tracking-widest uppercase">YES Tokens to Sell</label>
+                <label className="text-[10px] text-muted tracking-widest uppercase">YES Tokens to Sell</label>
                 {isConnected && (
                   <span className="flex items-center gap-1 text-[10px] text-muted-dim tabular-nums">
-                    {yesBalanceLoading
-                      ? "loading…"
-                      : yesBalanceDisplay !== null
-                      ? `Balance: ${yesBalanceDisplay}`
-                      : "Balance: —"}
-                    <button
-                      type="button"
-                      onClick={() => setRefreshTick(t => t + 1)}
-                      className="hover:text-muted transition-colors leading-none"
-                      title="Refresh balance"
-                    >↻</button>
+                    {yesBalanceLoading ? "loading…" : yesBalanceDisplay !== null ? `Balance: ${yesBalanceDisplay}` : "Balance: —"}
+                    <button type="button" onClick={() => setRefreshTick(t => t + 1)}
+                      className="hover:text-muted transition-colors leading-none" title="Refresh balance">↻</button>
                   </span>
                 )}
               </div>
@@ -356,26 +393,20 @@ export default function OrderForm({
                   type="number"
                   value={amountDisplay}
                   onChange={(e) => setAmountDisplay(e.target.value)}
-                  className="flex-1 bg-transparent px-3 py-3 text-text text-sm tabular-nums focus:outline-none"
-                  placeholder="0.00"
-                  min="0"
-                  step="any"
+                  className="flex-1 bg-transparent px-3 py-2.5 text-text text-sm tabular-nums focus:outline-none"
+                  placeholder="0.00" min="0" step="any"
                 />
                 <span className="pr-3 text-muted text-[11px]">YES</span>
               </div>
-              {/* Quick-fill from balance */}
               {yesBalance !== null && yesBalance > 0n && (
                 <div className="flex gap-1">
                   {[25, 50, 75, 100].map((pct) => (
-                    <button
-                      key={pct}
-                      type="button"
+                    <button key={pct} type="button"
                       onClick={() => {
                         const amt = Number(yesBalance) * pct / 100 / 1_000_000;
                         setAmountDisplay(amt.toFixed(6).replace(/\.?0+$/, ""));
                       }}
-                      className="flex-1 py-1 text-[10px] border border-border text-muted hover:border-border-bright hover:text-muted transition-colors"
-                    >
+                      className="flex-1 py-1 text-[10px] border border-border text-muted hover:border-border-bright hover:text-muted transition-colors">
                       {pct}%
                     </button>
                   ))}
@@ -383,82 +414,44 @@ export default function OrderForm({
               )}
             </div>
 
-            {/* ── Sell order summary ── */}
+            {/* Sell: compact "You'll receive" summary */}
             {amountNum > 0 && (
-              <div className="border border-border divide-y divide-border/60 text-[11px]">
-                <div className="flex items-center justify-between px-3 py-2">
-                  <span className="text-muted uppercase tracking-wider text-[10px]">Avg price</span>
-                  <span className="tabular-nums text-text">{(fillPrice * 100).toFixed(2)}¢</span>
-                </div>
-                <div className="flex items-center justify-between px-3 py-2">
-                  <span className="text-muted uppercase tracking-wider text-[10px]">You&apos;ll receive</span>
-                  <span className="tabular-nums font-medium text-danger">${receiveUSDC.toFixed(2)}</span>
-                </div>
-              </div>
-            )}
-
-            {/* Limit price (sell mode) */}
-            {orderType === "limit" ? (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <label className="text-[11px] text-muted tracking-widest uppercase">Min Sell Price</label>
-                  <span className={clsx("text-[11px] tabular-nums",
-                    priceDiff >= 0 ? "text-accent" : "text-danger")}>
-                    {priceDiff > 0 ? "+" : ""}{priceDiff.toFixed(1)}% vs Polymarket
-                  </span>
-                </div>
-                <div className="flex items-center border border-border bg-surface px-3 py-3">
-                  <span className="text-2xl font-black tabular-nums tracking-tight text-danger"
-                    style={{ fontFamily: "var(--font-display)" }}>
-                    {pricePercent}¢
-                  </span>
-                  <div className="ml-auto text-right">
-                    <p className="text-[10px] text-muted">Polymarket</p>
-                    <p className="text-xs text-text tabular-nums">{(yesPrice * 100).toFixed(1)}¢</p>
-                  </div>
-                </div>
-                <input
-                  type="range" min={1_000} max={990_000} step={PRICE_STEP}
-                  value={limitPrice}
-                  onChange={(e) => setLimitPrice(parseInt(e.target.value))}
-                  className="w-full danger"
-                />
-                <div className="flex justify-between text-[10px] text-muted-dim">
-                  <span>1¢</span><span>50¢</span><span>99¢</span>
-                </div>
-              </div>
-            ) : (
-              <div className="flex items-center justify-between border border-border bg-surface/40 px-3 py-2.5">
+              <div className="flex items-end justify-between pt-2 border-t border-border/40">
                 <div>
-                  <p className="text-[10px] text-muted tracking-widest uppercase">Fill price</p>
-                  <p className="text-[11px] text-muted-dim mt-0.5">At batch clearing price</p>
-                </div>
-                <div className="text-right">
-                  <p className="text-[10px] text-muted">Polymarket now</p>
-                  <p className="text-lg font-black tabular-nums text-danger"
+                  <p className="text-[10px] text-muted-dim mb-0.5">
+                    You&apos;ll receive · Avg. Price {(fillPrice * 100).toFixed(1)}¢
+                  </p>
+                  <p className="text-2xl font-black tabular-nums leading-none text-danger"
                     style={{ fontFamily: "var(--font-display)" }}>
-                    {(yesPrice * 100).toFixed(1)}¢
+                    ${receiveUSDC.toFixed(2)}
                   </p>
                 </div>
               </div>
             )}
 
-            {/* Commitment hash */}
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <label className="text-[11px] text-muted tracking-widest uppercase">Sealed Commitment</label>
-                <span className="text-[10px] text-muted-dim">keccak256</span>
+            {/* Limit price (sell mode) */}
+            {orderType === "limit" && (
+              <div className="space-y-1.5 pt-2 border-t border-border/40">
+                <div className="flex items-baseline justify-between">
+                  <span className="text-[10px] text-muted tracking-widest uppercase">Min Sell Price</span>
+                  <span className="font-black tabular-nums text-sm text-danger"
+                        style={{ fontFamily: "var(--font-display)" }}>
+                    {pricePercent}¢
+                    <span className="text-[10px] text-muted font-normal ml-1">
+                      {priceDiff > 0 ? "+" : ""}{priceDiff.toFixed(1)}% vs PM
+                    </span>
+                  </span>
+                </div>
+                <input type="range" min={1_000} max={990_000} step={PRICE_STEP}
+                  value={limitPrice} onChange={(e) => setLimitPrice(parseInt(e.target.value))}
+                  className="w-full danger" />
+                <div className="flex justify-between text-[10px] text-muted-dim">
+                  <span>1¢</span><span>50¢</span><span>99¢</span>
+                </div>
               </div>
-              <div className="p-2 border border-border bg-surface/50 relative overflow-hidden">
-                <div className="absolute inset-y-0 left-0 w-1 bg-danger/30" />
-                <p className="hash-text text-[11px] break-all pl-2">
-                  {walletAddress ? commitment : "0x" + "?".repeat(64)}
-                </p>
-              </div>
-              <p className="text-[10px] text-muted-dim">
-                This hash — not your YES token amount — is what gets recorded on-chain.
-              </p>
-            </div>
+            )}
+
+            {privacyToggle}
 
             {error && (
               <div className="p-2 border border-danger/30 bg-danger/5">
@@ -467,8 +460,10 @@ export default function OrderForm({
             )}
           </div>
 
+          <div className="flex-1" />
+
           {/* Submit */}
-          <div className="p-4 border-t border-border">
+          <div className="px-3 pb-3">
             {!isConnected ? (
               <button type="button" onClick={onConnect}
                 className="w-full py-3 border border-border-bright text-text text-xs tracking-widest uppercase hover:border-text/30 transition-colors">
@@ -480,16 +475,13 @@ export default function OrderForm({
                 Batch Closed
               </button>
             ) : (
-              <button
-                type="submit"
-                disabled={isSubmitting || !amountDisplay}
+              <button type="submit" disabled={isSubmitting || !amountDisplay}
                 className={clsx(
                   "w-full py-3 text-xs tracking-widest uppercase font-medium transition-all duration-150",
                   "border border-danger text-danger hover:bg-danger/10 disabled:opacity-40",
                   isSubmitting && "opacity-60 cursor-wait",
                 )}
-                style={{ boxShadow: isSubmitting ? "none" : "0 0 16px rgba(255, 51, 85, 0.15)" }}
-              >
+                style={{ boxShadow: isSubmitting ? "none" : "0 0 16px rgba(255, 51, 85, 0.15)" }}>
                 {isSubmitting ? (
                   <span className="flex items-center justify-center gap-2">
                     <span className="w-3 h-3 border border-current border-t-transparent rounded-full animate-spin" />
@@ -511,157 +503,96 @@ export default function OrderForm({
         </form>
       )}
 
-      {/* ── BUY MODE: order form ──────────────────────────────────────────── */}
+      {/* ── BUY MODE ─────────────────────────────────────────────────────── */}
       {mode === "buy" && (
         <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
+          <div className="flex flex-col gap-3 px-3 py-3">
 
-          {/* Order type toggle */}
-          <div className="grid grid-cols-2 border-b border-border">
-            <button type="button" onClick={() => setOrderType("market")}
-              className={clsx("py-1.5 text-[10px] tracking-widest uppercase transition-colors",
-                orderType === "market" ? "text-text bg-surface/60" : "text-muted-dim hover:text-muted")} >
-              Market
-            </button>
-            <button type="button" onClick={() => setOrderType("limit")}
-              className={clsx("py-1.5 text-[10px] tracking-widest uppercase transition-colors border-l border-border",
-                orderType === "limit" ? "text-text bg-surface/60" : "text-muted-dim hover:text-muted")} >
-              Limit
-            </button>
-          </div>
-
-          <div className="flex-1 overflow-y-auto p-4 space-y-5">
             {/* Amount */}
-            <div className="space-y-2">
-              <label className="text-[11px] text-muted tracking-widest uppercase">USDC Amount</label>
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <label className="text-[10px] text-muted tracking-widest uppercase">Amount</label>
+                <span className="text-[10px] text-muted-dim">Balance $0.00</span>
+              </div>
               <div className="flex items-center border border-border bg-surface focus-within:border-border-bright transition-colors">
                 <span className="pl-3 text-muted text-sm">$</span>
                 <input
                   type="number"
                   value={amountDisplay}
                   onChange={(e) => setAmountDisplay(e.target.value)}
-                  className="flex-1 bg-transparent px-2 py-3 text-text text-sm tabular-nums focus:outline-none"
-                  placeholder="0.00"
-                  min="1"
-                  step="1"
+                  className="flex-1 bg-transparent px-2 py-2.5 text-text text-lg font-bold tabular-nums focus:outline-none"
+                  placeholder="0" min="1" step="1"
                 />
                 <span className="pr-3 text-muted text-[11px]">USDC</span>
               </div>
+              {/* Additive quick-fills like Polymarket */}
               <div className="flex gap-1">
-                {[50, 100, 500, 1000].map((amt) => (
-                  <button
-                    key={amt}
-                    type="button"
-                    onClick={() => setAmountDisplay(amt.toString())}
-                    className={clsx(
-                      "flex-1 py-1 text-[10px] border transition-colors",
-                      amountDisplay === amt.toString()
-                        ? "border-text/30 text-text"
-                        : "border-border text-muted hover:border-border-bright hover:text-muted",
-                    )}
-                  >
-                    ${amt}
+                {[1, 5, 10, 100].map((n) => (
+                  <button key={n} type="button"
+                    onClick={() => setAmountDisplay(String(Math.max(0, (parseFloat(amountDisplay || "0") || 0) + n)))}
+                    className="flex-1 py-1 text-[10px] border border-border text-muted hover:border-border-bright hover:text-muted transition-colors">
+                    +${n}
                   </button>
                 ))}
+                <button type="button" disabled
+                  className="px-2 py-1 text-[10px] border border-border/40 text-muted/40 cursor-not-allowed">
+                  Max
+                </button>
               </div>
             </div>
 
-            {/* ── Buy order summary ── */}
-            {amountNum > 0 && (
-              <div className="border border-border divide-y divide-border/60 text-[11px]">
-                <div className="flex items-center justify-between px-3 py-2">
-                  <span className="text-muted uppercase tracking-wider text-[10px]">Avg price</span>
-                  <span className="tabular-nums text-text">{(fillPrice * 100).toFixed(2)}¢</span>
+            {/* Market mode: compact "To win" block */}
+            {amountNum > 0 && orderType === "market" && (
+              <div className="flex items-end justify-between pt-2.5 border-t border-border/40">
+                <div>
+                  <p className="text-[10px] text-muted-dim mb-0.5">
+                    To win 💰 &nbsp;·&nbsp; Avg. Price {(fillPrice * 100).toFixed(1)}¢
+                  </p>
+                  <p className={clsx(
+                      "text-2xl font-black tabular-nums leading-none",
+                      isBuy ? "text-accent" : "text-danger"
+                    )}
+                    style={{ fontFamily: "var(--font-display)" }}>
+                    ${toWin.toFixed(2)}
+                  </p>
                 </div>
-                <div className="flex items-center justify-between px-3 py-2">
-                  <span className="text-muted uppercase tracking-wider text-[10px]">Shares</span>
-                  <span className="tabular-nums text-text">{sharesOut.toFixed(2)}</span>
-                </div>
-                <div className="flex items-center justify-between px-3 py-2">
-                  <span className="text-muted uppercase tracking-wider text-[10px]">Potential return</span>
-                  <span className={clsx("tabular-nums font-medium", isBuy ? "text-accent" : "text-danger")}>
-                    ${toWin.toFixed(2)}{" "}
-                    <span className="text-muted font-normal">(+{potentialPct.toFixed(0)}%)</span>
-                  </span>
-                </div>
+                <span className="text-[10px] text-muted-dim pb-0.5">(+{potentialPct.toFixed(0)}%)</span>
               </div>
             )}
 
-            {/* Limit price */}
-            {orderType === "limit" ? (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <label className="text-[11px] text-muted tracking-widest uppercase">Limit Price</label>
-                  <span className={clsx("text-[11px] tabular-nums",
-                    priceDiff > 0 ? "text-accent" : priceDiff < 0 ? "text-danger" : "text-muted")}>
-                    {priceDiff > 0 ? "+" : ""}{priceDiff.toFixed(1)}% vs Polymarket
-                  </span>
-                </div>
-                <div className="flex items-center border border-border bg-surface px-3 py-3">
-                  <span className={clsx("text-2xl font-black tabular-nums tracking-tight",
-                    isBuy ? "text-accent" : "text-danger")}
-                    style={{ fontFamily: "var(--font-display)" }}>
+            {/* Limit mode: compact slider + inline to-win */}
+            {orderType === "limit" && (
+              <div className="space-y-1.5 pt-2.5 border-t border-border/40">
+                <div className="flex items-baseline justify-between">
+                  <span className="text-[10px] text-muted tracking-widest uppercase">Limit Price</span>
+                  <span className={clsx("font-black tabular-nums text-sm", isBuy ? "text-accent" : "text-danger")}
+                        style={{ fontFamily: "var(--font-display)" }}>
                     {pricePercent}¢
+                    <span className="text-[10px] text-muted font-normal ml-1">
+                      {priceDiff > 0 ? "+" : ""}{priceDiff.toFixed(1)}% vs PM
+                    </span>
                   </span>
-                  <div className="ml-auto text-right">
-                    <p className="text-[10px] text-muted">Polymarket</p>
-                    <p className="text-xs text-text tabular-nums">{(yesPrice * 100).toFixed(1)}¢</p>
-                  </div>
                 </div>
-                <input
-                  type="range" min={1_000} max={990_000} step={PRICE_STEP}
+                <input type="range" min={1_000} max={990_000} step={PRICE_STEP}
                   value={limitPrice}
                   onChange={(e) => setLimitPrice(parseInt(e.target.value))}
-                  className={clsx("w-full", !isBuy && "danger")}
-                />
+                  className={clsx("w-full", !isBuy && "danger")} />
                 <div className="flex justify-between text-[10px] text-muted-dim">
                   <span>1¢</span><span>50¢</span><span>99¢</span>
                 </div>
-              </div>
-            ) : (
-              <div className="flex items-center justify-between border border-border bg-surface/40 px-3 py-2.5">
-                <div>
-                  <p className="text-[10px] text-muted tracking-widest uppercase">Fill price</p>
-                  <p className="text-[11px] text-muted-dim mt-0.5">At batch clearing price</p>
-                </div>
-                <div className="text-right">
-                  <p className="text-[10px] text-muted">Polymarket now</p>
-                  <p className={clsx("text-lg font-black tabular-nums",
-                    isBuy ? "text-accent" : "text-danger")}
-                    style={{ fontFamily: "var(--font-display)" }}>
-                    {((isBuy ? yesPrice : noPrice) * 100).toFixed(1)}¢
+                {amountNum > 0 && (
+                  <p className="text-[10px] text-muted-dim">
+                    To win:&nbsp;
+                    <span className={clsx("font-medium", isBuy ? "text-accent" : "text-danger")}>
+                      ${toWin.toFixed(2)}
+                    </span>
+                    &nbsp;·&nbsp;Shares: {sharesOut.toFixed(2)}
                   </p>
-                </div>
+                )}
               </div>
             )}
 
-            {/* Commitment hash + privacy panel */}
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <label className="text-[11px] text-muted tracking-widest uppercase">Sealed Commitment</label>
-                <span className="text-[10px] text-muted-dim">keccak256</span>
-              </div>
-              <div className="p-2 border border-border bg-surface/50 relative overflow-hidden">
-                <div className="absolute inset-y-0 left-0 w-1 bg-blue/40" />
-                <p className="hash-text text-[11px] break-all pl-2">
-                  {walletAddress ? commitment : "0x" + "?".repeat(64)}
-                </p>
-              </div>
-              <p className="text-[10px] text-muted-dim">
-                This hash — not your order details — is what gets recorded on-chain.
-              </p>
-              {/* Privacy panel — buy orders only */}
-              <div className="border border-accent/20 bg-accent/5 px-3 py-2.5 space-y-1.5">
-                <p className="text-[10px] text-accent tracking-widest uppercase font-medium">Privacy</p>
-                <div className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-[10px]">
-                  <span className="text-accent">✓</span>
-                  <span className="text-muted-dim">Wallet address hidden from settlement events</span>
-                  <span className="text-accent">✓</span>
-                  <span className="text-muted-dim">USDC amount hidden until claim</span>
-                  <span className="text-accent">✓</span>
-                  <span className="text-muted-dim">Ephemeral address used for on-chain commit</span>
-                </div>
-              </div>
-            </div>
+            {privacyToggle}
 
             {error && (
               <div className="p-2 border border-danger/30 bg-danger/5">
@@ -670,8 +601,10 @@ export default function OrderForm({
             )}
           </div>
 
-          {/* Submit */}
-          <div className="p-4 border-t border-border">
+          <div className="flex-1" />
+
+          {/* Submit — always visible, no scroll */}
+          <div className="px-3 pb-3">
             {!isConnected ? (
               <button type="button" onClick={onConnect}
                 className="w-full py-3 border border-border-bright text-text text-xs tracking-widest uppercase hover:border-text/30 transition-colors">
@@ -683,9 +616,7 @@ export default function OrderForm({
                 Batch Closed
               </button>
             ) : (
-              <button
-                type="submit"
-                disabled={isSubmitting || !amountDisplay}
+              <button type="submit" disabled={isSubmitting || !amountDisplay}
                 className={clsx(
                   "w-full py-3 text-xs tracking-widest uppercase font-medium transition-all duration-150",
                   isBuy
@@ -697,8 +628,7 @@ export default function OrderForm({
                   boxShadow: isSubmitting ? "none"
                     : isBuy ? "0 0 16px rgba(0, 255, 179, 0.15)"
                     : "0 0 16px rgba(255, 51, 85, 0.15)",
-                }}
-              >
+                }}>
                 {isSubmitting ? (
                   <span className="flex items-center justify-center gap-2">
                     <span className="w-3 h-3 border border-current border-t-transparent rounded-full animate-spin" />
