@@ -116,7 +116,21 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   const [batch, setBatch]             = useState(MOCK_BATCH);
   const [commitments, setCommitments] = useState(MOCK_COMMITMENTS);
   const [loading, setLoading]         = useState(true);
-  const [submitStep, setSubmitStep]   = useState<"approving" | "signing" | null>(null);
+  const [submitStep, setSubmitStep]   = useState<"approving" | "signing" | "railgun" | null>(null);
+  // Railgun private-mode state — set while waiting for user to fund the ephemeral
+  // wallet through Railgun (instead of a direct on-chain Transfer from Alice's address).
+  // Cleared automatically when the polling effect detects a sufficient USDC balance.
+  const [useRailgun, setUseRailgun]   = useState(IS_MAINNET); // default: private on mainnet
+  const [railgunPending, setRailgunPending] = useState<{
+    ephemeralPrivateKey: `0x${string}`;
+    ephemeralAddress:    `0x${string}`;
+    fundingAmount:       bigint;
+    params:              { commitment: `0x${string}`; amount: bigint; salt: `0x${string}`; isBuy: boolean; limitPrice: bigint };
+    batchId:             bigint;
+    deadline:            bigint;
+    contracts:           ReturnType<typeof getContracts>;
+  } | null>(null);
+  const [railgunBalance, setRailgunBalance] = useState<bigint>(0n);
   const [faucetLoading, setFaucetLoading] = useState(false);
   const [chainError, setChainError]   = useState<string | null>(null);
   const [activeTab, setActiveTab]     = useState<"order" | "positions">("order");
@@ -312,6 +326,105 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     return () => { cancelled = true; };
   }, [batch.status, batch.batchId, walletAddress, isConnected]);
 
+  // ── Railgun balance polling ───────────────────────────────────────────────────
+  // When the user chooses Private Mode (Railgun) for a buy order, we pause at the
+  // funding step and wait for the ephemeral address to receive USDC from Railgun.
+  // This effect polls every 4 s. When balance ≥ fundingAmount, it resumes the order.
+  useEffect(() => {
+    if (!railgunPending) { setRailgunBalance(0n); return; }
+    let cancelled = false;
+    const { ephemeralPrivateKey, ephemeralAddress, fundingAmount, params, batchId, deadline, contracts } = railgunPending;
+
+    const check = async () => {
+      try {
+        const bal = await publicClient.readContract({
+          address: contracts.usdc,
+          abi:     ERC20_ABI,
+          functionName: "balanceOf",
+          args: [ephemeralAddress],
+        }) as bigint;
+        if (cancelled) return;
+        setRailgunBalance(bal);
+
+        if (bal >= fundingAmount) {
+          // Ephemeral wallet is funded — resume order flow
+          setRailgunPending(null);
+          setSubmitStep("signing");
+
+          // Inline the signing + posting (same as direct mode, minus the fund TX)
+          try {
+            const ephemeralAccount = privateKeyToAccount(ephemeralPrivateKey);
+            const ephemeralWalletClient = createWalletClient({ account: ephemeralAccount, chain: ACTIVE_CHAIN, transport: http() });
+
+            const actualCommitment = computeCommitment({ marketId: id as `0x${string}`, isBuy: params.isBuy, amount: params.amount, limitPrice: params.limitPrice, salt: params.salt });
+            const ephemeralNonce = await publicClient.readContract({ address: contracts.batchVault, abi: BATCH_VAULT_ABI, functionName: "nonces", args: [ephemeralAddress] }) as bigint;
+
+            const signature = await ephemeralWalletClient.signTypedData({
+              account: ephemeralAccount,
+              domain: { name: "BatchVault", version: "1", chainId: BigInt(ACTIVE_CHAIN.id), verifyingContract: contracts.batchVault },
+              types: { CommitOrder: [{ name: "commitment", type: "bytes32" }, { name: "amount", type: "uint256" }, { name: "batchId", type: "uint256" }, { name: "nonce", type: "uint256" }, { name: "deadline", type: "uint256" }] },
+              primaryType: "CommitOrder",
+              message: { commitment: actualCommitment, amount: params.amount, batchId, nonce: ephemeralNonce, deadline },
+            });
+
+            const nonceBytes = new Uint8Array(32);
+            crypto.getRandomValues(nonceBytes);
+            const transferNonce = ("0x" + Array.from(nonceBytes).map((b) => b.toString(16).padStart(2, "0")).join("")) as `0x${string}`;
+            const validAfter  = 0n;
+            const validBefore = BigInt(Math.floor(Date.now() / 1000) + 7200);
+
+            const transferSig = await ephemeralWalletClient.signTypedData({
+              account: ephemeralAccount,
+              domain: { name: "USD Coin", version: "2", chainId: BigInt(ACTIVE_CHAIN.id), verifyingContract: contracts.usdc },
+              types: { TransferWithAuthorization: [{ name: "from", type: "address" }, { name: "to", type: "address" }, { name: "value", type: "uint256" }, { name: "validAfter", type: "uint256" }, { name: "validBefore", type: "uint256" }, { name: "nonce", type: "bytes32" }] },
+              primaryType: "TransferWithAuthorization",
+              message: { from: ephemeralAddress, to: contracts.batchVault, value: params.amount, validAfter, validBefore, nonce: transferNonce },
+            });
+
+            const r = transferSig.slice(0, 66) as `0x${string}`;
+            const s = ("0x" + transferSig.slice(66, 130)) as `0x${string}`;
+            const v = parseInt(transferSig.slice(130, 132), 16);
+            const transferAuth = { validAfter: validAfter.toString(), validBefore: validBefore.toString(), nonce: transferNonce, v, r, s };
+
+            const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
+            if (!relayerUrl) throw new Error("NEXT_PUBLIC_RELAYER_URL is not set");
+
+            const resp = await fetch(`${relayerUrl}/order`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ marketId: id, batchId: batchId.toString(), signer: ephemeralAddress, isBuy: true, isSell: false, amount: params.amount.toString(), limitPrice: params.limitPrice.toString(), salt: params.salt, commitment: actualCommitment, signature, nonce: ephemeralNonce.toString(), deadline: deadline.toString(), transferAuth }),
+            });
+
+            const relayerData = await resp.json().catch(() => ({}));
+            if (!resp.ok) throw new Error(relayerData.error ?? `Relayer returned ${resp.status}`);
+
+            const actualBatchId: string = relayerData.batchId ?? batchId.toString();
+            if (walletAddress) {
+              setCommitments((prev) => [...prev, { hash: actualCommitment, amount: params.amount, trader: walletAddress, timestamp: Date.now() }]);
+              setBatch((prev) => ({ ...prev, commitmentCount: prev.commitmentCount + 1, totalDeposited: prev.totalDeposited + params.amount }));
+            }
+            setActiveTab("positions");
+            try {
+              const key = `predacy:orders:${walletAddress!.toLowerCase()}`;
+              const existing: unknown[] = JSON.parse(localStorage.getItem(key) ?? "[]");
+              existing.unshift({ commitment: actualCommitment, salt: params.salt, amount: params.amount.toString(), isBuy: true, limitPrice: params.limitPrice.toString(), batchId: actualBatchId, marketId: id, marketQuestion: market?.question ?? null, timestamp: Date.now(), ephemeralKey: ephemeralPrivateKey, ephemeralAddress, railgun: true });
+              localStorage.setItem(key, JSON.stringify(existing.slice(0, 200)));
+            } catch { /* ignore quota / SSR errors */ }
+          } catch (e: any) {
+            setChainError(e.message ?? "Order failed after Railgun funding");
+          } finally {
+            setSubmitStep(null);
+          }
+        }
+      } catch { /* RPC hiccup — try again next interval */ }
+    };
+
+    check(); // immediate check
+    const id_ = setInterval(check, 4000);
+    return () => { cancelled = true; clearInterval(id_); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [railgunPending]);
+
   // ── ensureChain ───────────────────────────────────────────────────────────────
   // Uses EIP-6963 to find MetaMask (works even when Backpack/another wallet has
   // seized window.ethereum as a read-only property). Calls wallet_switchEthereumChain
@@ -429,8 +542,18 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       const ephemeralAccount    = privateKeyToAccount(ephemeralPrivateKey);
       const ephemeralAddress    = ephemeralAccount.address;
 
-      // 2. Fund ephemeral with USDC from real wallet (1 MetaMask tx)
-      //    "FUNDING EPHEMERAL WALLET…" shown here — submitStep = "approving"
+      // 2a. RAILGUN PRIVATE MODE (mainnet only) — pause here and show the Railgun UI.
+      //     The polling effect (above) will detect the balance and resume the order.
+      //     On-chain: Transfer(RailgunContract → ephemeral) — Alice's address is NOT visible.
+      if (useRailgun && IS_MAINNET) {
+        setRailgunPending({ ephemeralPrivateKey, ephemeralAddress, fundingAmount: params.amount, params, batchId: batch.batchId, deadline, contracts });
+        setSubmitStep("railgun");
+        return; // resumed by the railgunPending useEffect above
+      }
+
+      // 2b. DIRECT MODE — fund ephemeral with a plain USDC transfer from Alice's wallet.
+      //     Less private: on-chain Transfer(Alice → ephemeral) is visible.
+      //     "FUNDING EPHEMERAL WALLET…" shown here — submitStep = "approving"
       const fundTx = await walletClient.writeContract({
         address: contracts.usdc,
         abi:     ERC20_ABI,
@@ -1150,9 +1273,119 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
                 </button>
               )}
             </div>
+          ) : railgunPending ? (
+            /* ── Railgun private-mode: waiting for ephemeral wallet to be funded ── */
+            <div className="flex-1 p-5 flex flex-col gap-4">
+              <div className="border border-accent/30 bg-accent/5 p-4 space-y-4">
+                {/* Header */}
+                <div className="flex items-center justify-between">
+                  <p className="text-[10px] text-accent tracking-widest uppercase font-bold">
+                    Private Mode — Awaiting Railgun Transfer
+                  </p>
+                  <div className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
+                </div>
+
+                {/* Instructions */}
+                <ol className="space-y-2 text-[11px] text-muted-dim">
+                  <li className="flex gap-2">
+                    <span className="text-accent/60 flex-shrink-0">1.</span>
+                    Open{" "}
+                    <a
+                      href="https://app.railgun.org"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-accent underline hover:text-accent/80"
+                    >
+                      app.railgun.org
+                    </a>
+                    {" "}→ Unshield
+                  </li>
+                  <li className="flex gap-2">
+                    <span className="text-accent/60 flex-shrink-0">2.</span>
+                    Send exactly{" "}
+                    <span className="text-text font-mono">
+                      ${(Number(railgunPending.fundingAmount) / 1e6).toFixed(2)} USDC
+                    </span>{" "}
+                    to the address below
+                  </li>
+                  <li className="flex gap-2">
+                    <span className="text-accent/60 flex-shrink-0">3.</span>
+                    Return here — order continues automatically
+                  </li>
+                </ol>
+
+                {/* Ephemeral address */}
+                <div className="space-y-1">
+                  <p className="text-[9px] text-muted tracking-widest uppercase">Ephemeral address (fund this)</p>
+                  <div className="flex items-center gap-2">
+                    <code className="hash-text text-[10px] text-accent/80 break-all flex-1">
+                      {railgunPending.ephemeralAddress}
+                    </code>
+                    <button
+                      onClick={() => navigator.clipboard.writeText(railgunPending.ephemeralAddress)}
+                      className="text-[9px] text-muted hover:text-text transition-colors tracking-widest uppercase border border-border px-2 py-1 flex-shrink-0"
+                    >
+                      COPY
+                    </button>
+                  </div>
+                </div>
+
+                {/* Balance progress */}
+                <div className="space-y-1">
+                  <div className="flex justify-between text-[9px] text-muted tracking-widest uppercase">
+                    <span>Balance received</span>
+                    <span>
+                      ${(Number(railgunBalance) / 1e6).toFixed(2)} / ${(Number(railgunPending.fundingAmount) / 1e6).toFixed(2)} USDC
+                    </span>
+                  </div>
+                  <div className="h-0.5 bg-border">
+                    <div
+                      className="h-full bg-accent transition-all duration-500"
+                      style={{ width: `${Math.min(100, railgunBalance > 0n ? Number((railgunBalance * 100n) / railgunPending.fundingAmount) : 0)}%` }}
+                    />
+                  </div>
+                </div>
+
+                <p className="text-[9px] text-muted-dim">
+                  Why Railgun? Your wallet address never appears on-chain as the sender —
+                  only the Railgun smart contract is visible. This breaks the link between
+                  your identity and this order.
+                </p>
+              </div>
+
+              {/* Cancel button */}
+              <button
+                onClick={() => { setRailgunPending(null); setSubmitStep(null); }}
+                className="text-[10px] tracking-widest uppercase text-muted hover:text-text transition-colors border border-border px-4 py-2"
+              >
+                CANCEL — USE DIRECT TRANSFER INSTEAD
+              </button>
+            </div>
           ) : (
             /* Order form — shown while batch is OPEN or SETTLING */
             <div className="flex-1">
+              {/* Private Mode toggle — mainnet only (Railgun not on testnet) */}
+              {IS_MAINNET && (
+                <div className="border-b border-border px-4 py-2 flex items-center justify-between">
+                  <div className="flex flex-col">
+                    <span className="text-[10px] text-text tracking-widest uppercase">Private Mode</span>
+                    <span className="text-[9px] text-muted-dim">Fund via Railgun — hides wallet link</span>
+                  </div>
+                  <button
+                    onClick={() => setUseRailgun((v) => !v)}
+                    className={clsx(
+                      "relative w-8 h-4 rounded-full transition-colors",
+                      useRailgun ? "bg-accent/40" : "bg-border",
+                    )}
+                    aria-label="Toggle Private Mode"
+                  >
+                    <span className={clsx(
+                      "absolute top-0.5 left-0.5 w-3 h-3 rounded-full transition-transform",
+                      useRailgun ? "translate-x-4 bg-accent" : "translate-x-0 bg-muted",
+                    )} />
+                  </button>
+                </div>
+              )}
               <OrderForm
                 market={market}
                 marketId={batch.batchMarketId}

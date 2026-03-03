@@ -29,7 +29,7 @@ interface OrderFormProps {
   walletAddress?: `0x${string}`;
   isConnected: boolean;
   onConnect: () => void;
-  submitStep?: "approving" | "signing" | null;
+  submitStep?: "approving" | "signing" | "railgun" | null;
   balanceVersion?: number;     // bumped by parent after a successful claim
   candidateMarketIds?: `0x${string}`[];  // all market IDs from batch history to check balance against
 }
