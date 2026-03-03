@@ -976,7 +976,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   const selBarColor = selYesProb > 60 ? "#00FFB3" : selYesProb < 20 ? "#FF3355" : "#4D83FF";
 
   return (
-    <div className="min-h-screen flex flex-col">
+    <div className="h-screen flex flex-col overflow-hidden">
 
       {/* Header */}
       <header className="border-b border-border px-6 py-3 flex items-center justify-between">
@@ -1127,7 +1127,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         </div>{/* end left column */}
 
         {/* ── Trading panel ────────────────────────────────────────────────── */}
-        <div className="w-[340px] xl:w-[380px] flex-shrink-0 flex flex-col overflow-y-auto">
+        <div className="w-[340px] xl:w-[380px] flex-shrink-0 flex flex-col overflow-hidden">
 
           {selectedMarket ? (
             <>
@@ -1153,19 +1153,6 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                     </span>
                   </div>
                 </div>
-              </div>
-
-              {/* Batch timer */}
-              <div className="border-b border-border px-4 py-3 flex justify-center">
-                <BatchTimer
-                  openedAt={batch.openedAt}
-                  batchWindow={batch.batchWindow}
-                  commitmentCount={batch.commitmentCount}
-                  totalDeposited={batch.totalDeposited}
-                  batchId={batch.batchId}
-                  status={batch.status}
-                  clearingPrice={batch.clearingPrice}
-                />
               </div>
 
               {/* Order / My Positions tab bar */}
@@ -1196,7 +1183,8 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                 </button>
               </div>
 
-              {/* Tab content */}
+              {/* Tab content — scrolls internally, BatchTimer pinned below */}
+              <div className="flex-1 min-h-0 overflow-y-auto">
               {activeTab === "positions" ? (
                 isConnected && walletAddress ? (
                   <PositionsPanel
@@ -1294,6 +1282,21 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                   )}
                 </>
               )}
+              </div>{/* end flex-1 scrollable tab content */}
+
+              {/* Compact batch timer — pinned at bottom of trading panel */}
+              <div className="border-t border-border px-4 py-3 flex-shrink-0">
+                <BatchTimer
+                  openedAt={batch.openedAt}
+                  batchWindow={batch.batchWindow}
+                  commitmentCount={batch.commitmentCount}
+                  totalDeposited={batch.totalDeposited}
+                  batchId={batch.batchId}
+                  status={batch.status}
+                  clearingPrice={batch.clearingPrice}
+                  mini={true}
+                />
+              </div>
             </>
           ) : (
             /* Empty state */
