@@ -92,6 +92,34 @@ function cleanClaimError(raw: string): string {
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
+function WalletAvatar({ address, size = 56 }: { address: string; size?: number }) {
+  if (!address) return (
+    <div className="rounded-full bg-surface flex-shrink-0" style={{ width: size, height: size }} />
+  );
+  const b1 = parseInt(address.slice(2, 4), 16);
+  const b2 = parseInt(address.slice(4, 6), 16);
+  const b3 = parseInt(address.slice(6, 8), 16);
+  const h1 = Math.round((b1 * 360) / 256);
+  const h2 = Math.round((b2 * 360) / 256);
+  const sat = 55 + (b3 % 25);
+  const gradId = `av-${address.slice(2, 10)}`;
+  return (
+    <svg width={size} height={size} viewBox="0 0 56 56" aria-hidden>
+      <defs>
+        <linearGradient id={gradId} x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%"   stopColor={`hsl(${h1},${sat}%,42%)`} />
+          <stop offset="100%" stopColor={`hsl(${h2},${sat}%,60%)`} />
+        </linearGradient>
+      </defs>
+      <circle cx="28" cy="28" r="28" fill={`url(#${gradId})`} />
+      <text x="28" y="33" textAnchor="middle" fontSize="15"
+            fontWeight="700" fill="rgba(255,255,255,0.85)" fontFamily="monospace">
+        {address.slice(2, 6).toUpperCase()}
+      </text>
+    </svg>
+  );
+}
+
 function CopyButton({ value, label }: { value: string; label?: string }) {
   const [copied, setCopied] = useState(false);
   const copy = async (e: React.MouseEvent) => {
@@ -898,160 +926,139 @@ export default function ProfileClient() {
       </div>
 
       <div className="flex-1 px-4 md:px-8 py-6 max-w-4xl mx-auto w-full space-y-6">
-        {/* ── Address card ──────────────────────────────────────────────── */}
-        <div className="border border-border divide-y divide-border/50">
-          {/* Wallet address row */}
-          <div className="p-4 flex items-center gap-4 flex-wrap">
-            <div className="w-2 h-2 rounded-full bg-accent animate-pulse flex-shrink-0" />
-            <div className="flex-1 min-w-0">
-              <p className="text-[10px] text-muted tracking-widest uppercase mb-0.5">
-                Wallet Address
-              </p>
-              <p className="hash-text text-sm text-text break-all">
-                {walletAddress}
-              </p>
-            </div>
-            <div className="flex items-center gap-2 flex-shrink-0">
-              <CopyButton value={walletAddress ?? ""} label="copy address" />
-              <a
-                href={`${EXPLORER}/address/${walletAddress}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-[10px] text-accent/70 hover:text-accent transition-colors border border-accent/20 hover:border-accent/40 px-2 py-1 tracking-wider"
-              >
-                POLYGONSCAN ↗
-              </a>
-            </div>
-          </div>
+        {/* ── Profile hero ──────────────────────────────────────────────── */}
+        <div className="border border-border p-5 md:p-6">
+          <div className="flex flex-col md:flex-row items-start md:items-center gap-5 md:gap-0">
 
-          {/* Payout address row */}
-          <div className="p-4">
-            <div className="flex items-start justify-between gap-4">
-              <div className="flex-1 min-w-0">
-                <p className="text-[10px] text-muted tracking-widest uppercase mb-0.5">
-                  Payout Address
-                </p>
-                {editingRecipient ? (
-                  <div className="space-y-2 mt-1.5">
-                    <input
-                      type="text"
-                      value={recipientDraft}
-                      onChange={(e) => setRecipientDraft(e.target.value)}
-                      placeholder={walletAddress}
-                      autoFocus
-                      className="w-full bg-surface border border-border px-2 py-1.5 text-[10px] font-mono text-text placeholder-muted-dim focus:outline-none focus:border-accent/40"
-                    />
-                    <div className="flex gap-2">
-                      <button
-                        onClick={() => {
-                          const addr = recipientDraft.trim();
-                          if (addr && !/^0x[0-9a-fA-F]{40}$/.test(addr)) return;
-                          if (walletAddress) {
-                            const key = `predacy:claim-recipient:${walletAddress.toLowerCase()}`;
-                            if (addr) {
-                              localStorage.setItem(key, addr);
-                              setClaimRecipient(addr);
-                            } else {
-                              localStorage.removeItem(key);
-                              setClaimRecipient("");
-                            }
-                          }
-                          setEditingRecipient(false);
-                        }}
-                        disabled={recipientDraft.trim() !== "" && !/^0x[0-9a-fA-F]{40}$/.test(recipientDraft.trim())}
-                        className="px-3 py-1 border border-accent text-accent text-[9px] tracking-widest uppercase hover:bg-accent/5 transition-colors disabled:opacity-30"
-                      >
-                        SAVE
-                      </button>
-                      <button
-                        onClick={() => setEditingRecipient(false)}
-                        className="px-3 py-1 border border-border text-muted text-[9px] tracking-widest uppercase hover:text-text transition-colors"
-                      >
-                        CANCEL
-                      </button>
-                      {claimRecipient && (
-                        <button
-                          onClick={() => {
-                            if (walletAddress) localStorage.removeItem(`predacy:claim-recipient:${walletAddress.toLowerCase()}`);
-                            setClaimRecipient("");
-                            setRecipientDraft("");
-                            setEditingRecipient(false);
-                          }}
-                          className="ml-auto text-[9px] text-muted-dim hover:text-danger transition-colors tracking-widest"
-                        >
-                          RESET
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                ) : (
-                  <p className="hash-text text-sm text-text break-all mt-0.5">
-                    {claimRecipient || walletAddress}
-                  </p>
-                )}
-                {!editingRecipient && (
-                  <p className="text-[9px] text-muted-dim mt-1">
-                    {claimRecipient && claimRecipient.toLowerCase() !== walletAddress?.toLowerCase()
-                      ? <span className="text-accent/60">↳ custom address set — payouts routed privately</span>
-                      : <span>↳ use a fresh address for full claim privacy</span>
-                    }
-                  </p>
-                )}
-              </div>
-              {!editingRecipient && (
-                <button
-                  onClick={() => { setRecipientDraft(claimRecipient); setEditingRecipient(true); }}
-                  className="flex-shrink-0 text-[10px] text-muted hover:text-text border border-border hover:border-border-bright px-2 py-1 tracking-widest transition-colors"
+            {/* Avatar + identity */}
+            <div className="flex items-center gap-4 md:pr-6 md:mr-6 md:border-r md:border-border flex-shrink-0">
+              <WalletAvatar address={walletAddress ?? ""} size={56} />
+              <div className="min-w-0">
+                <p
+                  className="text-lg font-black text-text tracking-tight leading-none mb-1"
+                  style={{ fontFamily: "var(--font-display)" }}
                 >
-                  EDIT
-                </button>
-              )}
+                  {walletAddress ? walletAddress.slice(2, 6).toUpperCase() : "——"}
+                </p>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="hash-text text-[11px] text-muted">{shortAddr}</span>
+                  <CopyButton value={walletAddress ?? ""} label="copy" />
+                  <a
+                    href={`${EXPLORER}/address/${walletAddress}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[10px] text-accent/60 hover:text-accent transition-colors tracking-wider"
+                  >
+                    ↗
+                  </a>
+                </div>
+              </div>
             </div>
+
+            {/* Stats strip */}
+            <div className="flex items-start flex-wrap gap-y-4 divide-x divide-border w-full md:w-auto">
+              {([
+                { label: "BALANCE", value: usdcBalance === null ? "—" : `$${(Number(usdcBalance) / 1e6).toFixed(2)}`, sub: "available",    accent: false },
+                { label: "VOLUME",  value: `$${(Number(totalVolume) / 1e6).toFixed(2)}`,                              sub: "total placed", accent: false },
+                { label: "ORDERS",  value: loading ? "—" : String(totalOrders),                                       sub: "sealed bids",  accent: false },
+                { label: "PRIVACY", value: "ZK ✓",                                                                    sub: "proof system", accent: true  },
+              ] as const).map((stat) => (
+                <div key={stat.label} className="px-5 first:pl-0 md:first:pl-5">
+                  <p className="text-[9px] text-muted tracking-widest uppercase mb-1">{stat.label}</p>
+                  <p
+                    className={`text-xl font-black leading-tight ${stat.accent ? "text-accent" : "text-text"}`}
+                    style={{ fontFamily: "var(--font-display)" }}
+                  >
+                    {stat.value}
+                  </p>
+                  <p className="text-[9px] text-muted-dim mt-0.5">{stat.sub}</p>
+                </div>
+              ))}
+            </div>
+
           </div>
         </div>
 
-        {/* ── Stats grid ────────────────────────────────────────────────── */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-px bg-border">
-          <div className="bg-bg p-4">
-            <p className="text-[10px] text-muted tracking-widest uppercase mb-1">USDC Balance</p>
-            <p
-              className="text-2xl font-black text-text leading-tight"
-              style={{ fontFamily: "var(--font-display)" }}
-            >
-              {usdcBalance === null ? "—" : `$${(Number(usdcBalance) / 1e6).toFixed(2)}`}
-            </p>
-            <p className="text-[10px] text-muted-dim mt-0.5">available</p>
-          </div>
-          <div className="bg-bg p-4">
-            <p className="text-[10px] text-muted tracking-widest uppercase mb-1">Orders</p>
-            <p
-              className="text-2xl font-black text-text leading-tight"
-              style={{ fontFamily: "var(--font-display)" }}
-            >
-              {loading ? "—" : totalOrders}
-            </p>
-            <p className="text-[10px] text-muted-dim mt-0.5">sealed bids</p>
-          </div>
-          <div className="bg-bg p-4">
-            <p className="text-[10px] text-muted tracking-widest uppercase mb-1">Settled</p>
-            <p
-              className="text-2xl font-black text-text leading-tight"
-              style={{ fontFamily: "var(--font-display)" }}
-            >
-              {loading ? "—" : settledOrders.length}
-            </p>
-            <p className="text-[10px] text-muted-dim mt-0.5">batches filled</p>
-          </div>
-          <div className="bg-bg p-4">
-            <p className="text-[10px] text-muted tracking-widest uppercase mb-1">Privacy</p>
-            <p
-              className="text-2xl font-black text-accent leading-tight"
-              style={{ fontFamily: "var(--font-display)" }}
-            >
-              ZK ✓
-            </p>
-            <p className="text-[10px] text-muted-dim mt-0.5">sealed-bid proof</p>
-          </div>
+        {/* ── Payout address (compact strip) ────────────────────────────── */}
+        <div className="border border-border border-t-0">
+          {!editingRecipient ? (
+            <div className="px-5 py-2.5 flex items-center gap-3">
+              <span className="text-[9px] text-muted tracking-widest uppercase whitespace-nowrap flex-shrink-0">
+                Payout
+              </span>
+              <span className="hash-text text-[11px] text-muted-dim flex-1 truncate">
+                {claimRecipient || walletAddress}
+              </span>
+              {claimRecipient && claimRecipient.toLowerCase() !== walletAddress?.toLowerCase() && (
+                <span className="text-[9px] text-accent/50 flex-shrink-0">↳ custom</span>
+              )}
+              <button
+                onClick={() => { setRecipientDraft(claimRecipient); setEditingRecipient(true); }}
+                className="flex-shrink-0 text-[9px] text-muted hover:text-text border border-border px-2 py-0.5 tracking-widest transition-colors"
+              >
+                EDIT
+              </button>
+            </div>
+          ) : (
+            <div className="px-5 py-3 space-y-2">
+              <div className="flex items-center gap-2">
+                <span className="text-[9px] text-muted tracking-widest uppercase whitespace-nowrap flex-shrink-0">
+                  Payout
+                </span>
+                <input
+                  type="text"
+                  value={recipientDraft}
+                  onChange={(e) => setRecipientDraft(e.target.value)}
+                  placeholder={walletAddress ?? ""}
+                  autoFocus
+                  className="flex-1 bg-surface border border-border px-2 py-1 text-[10px] font-mono text-text placeholder-muted-dim focus:outline-none focus:border-accent/40"
+                />
+              </div>
+              <div className="flex gap-2 items-center">
+                <button
+                  onClick={() => {
+                    const addr = recipientDraft.trim();
+                    if (addr && !/^0x[0-9a-fA-F]{40}$/.test(addr)) return;
+                    if (walletAddress) {
+                      const key = `predacy:claim-recipient:${walletAddress.toLowerCase()}`;
+                      if (addr) { localStorage.setItem(key, addr); setClaimRecipient(addr); }
+                      else      { localStorage.removeItem(key);    setClaimRecipient("");   }
+                    }
+                    setEditingRecipient(false);
+                  }}
+                  disabled={recipientDraft.trim() !== "" && !/^0x[0-9a-fA-F]{40}$/.test(recipientDraft.trim())}
+                  className="px-3 py-1 border border-accent text-accent text-[9px] tracking-widest uppercase hover:bg-accent/5 transition-colors disabled:opacity-30"
+                >
+                  SAVE
+                </button>
+                <button
+                  onClick={() => setEditingRecipient(false)}
+                  className="px-3 py-1 border border-border text-muted text-[9px] tracking-widest uppercase hover:text-text transition-colors"
+                >
+                  CANCEL
+                </button>
+                {claimRecipient && (
+                  <button
+                    onClick={() => {
+                      if (walletAddress) localStorage.removeItem(`predacy:claim-recipient:${walletAddress.toLowerCase()}`);
+                      setClaimRecipient("");
+                      setRecipientDraft("");
+                      setEditingRecipient(false);
+                    }}
+                    className="ml-auto text-[9px] text-muted-dim hover:text-danger transition-colors tracking-widest"
+                  >
+                    RESET
+                  </button>
+                )}
+              </div>
+              <p className="text-[9px] text-muted-dim">
+                {claimRecipient && claimRecipient.toLowerCase() !== walletAddress?.toLowerCase()
+                  ? <span className="text-accent/60">↳ custom address set — payouts routed privately</span>
+                  : <span>↳ use a fresh address for full claim privacy</span>
+                }
+              </p>
+            </div>
+          )}
         </div>
 
         {/* ── Privacy breakdown ─────────────────────────────────────────── */}
