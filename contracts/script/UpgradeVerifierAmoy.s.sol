@@ -5,8 +5,10 @@ import "forge-std/Script.sol";
 import "../src/BatchVerifier.sol";
 import "../src/PublicInputAdapter.sol";
 import "../src/BatchVault.sol";
-// Note: ClaimVerifier.sol not imported — naming conflict with BatchVerifier.sol.
-// Deployed via vm.deployCode() instead.
+// Note: ClaimVerifier.sol cannot be imported here — it shares top-level library names
+// with BatchVerifier.sol (ZKTranscriptLib, RelationsLib, CommitmentSchemeLib, etc.).
+// Deploy ClaimHonkVerifier first via script/DeployClaimVerifier.s.sol, then set
+// CLAIM_VERIFIER=<address> in the environment before running this script.
 
 /// @notice Upgrade the existing Amoy BatchVault to use real ZK verifiers.
 ///
@@ -16,24 +18,28 @@ import "../src/BatchVault.sol";
 /// Deploys:
 ///   - HonkVerifier (batch clearing, 37 public inputs)
 ///   - PublicInputAdapter (bridges BatchVault 6 inputs → HonkVerifier 37 inputs)
-///   - ClaimHonkVerifier (claim proofs, 11 public inputs, no adapter needed)
 ///
 /// Then swaps both verifiers on the vault via setVerifier / setClaimVerifier.
+/// ClaimHonkVerifier must be pre-deployed via DeployClaimVerifier.s.sol.
 ///
 /// Prerequisites:
 ///   - PRIVATE_KEY in contracts/.env must be the relayer wallet
 ///     (setVerifier and setClaimVerifier are onlyRelayer)
+///   - CLAIM_VERIFIER env var set to the pre-deployed ClaimHonkVerifier address
 ///   - Deployer needs ~0.1 MATIC on Amoy for gas
 ///
 /// Usage:
 ///   cd contracts
-///   FOUNDRY_PROFILE=size forge script script/UpgradeVerifierAmoy.s.sol \
-///     --rpc-url https://rpc-amoy.polygon.technology/ \
-///     --broadcast \
-///     --private-key $PRIVATE_KEY
+///   # Step 1: deploy ClaimHonkVerifier (run once, note the printed address)
+///   FOUNDRY_PROFILE=size forge script script/DeployClaimVerifier.s.sol \
+///     --rpc-url $POLYGON_AMOY_RPC --broadcast --private-key $PRIVATE_KEY
+///
+///   # Step 2: upgrade the vault
+///   CLAIM_VERIFIER=0x... FOUNDRY_PROFILE=size forge script script/UpgradeVerifierAmoy.s.sol \
+///     --rpc-url $POLYGON_AMOY_RPC --broadcast --private-key $PRIVATE_KEY
 ///
 /// After deployment:
-///   Set USE_REAL_ZK=true and ADAPTER_ADDRESS=<printed> in Railway env vars.
+///   Set USE_REAL_ZK=true, ADAPTER_ADDRESS=<printed>, CLAIM_VERIFIER=<printed> in Railway.
 contract UpgradeVerifierAmoy is Script {
     // BatchVault v4 on Polygon Amoy
     address constant VAULT = 0x2A3fa469D3F80ca64624B22EFed72a5FC89E6759;
@@ -41,6 +47,10 @@ contract UpgradeVerifierAmoy is Script {
     function run() external {
         uint256 deployerKey = vm.envUint("PRIVATE_KEY");
         address deployer    = vm.addr(deployerKey);
+
+        // ClaimHonkVerifier must be pre-deployed via DeployClaimVerifier.s.sol.
+        address claimVerifier = vm.envAddress("CLAIM_VERIFIER");
+        require(claimVerifier != address(0), "CLAIM_VERIFIER env var not set");
 
         vm.startBroadcast(deployerKey);
 
@@ -54,12 +64,9 @@ contract UpgradeVerifierAmoy is Script {
         PublicInputAdapter adapter = new PublicInputAdapter(address(batchVerifier), deployer);
         console.log("PublicInputAdapter:       ", address(adapter));
 
-        // 3. Claim ZK verifier — no adapter needed (vault passes 11 inputs directly).
-        //    Deployed via vm.deployCode() to avoid naming conflicts with BatchVerifier.sol.
-        address claimVerifier = deployCode("ClaimVerifier.sol:ClaimHonkVerifier");
         console.log("ClaimHonkVerifier (claim):", claimVerifier);
 
-        // 4. Swap verifiers on the existing vault (both calls are onlyRelayer).
+        // 3. Swap verifiers on the existing vault (both calls are onlyRelayer).
         BatchVault(VAULT).setVerifier(address(adapter));
         console.log("setVerifier(adapter) done on vault:", VAULT);
 

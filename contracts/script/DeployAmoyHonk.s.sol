@@ -7,8 +7,9 @@ import "../src/mocks/MockCTF.sol";
 import "../src/BatchVerifier.sol";
 import "../src/PublicInputAdapter.sol";
 import "../src/BatchVault.sol";
-// Note: ClaimVerifier.sol not imported — naming conflict with BatchVerifier.sol.
-// Deployed via vm.deployCode() instead.
+// Note: ClaimVerifier.sol cannot be imported here — it shares top-level library names
+// with BatchVerifier.sol. Deploy ClaimHonkVerifier first via DeployClaimVerifier.s.sol,
+// then set CLAIM_VERIFIER=<address> before running this script.
 
 /// @notice Fresh deploy to Polygon Amoy with real ZK verifiers (end-to-end test).
 ///
@@ -27,10 +28,16 @@ import "../src/BatchVault.sol";
 /// Prerequisites:
 ///   - ~0.15 MATIC on Polygon Amoy (faucet: https://faucet.polygon.technology/)
 ///   - PRIVATE_KEY set in contracts/.env
+///   - CLAIM_VERIFIER env var set (run DeployClaimVerifier.s.sol first)
 ///
 /// Usage:
 ///   cd contracts
-///   FOUNDRY_PROFILE=size forge script script/DeployAmoyHonk.s.sol \
+///   # Step 1: deploy ClaimHonkVerifier
+///   FOUNDRY_PROFILE=size forge script script/DeployClaimVerifier.s.sol \
+///     --rpc-url $POLYGON_AMOY_RPC --broadcast --private-key $PRIVATE_KEY
+///
+///   # Step 2: fresh deploy (set CLAIM_VERIFIER to the address printed above)
+///   CLAIM_VERIFIER=0x... FOUNDRY_PROFILE=size forge script script/DeployAmoyHonk.s.sol \
 ///     --rpc-url $POLYGON_AMOY_RPC \
 ///     --broadcast \
 ///     --private-key $PRIVATE_KEY
@@ -45,6 +52,10 @@ contract DeployAmoyHonk is Script {
     function run() external {
         uint256 deployerKey = vm.envUint("PRIVATE_KEY");
         address deployer    = vm.addr(deployerKey);
+
+        // ClaimHonkVerifier must be pre-deployed via DeployClaimVerifier.s.sol.
+        address claimVerifier = vm.envAddress("CLAIM_VERIFIER");
+        require(claimVerifier != address(0), "CLAIM_VERIFIER env var not set");
 
         vm.startBroadcast(deployerKey);
 
@@ -65,9 +76,7 @@ contract DeployAmoyHonk is Script {
         PublicInputAdapter adapter = new PublicInputAdapter(address(batchVerifier), deployer);
         console.log("PublicInputAdapter:       ", address(adapter));
 
-        // 5. Claim ZK verifier — vault passes 11 inputs directly, no adapter needed.
-        //    Deployed via vm.deployCode() to avoid naming conflicts with BatchVerifier.sol.
-        address claimVerifier = deployCode("ClaimVerifier.sol:ClaimHonkVerifier");
+        // 5. Claim ZK verifier — pre-deployed, read from CLAIM_VERIFIER env var.
         console.log("ClaimHonkVerifier (claim):", claimVerifier);
 
         // 6. BatchVault — deployer is relayer for this test deploy

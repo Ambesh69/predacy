@@ -5,27 +5,28 @@ import "forge-std/Script.sol";
 import "../src/BatchVerifier.sol";
 import "../src/PublicInputAdapter.sol";
 import "../src/BatchVault.sol";
-// Note: ClaimVerifier.sol is NOT imported here — it shares top-level library names with
-// BatchVerifier.sol (both are generated HonkVerifier files). Importing both in the same
-// Solidity file causes "identifier already declared" errors. Instead we use vm.deployCode()
-// to deploy ClaimHonkVerifier by artifact path, which bypasses the naming conflict.
+// Note: ClaimVerifier.sol cannot be imported here — it shares top-level library names with
+// BatchVerifier.sol (ZKTranscriptLib, RelationsLib, CommitmentSchemeLib, etc.).
+// Deploy ClaimHonkVerifier first via script/DeployClaimVerifier.s.sol, then set
+// CLAIM_VERIFIER=<address> before running this script.
 
 /// @notice Deploy Predacy to Polygon mainnet.
 ///
 /// Prerequisites:
 ///   - Relayer wallet must have ~0.2 MATIC for deployment gas
 ///     Contracts deployed: ZKTranscriptLib, RelationsLib, CommitmentSchemeLib,
-///     HonkVerifier, PublicInputAdapter, ClaimHonkVerifier, BatchVault (7 total)
+///     HonkVerifier, PublicInputAdapter, BatchVault (6 total — ClaimHonkVerifier pre-deployed)
 ///   - MARKET_ID must be a valid Polymarket condition ID on Polygon
+///   - CLAIM_VERIFIER env var set (run DeployClaimVerifier.s.sol first)
 ///   - Polymarket CLOB API keys must be set in relayer .env
 ///
 /// Deployment order:
-///   1. ZKTranscriptLib  — Fiat-Shamir transcript generation (auto-linked by Forge)
-///   2. RelationsLib     — UltraHonk relation accumulation (auto-linked by Forge)
-///   3. CommitmentSchemeLib — Gemini/Shplemini helpers (auto-linked by Forge)
-///   4. HonkVerifier     — Batch clearing ZK verifier (37 public inputs)
-///   5. PublicInputAdapter — Bridges BatchVault (6 inputs) → HonkVerifier (37 inputs)
-///   6. ClaimHonkVerifier — Claim ZK verifier (11 public inputs, no adapter needed)
+///   1. DeployClaimVerifier.s.sol — ClaimHonkVerifier (run separately, set CLAIM_VERIFIER)
+///   2. ZKTranscriptLib  — Fiat-Shamir transcript generation (auto-linked by Forge)
+///   3. RelationsLib     — UltraHonk relation accumulation (auto-linked by Forge)
+///   4. CommitmentSchemeLib — Gemini/Shplemini helpers (auto-linked by Forge)
+///   5. HonkVerifier     — Batch clearing ZK verifier (37 public inputs)
+///   6. PublicInputAdapter — Bridges BatchVault (6 inputs) → HonkVerifier (37 inputs)
 ///   7. BatchVault       — Core Predacy contract
 ///   All contracts < 24,576-byte EIP-170 limit.
 ///
@@ -46,7 +47,13 @@ import "../src/BatchVault.sol";
 ///   cd contracts && forge test --match-contract HonkVerifierTest --ffi -vv
 ///
 /// Usage:
-///   FOUNDRY_PROFILE=size forge script script/DeployMainnet.s.sol \
+///   cd contracts
+///   # Step 1: deploy ClaimHonkVerifier (once per circuit version)
+///   FOUNDRY_PROFILE=size forge script script/DeployClaimVerifier.s.sol \
+///     --rpc-url $POLYGON_MAINNET_RPC --broadcast --private-key $PRIVATE_KEY
+///
+///   # Step 2: full deploy
+///   CLAIM_VERIFIER=0x... FOUNDRY_PROFILE=size forge script script/DeployMainnet.s.sol \
 ///     --rpc-url $POLYGON_MAINNET_RPC \
 ///     --broadcast \
 ///     --verify \
@@ -68,6 +75,10 @@ contract DeployMainnet is Script {
         bytes32 marketId = vm.envBytes32("MARKET_ID");
         require(marketId != bytes32(0), "DeployMainnet: MARKET_ID env var not set");
 
+        // ClaimHonkVerifier must be pre-deployed via DeployClaimVerifier.s.sol.
+        address claimVerifier = vm.envAddress("CLAIM_VERIFIER");
+        require(claimVerifier != address(0), "DeployMainnet: CLAIM_VERIFIER env var not set");
+
         vm.startBroadcast(deployerKey);
 
         // 1. Batch clearing ZK verifier
@@ -81,9 +92,7 @@ contract DeployMainnet is Script {
         PublicInputAdapter adapter = new PublicInputAdapter(address(batchVerifier), deployer);
         console.log("PublicInputAdapter:       ", address(adapter));
 
-        // 3. Claim ZK verifier — BatchVault passes 11 inputs directly, no adapter needed.
-        //    Deployed via vm.deployCode() to avoid naming conflicts with BatchVerifier.sol.
-        address claimVerifier = deployCode("ClaimVerifier.sol:ClaimHonkVerifier");
+        // 3. Claim ZK verifier — pre-deployed, read from CLAIM_VERIFIER env var.
         console.log("ClaimHonkVerifier (claim):", claimVerifier);
 
         // 4. BatchVault — points to real USDC + Polymarket CTF
