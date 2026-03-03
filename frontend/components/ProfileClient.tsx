@@ -309,6 +309,165 @@ function ActivityRow({ order }: { order: OrderEntry }) {
   );
 }
 
+// ── Pending order row (Active tab) ────────────────────────────────────────────
+
+function PendingRow({ order }: { order: OrderEntry }) {
+  return (
+    <div className="border-b border-border last:border-b-0 p-4 flex items-center gap-4">
+      <div className="flex-1 min-w-0 space-y-1">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className={clsx(
+            "text-[9px] tracking-widest uppercase px-1.5 py-0.5 border font-mono",
+            order.isBuy
+              ? "border-accent/30 text-accent bg-accent/5"
+              : "border-danger/30 text-danger bg-danger/5",
+          )}>
+            {order.isBuy ? "BUY YES" : "BUY NO"}
+          </span>
+          <span className={clsx(
+            "text-[9px] tracking-widest uppercase px-1.5 py-0.5 border",
+            order.batchStatus === BatchStatus.SETTLING
+              ? "text-blue-400/60 border-blue-400/20 animate-pulse"
+              : "text-muted border-border",
+          )}>
+            {order.batchStatus === BatchStatus.SETTLING ? "SETTLING" : "PENDING"}
+          </span>
+          <span className="text-[9px] text-muted-dim">{timeAgo(order.timestamp)}</span>
+        </div>
+        <p className="text-[12px] text-text leading-snug line-clamp-1">
+          {order.marketQuestion ?? `Batch #${order.batchId}`}
+        </p>
+      </div>
+      <div className="text-right flex-shrink-0">
+        <p className="text-[12px] font-medium text-text tabular-nums">{fUsdc(order.rawAmount)}</p>
+        <p className="text-[9px] text-muted-dim mt-0.5">sealed bid</p>
+      </div>
+    </div>
+  );
+}
+
+// ── Closed position row (Closed tab, Polymarket-style) ─────────────────────────
+
+function ClosedPositionRow({
+  order,
+  onClaim,
+  isClaiming,
+  claimError,
+}: {
+  order:      OrderEntry;
+  onClaim:    (order: OrderEntry) => Promise<void>;
+  isClaiming: boolean;
+  claimError?: string;
+}) {
+  const canClaim = !order.claimed && (order.filledAmount ?? 0n) > 0n;
+
+  const avgCents = order.clearingPrice && order.clearingPrice > 0n
+    ? (Number(order.clearingPrice) / 1e4).toFixed(1) + "¢"
+    : "—";
+
+  const filledUsdc = order.filledAmount != null
+    ? Number(order.filledAmount) / 1e6
+    : Number(order.rawAmount) / 1e6;
+
+  // For NO positions, current value uses the NO price (1 − yes)
+  const outcomePrice = order.currentYesPrice != null
+    ? (order.isBuy ? order.currentYesPrice : 1 - order.currentYesPrice)
+    : null;
+
+  const currentValue = order.shares != null && outcomePrice != null
+    ? order.shares * outcomePrice
+    : null;
+
+  const pnl    = currentValue != null ? currentValue - filledUsdc : null;
+  const pnlPct = pnl != null && filledUsdc > 0 ? (pnl / filledUsdc) * 100 : null;
+
+  const currCents = outcomePrice != null
+    ? (outcomePrice * 100).toFixed(1) + "¢"
+    : "—";
+
+  return (
+    <div className="border-b border-border last:border-b-0 p-4 space-y-3">
+      <div className="flex items-start gap-4">
+        {/* Left: outcome badge + market question + shares */}
+        <div className="flex-1 min-w-0 space-y-1.5">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className={clsx(
+              "text-[9px] tracking-widest uppercase px-1.5 py-0.5 border font-mono",
+              order.isBuy
+                ? "border-accent/30 text-accent bg-accent/5"
+                : "border-danger/30 text-danger bg-danger/5",
+            )}>
+              {order.isBuy ? "YES" : "NO"} {avgCents}
+            </span>
+            {order.claimed && (
+              <span className="text-[9px] tracking-widest uppercase text-accent/50 border border-accent/20 px-1.5 py-0.5">
+                CLAIMED ✓
+              </span>
+            )}
+          </div>
+          <p className="text-[12px] text-text leading-snug line-clamp-2">
+            {order.marketQuestion
+              ?? (order.marketId ? shortHash(order.marketId, 14, 8) : `Batch #${order.batchId}`)}
+          </p>
+          {order.shares != null && order.shares > 0 && (
+            <p className="text-[10px] text-muted-dim">
+              {order.shares.toFixed(2)} shares
+            </p>
+          )}
+        </div>
+
+        {/* Right: TRADED | CURRENT | VALUE + P&L */}
+        <div className="flex items-start gap-5 flex-shrink-0 text-right">
+          <div className="min-w-[60px]">
+            <p className="text-[9px] text-muted-dim tracking-widest uppercase mb-1">TRADED</p>
+            <p className="text-[11px] text-text tabular-nums font-mono">${filledUsdc.toFixed(2)}</p>
+          </div>
+          <div className="min-w-[54px]">
+            <p className="text-[9px] text-muted-dim tracking-widest uppercase mb-1">CURRENT</p>
+            <p className="text-[11px] text-text tabular-nums font-mono">{currCents}</p>
+          </div>
+          <div className="min-w-[76px]">
+            <p className="text-[9px] text-muted-dim tracking-widest uppercase mb-1">VALUE</p>
+            {currentValue != null ? (
+              <div>
+                <p className="text-[11px] text-text tabular-nums font-mono">${currentValue.toFixed(2)}</p>
+                {pnl != null && (
+                  <p className={clsx("text-[9px] tabular-nums", pnl >= 0 ? "text-accent" : "text-danger")}>
+                    {pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}
+                    {pnlPct != null ? ` (${pnlPct.toFixed(0)}%)` : ""}
+                  </p>
+                )}
+              </div>
+            ) : (
+              <p className="text-[11px] text-muted-dim">—</p>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {canClaim && (
+        <div className="space-y-1">
+          <button
+            onClick={() => onClaim(order)}
+            disabled={isClaiming}
+            className="w-full py-1.5 border border-accent text-accent text-[10px] tracking-widest uppercase hover:bg-accent/5 transition-colors disabled:opacity-40"
+          >
+            {isClaiming ? (
+              <span className="flex items-center justify-center gap-1.5">
+                <span className="w-2.5 h-2.5 border border-current border-t-transparent rounded-full animate-spin" />
+                CLAIMING… (~20s)
+              </span>
+            ) : "CLAIM POSITION"}
+          </button>
+          {claimError && !isClaiming && (
+            <p className="text-danger text-[10px] text-center">{claimError}</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Position table row (Polymarket-style, full-width) ─────────────────────────
 
 function PositionRow({
@@ -860,15 +1019,13 @@ export default function ProfileClient() {
     ? `${walletAddress.slice(0, 6)}…${walletAddress.slice(-4)}`
     : "";
 
-  // Active: OPEN/SETTLING orders + SETTLED unclaimed with filledAmount > 0
+  // Active: only truly pending orders (not yet settled)
   const activeOrders = orders.filter((o) =>
-    o.batchStatus === BatchStatus.OPEN ||
-    o.batchStatus === BatchStatus.SETTLING ||
-    (o.batchStatus === BatchStatus.SETTLED && !o.claimed && (o.filledAmount ?? 0n) > 0n)
+    o.batchStatus === BatchStatus.OPEN || o.batchStatus === BatchStatus.SETTLING
   );
-  // Closed: SETTLED + claimed
+  // Closed: all settled orders (whether claimed or not)
   const closedOrders = orders.filter((o) =>
-    o.batchStatus === BatchStatus.SETTLED && o.claimed
+    o.batchStatus === BatchStatus.SETTLED
   );
 
   // ── Not ready ─────────────────────────────────────────────────────────────
@@ -1202,19 +1359,7 @@ export default function ProfileClient() {
                 })}
               </div>
 
-              {/* Column headers (desktop) */}
-              <div className="hidden md:flex items-center gap-4 px-4 py-2 border-b border-border/40">
-                <div className="flex-1">
-                  <span className="text-[9px] text-muted-dim tracking-widest uppercase">MARKET</span>
-                </div>
-                <div className="flex items-center gap-5 flex-shrink-0 text-right">
-                  <span className="min-w-[44px] text-[9px] text-muted-dim tracking-widest uppercase text-right">AVG</span>
-                  <span className="min-w-[54px] text-[9px] text-muted-dim tracking-widest uppercase text-right">CURRENT</span>
-                  <span className="min-w-[68px] text-[9px] text-muted-dim tracking-widest uppercase text-right">VALUE</span>
-                </div>
-              </div>
-
-              {/* Active positions */}
+              {/* ── ACTIVE SUB-TAB: pending orders only ────────────────── */}
               {posTab === "active" && (
                 loading ? (
                   <div className="border border-border divide-y divide-border">
@@ -1230,8 +1375,8 @@ export default function ProfileClient() {
                     <div className="w-8 h-8 border border-border flex items-center justify-center mx-auto">
                       <div className="w-2 h-2 bg-muted/30" />
                     </div>
-                    <p className="text-muted text-[11px] tracking-widest uppercase">No active positions</p>
-                    <p className="text-muted-dim text-[10px]">Settled unclaimed positions will appear here.</p>
+                    <p className="text-muted text-[11px] tracking-widest uppercase">No open orders</p>
+                    <p className="text-muted-dim text-[10px]">Orders in open or settling batches appear here.</p>
                     <Link href="/" className="inline-block mt-1 text-[10px] text-accent/70 hover:text-accent border border-accent/20 hover:border-accent/40 px-3 py-1">
                       Browse markets →
                     </Link>
@@ -1239,19 +1384,13 @@ export default function ProfileClient() {
                 ) : (
                   <div className="border border-border divide-y divide-border">
                     {activeOrders.map((o) => (
-                      <PositionRow
-                        key={o.commitment}
-                        order={o}
-                        onClaim={handleClaim}
-                        isClaiming={claimingKey === o.commitment.toLowerCase()}
-                        claimError={claimErrors[o.commitment.toLowerCase()]}
-                      />
+                      <PendingRow key={o.commitment} order={o} />
                     ))}
                   </div>
                 )
               )}
 
-              {/* Closed positions */}
+              {/* ── CLOSED SUB-TAB: all settled positions ──────────────── */}
               {posTab === "closed" && (
                 loading ? (
                   <div className="border border-border divide-y divide-border">
@@ -1260,19 +1399,33 @@ export default function ProfileClient() {
                 ) : closedOrders.length === 0 ? (
                   <div className="border border-border p-10 text-center">
                     <p className="text-muted text-[11px] tracking-widest uppercase">No closed positions yet</p>
-                    <p className="text-muted-dim text-[10px] mt-2">Claimed positions will appear here.</p>
+                    <p className="text-muted-dim text-[10px] mt-2">Settled positions will appear here.</p>
                   </div>
                 ) : (
-                  <div className="border border-border divide-y divide-border">
-                    {closedOrders.map((o) => (
-                      <PositionRow
-                        key={o.commitment}
-                        order={o}
-                        onClaim={handleClaim}
-                        isClaiming={false}
-                      />
-                    ))}
-                  </div>
+                  <>
+                    {/* Column headers */}
+                    <div className="hidden md:flex items-center gap-4 px-4 py-2 border-b border-border/40">
+                      <div className="flex-1">
+                        <span className="text-[9px] text-muted-dim tracking-widest uppercase">MARKET</span>
+                      </div>
+                      <div className="flex items-center gap-5 flex-shrink-0 text-right">
+                        <span className="min-w-[60px] text-[9px] text-muted-dim tracking-widest uppercase text-right">TRADED</span>
+                        <span className="min-w-[54px] text-[9px] text-muted-dim tracking-widest uppercase text-right">CURRENT</span>
+                        <span className="min-w-[76px] text-[9px] text-muted-dim tracking-widest uppercase text-right">VALUE</span>
+                      </div>
+                    </div>
+                    <div className="border border-border divide-y divide-border">
+                      {closedOrders.map((o) => (
+                        <ClosedPositionRow
+                          key={o.commitment}
+                          order={o}
+                          onClaim={handleClaim}
+                          isClaiming={claimingKey === o.commitment.toLowerCase()}
+                          claimError={claimErrors[o.commitment.toLowerCase()]}
+                        />
+                      ))}
+                    </div>
+                  </>
                 )
               )}
             </div>
