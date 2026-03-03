@@ -475,12 +475,40 @@ export default function ProfileClient() {
       }) as bigint;
       setUsdcBalance(balance);
 
-      // 2. Load orders from localStorage (newest first)
+      // 2. Load orders from localStorage + merge with relayer remote history
+      //    so the same wallet shows all orders on any device.
+      const storageKey = `predacy:orders:${walletAddress.toLowerCase()}`;
       let storedOrders: StoredOrder[] = [];
       try {
-        const key = `predacy:orders:${walletAddress.toLowerCase()}`;
-        storedOrders = JSON.parse(localStorage.getItem(key) ?? "[]");
+        storedOrders = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
       } catch { /* ignore quota / parse errors */ }
+
+      // 2a. Fetch remote history from relayer (non-blocking on failure)
+      try {
+        const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
+        if (relayerUrl) {
+          const resp = await fetch(`${relayerUrl}/history/${walletAddress.toLowerCase()}`);
+          if (resp.ok) {
+            const { orders: remoteOrders } = await resp.json() as { orders: StoredOrder[] };
+            if (Array.isArray(remoteOrders) && remoteOrders.length > 0) {
+              // Build a set of known commitments from localStorage
+              const knownCommitments = new Set(storedOrders.map((o) => o.commitment.toLowerCase()));
+              // Merge: add remote orders not present locally (local takes precedence for claimed/salt/ephemeralKey)
+              const newOrders = remoteOrders.filter(
+                (o) => o.commitment && !knownCommitments.has(o.commitment.toLowerCase())
+              );
+              if (newOrders.length > 0) {
+                // Prepend remote orders sorted by timestamp desc, then re-sort the whole array
+                storedOrders = [...storedOrders, ...newOrders]
+                  .sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0))
+                  .slice(0, 200);
+                // Persist merged set so future page loads are fast
+                try { localStorage.setItem(storageKey, JSON.stringify(storedOrders)); } catch { /* ignore */ }
+              }
+            }
+          }
+        }
+      } catch { /* remote fetch failure is non-fatal — show local only */ }
 
       if (storedOrders.length === 0) {
         setOrders([]);
@@ -488,9 +516,8 @@ export default function ProfileClient() {
         return;
       }
 
+      // storedOrders is newest-first (EventPageClient uses unshift; merge sorts desc)
       const entries: OrderEntry[] = storedOrders
-        .slice()
-        .reverse()  // newest first
         .map((o) => ({
           commitment:     o.commitment as `0x${string}`,
           salt:           o.salt,

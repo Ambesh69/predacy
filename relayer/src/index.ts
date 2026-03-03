@@ -289,6 +289,24 @@ const server = createServer((req, res) => {
         // Return the ACTUAL on-chain batchId (not the one from the request body,
         // which may be stale/0 when the client submits before its first poll).
         send(200, { ok: true, batchId: actualBatchId.toString(), orders });
+
+        // ── Wallet history: store compact summary for cross-device access ──────
+        // Keyed by walletAddress (real connected wallet) + commitment hash.
+        // Separate from per-batch order store; 90-day TTL; non-blocking.
+        const walletAddr = (data.walletAddress as string | undefined)?.toLowerCase();
+        if (walletAddr && /^0x[0-9a-f]{40}$/.test(walletAddr) && data.commitment) {
+          saveWalletHistoryEntry(walletAddr, {
+            commitment:     (data.commitment as string).toLowerCase(),
+            batchId:        actualBatchId.toString(),
+            isBuy:          Boolean(isBuy),
+            amount:         String(amount),
+            limitPrice:     String(limitPrice),
+            salt:           String(salt),
+            marketId:       String(marketId),
+            marketQuestion: (data.marketQuestion as string | null) ?? null,
+            timestamp:      Date.now(),
+          }).catch(() => {});
+        }
       } catch (e: any) {
         send(400, { error: e.message });
       }
@@ -467,6 +485,33 @@ const server = createServer((req, res) => {
     return;
   }
 
+  // GET /history/:walletAddress
+  // Returns all stored order summaries for a wallet address (cross-device history sync).
+  // No auth required — caller must already know their own wallet address.
+  if (req.method === "GET" && req.url?.startsWith("/history/")) {
+    const walletAddr = req.url.slice(9).toLowerCase(); // strip leading /history/
+    if (!/^0x[0-9a-f]{40}$/.test(walletAddr)) {
+      send(400, { error: "Invalid wallet address" });
+      return;
+    }
+    (async () => {
+      try {
+        const r = await getHistoryRedis();
+        if (!r) { send(200, { orders: [] }); return; }
+        const raw = await r.hgetall(`predacy:wallet-history:${walletAddr}`) as Record<string, string> | null;
+        const orders = raw
+          ? Object.values(raw).map((v) => JSON.parse(v) as Record<string, unknown>)
+          : [];
+        // Newest first
+        orders.sort((a, b) => ((b.timestamp as number) ?? 0) - ((a.timestamp as number) ?? 0));
+        send(200, { orders });
+      } catch (e: any) {
+        send(500, { error: e.message });
+      }
+    })();
+    return;
+  }
+
   send(404, { error: "Not found" });
 });
 
@@ -475,6 +520,7 @@ server.listen(PORT, () => {
   console.log(`[Relayer]   GET  /health                               — liveness check`);
   console.log(`[Relayer]   POST /warm                                 — pre-open a batch for a market (fire-and-forget)`);
   console.log(`[Relayer]   POST /order                                — submit off-chain order details (include marketId)`);
+  console.log(`[Relayer]   GET  /history/:walletAddress              — cross-device order history (indexed by real wallet)`);
   console.log(`[Relayer]   POST /claim-proof                          — generate ZK claim proof and submit claimWithProof()`);
   console.log(`[Relayer]   POST /admin/force-advance?marketId=0x...   — skip stuck SETTLING batch`);
 });
@@ -532,6 +578,43 @@ async function initFailedBatchesStore(): Promise<void> {
     console.warn("[Relayer] Could not load failed-batches from Redis (non-fatal):", (err as any)?.message);
     _failRedis = null;
   }
+}
+
+// ── Wallet history store ──────────────────────────────────────────────────────
+// Separate Redis connection for wallet-indexed order summaries.
+// Keyed as `predacy:wallet-history:{walletAddress}` (hash of commitment → JSON).
+// 90-day TTL so users can access history from any device long-term.
+
+let _historyRedis: any = null;
+
+async function getHistoryRedis(): Promise<any | null> {
+  if (!baseConfig.redisUrl) return null;
+  if (_historyRedis) return _historyRedis;
+  const { default: Redis } = await import("ioredis");
+  _historyRedis = new Redis(baseConfig.redisUrl, { maxRetriesPerRequest: 3, lazyConnect: true });
+  _historyRedis.on("error", (e: Error) => console.error("[HistoryRedis] Error:", e.message));
+  await _historyRedis.connect();
+  return _historyRedis;
+}
+
+interface WalletHistoryEntry {
+  commitment:     string;
+  batchId:        string;
+  isBuy:          boolean;
+  amount:         string;
+  limitPrice:     string;
+  salt:           string;
+  marketId:       string;
+  marketQuestion: string | null;
+  timestamp:      number;
+}
+
+async function saveWalletHistoryEntry(walletAddr: string, entry: WalletHistoryEntry): Promise<void> {
+  const r = await getHistoryRedis();
+  if (!r) return;
+  const hKey = `predacy:wallet-history:${walletAddr}`;
+  await r.hset(hKey, entry.commitment, JSON.stringify(entry));
+  await r.expire(hKey, 90 * 24 * 3600); // 90-day TTL
 }
 
 async function markPermanentlyFailed(batchId: bigint): Promise<void> {
