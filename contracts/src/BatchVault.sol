@@ -725,13 +725,13 @@ contract BatchVault {
     }
 
     /// @dev Standard binary Merkle tree — used by ZK claim proofs.
-    ///      Pads to next power of 2 with bytes32(0).
+    ///      Always builds a 512-leaf tree (2^DEPTH, DEPTH=9 in claim circuit).
+    ///      Unfilled slots are bytes32(0). MAX_BATCH_ORDERS=500 < 512.
     ///      Internal nodes: keccak256(abi.encode(left, right)).
     function _buildMerkleRoot(uint256 batchId, uint256 count) internal view returns (bytes32) {
         if (count == 0) return bytes32(0);
 
-        uint256 n = 1;
-        while (n < count) n <<= 1;
+        uint256 n = 512; // must match DEPTH=9 in circuits/claim/src/main.nr
 
         bytes32[] memory nodes = new bytes32[](2 * n);
         for (uint256 i = 0; i < count; i++) {

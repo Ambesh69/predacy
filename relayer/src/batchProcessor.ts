@@ -738,8 +738,9 @@ export class BatchProcessor {
   /** Build a standard binary Merkle tree over `leaves`. Returns all nodes (1-indexed). */
   static buildMerkleTree(leaves: `0x${string}`[]): `0x${string}`[] {
     if (leaves.length === 0) return [ZERO_BYTES32];
-    let n = 1;
-    while (n < leaves.length) n <<= 1;
+    // Always build a 512-leaf tree to match DEPTH=9 in circuits/claim/src/main.nr.
+    // MAX_BATCH_ORDERS=500 < 512, so this is always sufficient.
+    const n = 512;
     // nodes[0] unused, nodes[1] = root, nodes[n..2n-1] = leaves
     const nodes: `0x${string}`[] = new Array(2 * n).fill(ZERO_BYTES32);
     for (let i = 0; i < leaves.length; i++) {
