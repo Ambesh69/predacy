@@ -1150,13 +1150,14 @@ export default function ProfileClient() {
 
   // Current value of unclaimed settled positions (shares × current outcome price).
   // Claimed positions are excluded — those shares are already redeemed into the USDC balance.
+  // Current market value of all settled positions (claimed or not) at live outcome price.
+  // Claimed positions are included — the user still wants to see what their shares are worth.
   const positionsValue = settledOrders.reduce((sum, o) => {
-    if (o.claimed) return sum; // already redeemed — value sits in USDC balance instead
     if (!o.shares || o.currentYesPrice == null) return sum;
     const outcomePrice = o.isBuy ? o.currentYesPrice : 1 - o.currentYesPrice;
     return sum + o.shares * outcomePrice;
   }, 0);
-  const hasUnclaimedSettled = settledOrders.some((o) => !o.claimed && o.shares != null);
+  const hasPositionData = settledOrders.some((o) => o.shares != null && o.currentYesPrice != null);
 
   // Biggest single-position win (max positive P&L across all settled positions)
   const biggestWin = pnlPositions.reduce((best, o) => {
@@ -1324,7 +1325,7 @@ export default function ProfileClient() {
                 <p className="text-base font-black text-text leading-tight" style={{ fontFamily: "var(--font-display)" }}>
                   {enriching
                     ? "…"
-                    : hasUnclaimedSettled
+                    : hasPositionData
                       ? `$${positionsValue.toFixed(2)}`
                       : "—"}
                 </p>
