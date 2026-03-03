@@ -30,7 +30,14 @@ function formatUSD(usd: number): string {
 }
 
 function buildRows(raw: { price: number; size: number }[]) {
-  return raw.map((r) => ({ ...r, usd: r.size * r.price }));
+  // raw is sorted best-price-first (highest bid / lowest ask)
+  // cumUsd accumulates from best price outward (spread → edges)
+  let cum = 0;
+  return raw.map((r) => {
+    const usd = r.size * r.price;
+    cum += usd;
+    return { ...r, usd, cumUsd: cum };
+  });
 }
 
 export default function OrderbookPanel({ market }: { market: Market | null }) {
@@ -146,8 +153,9 @@ export default function OrderbookPanel({ market }: { market: Market | null }) {
   const bids = buildRows(rawBids); // best (highest) bid first
   const asks = buildRows(rawAsks); // best (lowest) ask first
 
-  const maxBidUsd = Math.max(...bids.map((b) => b.usd), 1);
-  const maxAskUsd = Math.max(...asks.map((a) => a.usd), 1);
+  // Max cumulative is always the last element (worst price = most accumulated depth)
+  const maxBidCumUsd = bids[bids.length - 1]?.cumUsd ?? 1;
+  const maxAskCumUsd = asks[asks.length - 1]?.cumUsd ?? 1;
 
   // Asks displayed worst→best so best ask is at the bottom (adjacent to spread)
   // asksRef panel is scrolled to bottom on load so best ask is immediately visible
@@ -158,9 +166,9 @@ export default function OrderbookPanel({ market }: { market: Market | null }) {
   const mid     = (bestBid + bestAsk) / 2;
   const spread  = bestAsk - bestBid;
 
-  // Shared row renderer
+  // Shared row renderer — depth bar + TOTAL both use cumulative USD
   const AskRow = ({ ask, i }: { ask: ReturnType<typeof buildRows>[number]; i: number }) => {
-    const pct = Math.min((ask.usd / maxAskUsd) * 100, 100);
+    const pct = Math.min((ask.cumUsd / maxAskCumUsd) * 100, 100);
     return (
       <div key={i} className="relative grid grid-cols-[1fr_auto_auto] items-center border-b border-border/10 group">
         <div className="absolute inset-0 left-auto bg-danger/[0.07]" style={{ width: `${pct}%` }} />
@@ -170,15 +178,15 @@ export default function OrderbookPanel({ market }: { market: Market | null }) {
         <span className="relative pr-4 py-[5px] text-[10px] text-muted tabular-nums text-right">
           {formatShares(ask.size)}
         </span>
-        <span className="relative pr-3 py-[5px] text-[10px] text-muted-dim tabular-nums text-right w-16">
-          {formatUSD(ask.usd)}
+        <span className="relative pr-3 py-[5px] text-[10px] text-muted-dim tabular-nums text-right w-20">
+          {formatUSD(ask.cumUsd)}
         </span>
       </div>
     );
   };
 
   const BidRow = ({ bid, i }: { bid: ReturnType<typeof buildRows>[number]; i: number }) => {
-    const pct = Math.min((bid.usd / maxBidUsd) * 100, 100);
+    const pct = Math.min((bid.cumUsd / maxBidCumUsd) * 100, 100);
     return (
       <div key={i} className="relative grid grid-cols-[1fr_auto_auto] items-center border-b border-border/10 group">
         <div className="absolute inset-0 left-auto bg-accent/[0.07]" style={{ width: `${pct}%` }} />
@@ -188,8 +196,8 @@ export default function OrderbookPanel({ market }: { market: Market | null }) {
         <span className="relative pr-4 py-[5px] text-[10px] text-muted tabular-nums text-right">
           {formatShares(bid.size)}
         </span>
-        <span className="relative pr-3 py-[5px] text-[10px] text-muted-dim tabular-nums text-right w-16">
-          {formatUSD(bid.usd)}
+        <span className="relative pr-3 py-[5px] text-[10px] text-muted-dim tabular-nums text-right w-20">
+          {formatUSD(bid.cumUsd)}
         </span>
       </div>
     );
@@ -226,7 +234,7 @@ export default function OrderbookPanel({ market }: { market: Market | null }) {
       <div className="grid grid-cols-[1fr_auto_auto] px-3 py-1.5 border-b border-border/30 flex-shrink-0">
         <span className="text-[9px] text-muted-dim tracking-widest uppercase">Price</span>
         <span className="text-[9px] text-muted-dim tracking-widest uppercase text-right pr-4">Shares</span>
-        <span className="text-[9px] text-muted-dim tracking-widest uppercase text-right w-16">Total</span>
+        <span className="text-[9px] text-muted-dim tracking-widest uppercase text-right w-20">Total</span>
       </div>
 
       {/* ── Two-panel layout: asks top, spread center, bids bottom ────────── */}
