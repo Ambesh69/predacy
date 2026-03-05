@@ -27,15 +27,15 @@ export default function MarketCard({ market, isLive = false }: MarketCardProps) 
   const volume   = market.volumeNum ?? parseFloat(market.volume ?? "0");
 
   const probColor =
-    yesProb > 60 ? "#2CE8C6" :
-    yesProb < 40 ? "#FF5F6D" :
-    "#4EA3FF";
+    yesProb > 60 ? "#00FFB3" :
+    yesProb < 40 ? "#FF3355" :
+    "#4D83FF";
 
   return (
     <Link href={`/market/${market.conditionId}`} className="block">
       <div className={clsx(
         "market-card border bg-surface p-5 cursor-crosshair flex flex-col gap-3",
-        isLive ? "border-accent/60 shadow-[0_0_0_1px_rgba(44,232,198,0.2),0_12px_28px_rgba(8,20,30,0.35)]" : "border-border",
+        isLive ? "border-accent/40" : "border-border",
       )}>
 
         {/* Row 1: badges + date */}
@@ -47,7 +47,7 @@ export default function MarketCard({ market, isLive = false }: MarketCardProps) 
             </span>
           )}
           {market.category && (
-            <span className="text-[10px] text-muted tracking-widest uppercase border border-border-bright bg-surface/70 px-2 py-0.5">
+            <span className="text-[10px] text-muted tracking-widest uppercase border border-border px-2 py-0.5">
               {market.category}
             </span>
           )}
@@ -77,11 +77,11 @@ export default function MarketCard({ market, isLive = false }: MarketCardProps) 
           {/* YES / NO price tags */}
           <div className="flex items-center gap-1.5">
             <span className="text-[11px] px-2 py-1 border font-mono tabular-nums"
-              style={{ borderColor: "#2CE8C655", color: "#52F0D3", background: "#2CE8C612" }}>
+              style={{ borderColor: "#00FFB340", color: "#00FFB3", background: "#00FFB308" }}>
               YES {Math.round(yesPrice * 100)}¢
             </span>
             <span className="text-[11px] px-2 py-1 border font-mono tabular-nums"
-              style={{ borderColor: "#FF5F6D55", color: "#FF7683", background: "#FF5F6D12" }}>
+              style={{ borderColor: "#FF335540", color: "#FF3355", background: "#FF335508" }}>
               NO {Math.round(noPrice * 100)}¢
             </span>
           </div>
