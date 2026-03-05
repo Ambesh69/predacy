@@ -368,7 +368,7 @@ export default function PositionsPanel({
     const run = async () => {
       try {
         const storageKey  = `predacy:orders:${walletAddress.toLowerCase()}`;
-        const stored: Array<{ commitment: string; batchId: string; isSell?: boolean }> =
+        const stored: Array<{ commitment: string; batchId: string; isBuy?: boolean; isSell?: boolean }> =
           JSON.parse(localStorage.getItem(storageKey) ?? "[]");
         const myOrder = stored.find((o) => o.batchId === currentBatchId.toString());
         if (!myOrder) return;
@@ -380,7 +380,9 @@ export default function PositionsPanel({
           functionName: "getPosition",
           args:         [currentBatchId, myOrder.commitment as `0x${string}`],
         }) as { filledAmount: bigint; refundAmount: bigint; isBuy: boolean; claimed: boolean };
-        if (!cancelled) setCurrentPosition({ ...pos, isSell: myOrder.isSell === true });
+        // Use localStorage isBuy (reliable) rather than contract isBuy to detect sells
+        const isSellOrder = myOrder.isSell === true || myOrder.isBuy === false;
+        if (!cancelled) setCurrentPosition({ ...pos, isSell: isSellOrder });
       } catch { /* RPC hiccup */ }
     };
     run();
@@ -450,7 +452,7 @@ export default function PositionsPanel({
                 batchStatus:      bs,
                 clearingPrice:    batchRaw.clearingPrice ?? 0n,
                 marketQuestion:   order.marketQuestion,
-                isSell:           order.isSell === true,
+                isSell:           order.isSell === true || !order.isBuy,
                 position: { filledAmount: 0n, refundAmount: 0n, isBuy: order.isBuy, claimed: false },
                 shares:           0,
                 settling:         bs === BatchStatus.SETTLING,
@@ -509,7 +511,7 @@ export default function PositionsPanel({
             batchStatus:    batchRaw.status as BatchStatus,
             clearingPrice,
             marketQuestion: order.marketQuestion,
-            isSell:         order.isSell === true,
+            isSell:         order.isSell === true || !order.isBuy,
             position:       { ...posRaw, claimed },
             shares,
           });
@@ -579,9 +581,9 @@ export default function PositionsPanel({
     currentPosition !== null &&
     (currentPosition.filledAmount > 0n || currentPosition.refundAmount > 0n);
 
-  // A current-batch sell (isBuy:false) should appear in Closed, not Active.
-  const currentIsSell = currentPositionVisible && currentPosition != null
-    && (currentPosition.isSell === true || !currentPosition.isBuy);
+  // A current-batch sell should appear in Closed, not Active.
+  // isSell is set reliably from localStorage (order.isSell || !order.isBuy) in the useEffect above.
+  const currentIsSell = currentPositionVisible && currentPosition?.isSell === true;
   const currentPositionInActive = currentPositionVisible && !currentIsSell;
   const currentPositionInClosed = currentPositionVisible && currentIsSell;
 
@@ -592,19 +594,17 @@ export default function PositionsPanel({
   const currentForActivity = hasCurrentOrder ? currentBatchCommitments[0] : null;
 
   // Active = filled YES buy orders (claimed or unclaimed — user still holds YES tokens).
-  // Guard on position.isBuy to catch legacy sell entries that predate the isSell flag.
+  // hp.isSell is derived from order.isSell||!order.isBuy so it correctly catches legacy sells.
   const activePositions = historicalPositions.filter(
-    (hp) => hp.batchStatus === BatchStatus.SETTLED && !hp.unfilled && !hp.settling
-            && !hp.isSell && hp.position.isBuy
+    (hp) => hp.batchStatus === BatchStatus.SETTLED && !hp.unfilled && !hp.settling && !hp.isSell
   );
   // Pending = still being settled or not filled at clearing price
   const pendingPositions = historicalPositions.filter(
     (hp) => hp.settling || hp.unfilled
   );
-  // Closed = settled sell orders — covers both isSell:true and legacy isBuy:false entries.
+  // Closed = settled sell orders (isSell is now reliably set for all sell entries).
   const closedPositions = historicalPositions.filter(
-    (hp) => hp.batchStatus === BatchStatus.SETTLED && !hp.settling
-            && (hp.isSell === true || !hp.position.isBuy)
+    (hp) => hp.batchStatus === BatchStatus.SETTLED && !hp.settling && hp.isSell
   );
 
   // Activity = all historical stored orders (newest first) + current if exists
