@@ -27,6 +27,10 @@ interface HistoricalPosition {
   };
   /** Number of YES tokens received (buy) or USDC received (sell) — computed */
   shares?: number;
+  /** True if the batch is still being settled by the relayer */
+  settling?: boolean;
+  /** True if the order was included in a settled batch but wasn't filled at clearing price */
+  unfilled?: boolean;
 }
 
 interface PositionsPanelProps {
@@ -325,9 +329,26 @@ export default function PositionsPanel({
           ]);
 
           if (posRaw.filledAmount === 0n && posRaw.refundAmount === 0n) {
-            // Enrich activity row even if not filled
+            // Enrich activity row
             const idx = rawActivity.findIndex((r) => r.batchId === order.batchId);
             if (idx >= 0) rawActivity[idx].batchStatus = batchRaw.status as BatchStatus;
+
+            // Still add to results for SETTLING or SETTLED-but-unfilled states
+            // so the user can see their order status instead of a blank panel.
+            const bs = batchRaw.status as BatchStatus;
+            if (bs === BatchStatus.SETTLING || bs === BatchStatus.SETTLED) {
+              results.push({
+                batchId:        id,
+                batchMarketId:  batchRaw.marketId,
+                batchStatus:    bs,
+                clearingPrice:  batchRaw.clearingPrice ?? 0n,
+                marketQuestion: order.marketQuestion,
+                position: { filledAmount: 0n, refundAmount: 0n, isBuy: order.isBuy, claimed: false },
+                shares: 0,
+                settling: bs === BatchStatus.SETTLING,
+                unfilled: bs === BatchStatus.SETTLED,
+              });
+            }
             return;
           }
 
@@ -437,9 +458,13 @@ export default function PositionsPanel({
   // Current batch for Activity tab
   const currentForActivity = hasCurrentOrder ? currentBatchCommitments[0] : null;
 
-  // Active = unclaimed settled historical + current if settled+unclaimed
+  // Active = unclaimed settled historical with actual fill (can claim)
   const activePositions = historicalPositions.filter(
-    (hp) => hp.batchStatus === BatchStatus.SETTLED && !hp.position.claimed
+    (hp) => hp.batchStatus === BatchStatus.SETTLED && !hp.position.claimed && !hp.unfilled && !hp.settling
+  );
+  // Pending = still being settled or not filled at clearing price
+  const pendingPositions = historicalPositions.filter(
+    (hp) => hp.settling || hp.unfilled
   );
   // Closed = claimed historical
   const closedPositions = historicalPositions.filter(
@@ -480,7 +505,7 @@ export default function PositionsPanel({
           <div className="border-b border-border/50 flex items-center px-4 gap-4 flex-shrink-0">
             {(["active", "closed"] as const).map((sub) => {
               const count = sub === "active"
-                ? activePositions.length + (currentIsActive ? 1 : 0)
+                ? activePositions.length + pendingPositions.length + (currentIsActive ? 1 : 0)
                 : closedPositions.length;
               return (
                 <button
@@ -543,16 +568,71 @@ export default function PositionsPanel({
                 />
               )}
 
-              {/* Historical active (unclaimed settled) */}
+              {/* Current batch settled but not filled */}
+              {currentBatchStatus === BatchStatus.SETTLED && hasCurrentOrder &&
+               currentPosition !== null &&
+               currentPosition.filledAmount === 0n && currentPosition.refundAmount === 0n && (
+                <div className="px-4 py-3 border-b border-border/40 bg-surface/40">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-[10px] text-muted tracking-widest uppercase">Order not filled</span>
+                  </div>
+                  <p className="text-[9px] text-muted-dim">
+                    Your order was below the clearing price. USDC stays in your ephemeral wallet — recover via the private key stored in your browser.
+                  </p>
+                </div>
+              )}
+
+              {/* Settling / unfilled orders */}
+              {!scanning && pendingPositions.map((hp) => (
+                hp.settling ? (
+                  <div key={hp.batchId.toString()} className="px-4 py-3 border-b border-border/40">
+                    <div className="flex items-center gap-2 mb-1">
+                      <DirectionBadge isBuy={hp.position.isBuy} />
+                      <span className="w-2 h-2 border border-blue/60 border-t-transparent rounded-full animate-spin flex-shrink-0" />
+                      <span className="text-[10px] text-blue/70 tracking-wide uppercase">Settling</span>
+                      <span className="text-[9px] text-muted-dim ml-auto">#{hp.batchId.toString()}</span>
+                    </div>
+                    {hp.marketQuestion && (
+                      <p className="text-[10px] text-text leading-snug line-clamp-2 mb-1">{hp.marketQuestion}</p>
+                    )}
+                    <p className="text-[9px] text-muted-dim">Relayer is settling this batch — usually 10–30 s</p>
+                  </div>
+                ) : (
+                  <div key={hp.batchId.toString()} className="px-4 py-3 border-b border-border/40">
+                    <div className="flex items-center gap-2 mb-1">
+                      <DirectionBadge isBuy={hp.position.isBuy} />
+                      <span className="text-[10px] text-muted tracking-widest uppercase">Not filled</span>
+                      <span className="text-[9px] text-muted-dim ml-auto">#{hp.batchId.toString()}</span>
+                    </div>
+                    {hp.marketQuestion && (
+                      <p className="text-[10px] text-text leading-snug line-clamp-2 mb-1">{hp.marketQuestion}</p>
+                    )}
+                    {hp.position.isBuy ? (
+                      <p className="text-[9px] text-muted-dim">
+                        Your limit was below the clearing price — USDC stays in your ephemeral wallet.
+                        Import the ephemeral key from localStorage to recover funds.
+                      </p>
+                    ) : (
+                      <p className="text-[9px] text-muted-dim">
+                        Sell order not filled — YES tokens returned.
+                      </p>
+                    )}
+                  </div>
+                )
+              ))}
+
+              {/* Historical active (unclaimed settled with fill) */}
               {scanning ? (
                 <div>
                   <SkeletonRow />
                   <SkeletonRow />
                 </div>
-              ) : activePositions.length === 0 && !currentIsActive && !hasCurrentOrder ? (
+              ) : activePositions.length === 0 && pendingPositions.length === 0 && !currentIsActive && !hasCurrentOrder ? (
                 <div className="px-4 py-8 text-center">
                   <p className="text-[11px] text-muted-dim">No active positions.</p>
-                  <p className="text-[10px] text-muted-dim mt-1">Place an order to get started.</p>
+                  <p className="text-[10px] text-muted-dim mt-1">
+                    Place an order to get started, or check the Activity tab for history.
+                  </p>
                 </div>
               ) : (
                 activePositions.map((hp) => (
