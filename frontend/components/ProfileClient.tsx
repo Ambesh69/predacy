@@ -529,7 +529,7 @@ function ClosedPositionRow({
           <div className="min-w-[88px]">
             <p className="text-[9px] text-muted-dim tracking-widest uppercase mb-1">AMOUNT WON</p>
             {order.isSell ? (
-              // Sell order: show realised profit if we have buy price, else proceeds
+              // Sell order: show profit delta only; "—" if buy price wasn't stored
               sellProfit != null ? (
                 <div>
                   <p className={clsx("text-[12px] tabular-nums font-mono font-medium", sellProfit >= 0 ? "text-accent" : "text-danger")}>
@@ -542,10 +542,7 @@ function ClosedPositionRow({
                   )}
                 </div>
               ) : (
-                <div>
-                  <p className="text-[12px] text-text tabular-nums font-mono">${filledUsdc.toFixed(2)}</p>
-                  <p className="text-[10px] text-amber-400/70">proceeds</p>
-                </div>
+                <p className="text-[12px] text-muted-dim">—</p>
               )
             ) : currentValue != null ? (
               <div>
