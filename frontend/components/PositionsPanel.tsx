@@ -494,6 +494,17 @@ export default function PositionsPanel({
     scanHistory();
   }, [scanHistory]);
 
+  // ── Re-scan periodically while any historical position is still settling ──────
+  // scanHistory() runs once on mount and when currentBatchId changes. But if the
+  // relayer tx hadn't landed yet when scanHistory ran, the batch stays `settling:
+  // true` forever. This re-polls every 5 s until the batch reads as SETTLED.
+  useEffect(() => {
+    const hasSettling = historicalPositions.some((hp) => hp.settling);
+    if (!hasSettling) return;
+    const iv = setInterval(scanHistory, 5_000);
+    return () => clearInterval(iv);
+  }, [historicalPositions, scanHistory]);
+
   const handleClaim = async (batchId: bigint) => {
     setClaimingBatchId(batchId);
     const key = batchId.toString();

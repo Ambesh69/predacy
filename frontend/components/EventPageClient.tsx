@@ -461,6 +461,10 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   // ── Toast notifications ──────────────────────────────────────────────────────
   const [toast, setToast] = useState<{ id: number; message: string; type: "success" | "error" } | null>(null);
   const toastIdRef = useRef(0);
+  // Tracks the last non-zero batchId seen. After settlement the contract may
+  // reset currentBatchId to 0n; we fall back to this ref so fetchBatch can
+  // still detect the SETTLING → SETTLED transition.
+  const lastBatchIdRef = useRef<bigint>(0n);
   const pushToast = (message: string, type: "success" | "error") => {
     const id = ++toastIdRef.current;
     setToast({ id, message, type });
@@ -537,13 +541,18 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     const fetchBatch = async () => {
       try {
         const contracts = getContracts(ACTIVE_CHAIN.id);
-        const batchId   = await publicClient.readContract({
+        const rawId = await publicClient.readContract({
           address: contracts.batchVault,
           abi:     BATCH_VAULT_ABI,
           functionName: "getCurrentBatchId",
           args:    [marketId],
         }) as bigint;
-        if (batchId === 0n || cancelled) return;
+        if (cancelled) return;
+        // After settlement the contract may reset currentBatchId to 0n (no open
+        // batch). Fall back to the last known batchId so we can still read its
+        // status and detect the SETTLING → SETTLED transition.
+        const batchId = rawId !== 0n ? rawId : lastBatchIdRef.current;
+        if (batchId === 0n) return;
         const b = await publicClient.readContract({
           address: contracts.batchVault,
           abi:     BATCH_VAULT_ABI,
@@ -551,6 +560,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
           args:    [batchId],
         }) as { marketId: `0x${string}`; openedAt: bigint; closedAt: bigint; status: number; totalDeposited: bigint; clearingPrice: bigint; commitmentCount: bigint };
         if (!cancelled) {
+          if (rawId !== 0n) lastBatchIdRef.current = rawId;
           setBatch({
             batchId,
             batchMarketId:   b.marketId,
@@ -570,6 +580,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     setCommitments([]);
     setOrderSealed(false);
     setChainError(null);
+    lastBatchIdRef.current = 0n;
 
     fetchBatch();
     const iv = setInterval(fetchBatch, 2000);
