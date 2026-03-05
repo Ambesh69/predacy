@@ -59,6 +59,10 @@ function normalizeMarket(m: any): PolymarketMarket {
     outcomes:      parse(m.outcomes)      ?? [],
     outcomePrices: parse(m.outcomePrices) ?? [],
     clobTokenIds:  parse(m.clobTokenIds)  ?? [],
+    // Live price fields only present on /events endpoint responses.
+    bestBid:        typeof m.bestBid        === "number" ? m.bestBid        : undefined,
+    bestAsk:        typeof m.bestAsk        === "number" ? m.bestAsk        : undefined,
+    lastTradePrice: typeof m.lastTradePrice === "number" ? m.lastTradePrice : undefined,
   };
 }
 
@@ -90,6 +94,8 @@ export class PolymarketClient {
   private apiSecret:     string;
   private apiPassphrase: string;
   private account:       ReturnType<typeof privateKeyToAccount> | null;
+  /** In-process cache: conditionId (lower) → PolymarketMarket */
+  private _marketCache = new Map<string, PolymarketMarket>();
 
   constructor(
     apiKey:        string,
@@ -113,13 +119,76 @@ export class PolymarketClient {
     return (res.data ?? []).map(normalizeMarket);
   }
 
-  /** Get a single market by condition ID */
+  /**
+   * Get a single market by its Polymarket conditionId.
+   *
+   * IMPORTANT: The Gamma /markets?condition_id= endpoint matches against questionId,
+   * not conditionId, for neg-risk / group markets. This means it can return an entirely
+   * wrong market (e.g. a closed 2020 market whose questionId happens to equal our
+   * conditionId). We validate the returned conditionId and fall back to a full events
+   * search if there's a mismatch. Results are cached in-process to avoid repeating
+   * the expensive events search on every batch settlement.
+   */
   async getMarket(conditionId: string): Promise<PolymarketMarket> {
+    const lower = conditionId.toLowerCase();
+    const cached = this._marketCache.get(lower);
+    if (cached) return cached;
+
+    // Try the fast /markets path first.
     const res = await axios.get(`${GAMMA_API}/markets`, {
       params: { condition_id: conditionId },
     });
-    if (!res.data?.length) throw new Error(`Market not found: ${conditionId}`);
-    return normalizeMarket(res.data[0]);
+    if (res.data?.length) {
+      const market = normalizeMarket(res.data[0]);
+      if (market.conditionId?.toLowerCase() === lower) {
+        this._marketCache.set(lower, market);
+        return market;
+      }
+      // Wrong market returned — fall through to events search.
+      console.warn(
+        `[PolymarketClient] getMarket(${conditionId.slice(0, 10)}…): ` +
+        `/markets?condition_id= returned wrong market (got ${market.conditionId?.slice(0, 10)}…) ` +
+        `— searching /events instead`,
+      );
+    }
+
+    return await this._findMarketInEvents(conditionId);
+  }
+
+  /**
+   * Search active events for a market whose conditionId matches exactly.
+   * Used as fallback when /markets?condition_id= returns the wrong market.
+   * The Gamma /events endpoint includes bestBid, bestAsk, lastTradePrice directly
+   * on each market — more reliable than CLOB for group / neg-risk markets.
+   */
+  private async _findMarketInEvents(conditionId: string): Promise<PolymarketMarket> {
+    const lower = conditionId.toLowerCase();
+    const limit = 100;
+    for (let offset = 0; ; offset += limit) {
+      const res = await axios.get(`${GAMMA_API}/events`, {
+        params: { active: true, closed: false, limit, offset },
+      });
+      const events: any[] = res.data ?? [];
+      if (!events.length) break;
+
+      for (const event of events) {
+        for (const m of event.markets ?? []) {
+          if (m.conditionId?.toLowerCase() === lower) {
+            const market = normalizeMarket(m);
+            this._marketCache.set(lower, market);
+            console.log(
+              `[PolymarketClient] getMarket(${conditionId.slice(0, 10)}…): ` +
+              `found in /events (event="${event.title ?? event.slug}", offset=${offset}) ` +
+              `bestBid=${market.bestBid} bestAsk=${market.bestAsk} lastTrade=${market.lastTradePrice}`,
+            );
+            return market;
+          }
+        }
+      }
+
+      if (events.length < limit) break; // last page
+    }
+    throw new Error(`Market not found in /markets or /events: ${conditionId}`);
   }
 
   /**

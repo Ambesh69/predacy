@@ -88,4 +88,8 @@ export interface PolymarketMarket {
   endDate: string;
   tokens: Array<{ token_id: string; outcome: string }>;
   clobTokenIds?: string[];
+  /** Live price fields — present when fetched via the Gamma /events endpoint. */
+  bestBid?:        number;
+  bestAsk?:        number;
+  lastTradePrice?: number;
 }

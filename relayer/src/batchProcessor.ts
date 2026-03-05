@@ -533,12 +533,30 @@ export class BatchProcessor {
         if (!cachedYesToken) throw new Error("YES token not found for market");
 
         if (effectiveClearingPrice === 0n) {
-          const mid = await this.polymarket.getMidPrice(cachedYesToken);
-          effectiveClearingPrice = BigInt(Math.round(mid * 1_000_000));
-          console.log(
-            `[BatchProcessor] No internal crossing — anchoring to Polymarket mid: ` +
-            `${mid} → ${effectiveClearingPrice}`,
-          );
+          // Prefer bestBid/bestAsk from the /events endpoint (correct for neg-risk
+          // group markets where /midpoint returns 0.5 sentinel or 404).
+          if (market.bestBid && market.bestAsk && market.bestBid > 0 && market.bestAsk > 0) {
+            const mid = (market.bestBid + market.bestAsk) / 2;
+            effectiveClearingPrice = BigInt(Math.round(mid * 1_000_000));
+            console.log(
+              `[BatchProcessor] No internal crossing — anchoring to Gamma bestBid/bestAsk: ` +
+              `(${market.bestBid}+${market.bestAsk})/2=${mid} → ${effectiveClearingPrice}`,
+            );
+          } else if (market.lastTradePrice && market.lastTradePrice > 0) {
+            effectiveClearingPrice = BigInt(Math.round(market.lastTradePrice * 1_000_000));
+            console.log(
+              `[BatchProcessor] No internal crossing — anchoring to Gamma lastTradePrice: ` +
+              `${market.lastTradePrice} → ${effectiveClearingPrice}`,
+            );
+          } else {
+            // Gamma market data has no price — fall back to CLOB /midpoint (+ /last-trade-price).
+            const mid = await this.polymarket.getMidPrice(cachedYesToken);
+            effectiveClearingPrice = BigInt(Math.round(mid * 1_000_000));
+            console.log(
+              `[BatchProcessor] No internal crossing — anchoring to CLOB mid: ` +
+              `${mid} → ${effectiveClearingPrice}`,
+            );
+          }
         }
       } catch (err) {
         console.warn(`[BatchProcessor] Polymarket price-discovery step failed (non-fatal):`, err);
