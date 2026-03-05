@@ -31,6 +31,11 @@ interface HistoricalPosition {
   settling?: boolean;
   /** True if the order was included in a settled batch but wasn't filled at clearing price */
   unfilled?: boolean;
+  /** For unfilled buy orders: ephemeral wallet private key + address for USDC recovery */
+  ephemeralKey?:     string;
+  ephemeralAddress?: string;
+  /** USDC amount that remains in the ephemeral wallet (for unfilled buys) */
+  unfilledAmount?: bigint;
 }
 
 interface PositionsPanelProps {
@@ -227,6 +232,72 @@ function ActivityRow({
   );
 }
 
+// ── Unfilled buy card (with ephemeral key recovery) ───────────────────────────
+
+function UnfilledCard({ hp }: { hp: HistoricalPosition }) {
+  const [copied, setCopied] = useState(false);
+
+  const copyKey = async () => {
+    if (!hp.ephemeralKey) return;
+    await navigator.clipboard.writeText(hp.ephemeralKey);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2500);
+  };
+
+  const amountDisplay = hp.unfilledAmount != null
+    ? `$${(Number(hp.unfilledAmount) / 1e6).toFixed(2)}`
+    : null;
+
+  return (
+    <div className="px-4 py-3 border-b border-border/40">
+      <div className="flex items-center gap-2 mb-1">
+        <DirectionBadge isBuy={hp.position.isBuy} />
+        <span className="text-[10px] text-muted tracking-widest uppercase">Not filled</span>
+        <span className="text-[9px] text-muted-dim ml-auto">#{hp.batchId.toString()}</span>
+      </div>
+
+      {hp.marketQuestion && (
+        <p className="text-[10px] text-text leading-snug line-clamp-2 mb-2">{hp.marketQuestion}</p>
+      )}
+
+      {hp.position.isBuy ? (
+        <div className="space-y-2">
+          <p className="text-[9px] text-muted-dim leading-snug">
+            Your limit was below the batch clearing price.
+            {amountDisplay && <> {amountDisplay} USDC remains in your ephemeral wallet.</>}
+          </p>
+
+          {hp.ephemeralKey && (
+            <div className="space-y-1.5">
+              {hp.ephemeralAddress && (
+                <p className="text-[9px] text-muted-dim font-mono break-all">
+                  <span className="text-muted">Address: </span>{hp.ephemeralAddress}
+                </p>
+              )}
+              <button
+                onClick={copyKey}
+                className={clsx(
+                  "w-full py-1.5 border text-[10px] tracking-widest uppercase transition-colors",
+                  copied
+                    ? "border-accent/50 text-accent/70 bg-accent/5"
+                    : "border-border-bright text-muted hover:border-accent/50 hover:text-accent",
+                )}
+              >
+                {copied ? "COPIED ✓" : "COPY RECOVERY KEY"}
+              </button>
+              <p className="text-[8px] text-muted-dim text-center leading-snug">
+                Import this private key into MetaMask → sweep USDC back to your wallet
+              </p>
+            </div>
+          )}
+        </div>
+      ) : (
+        <p className="text-[9px] text-muted-dim">Sell order not filled — YES tokens returned.</p>
+      )}
+    </div>
+  );
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function PositionsPanel({
@@ -292,7 +363,7 @@ export default function PositionsPanel({
     let storedOrders: Array<{
       commitment: string; batchId: string; salt?: string; claimed?: boolean;
       isBuy: boolean; amount: string; marketQuestion?: string; timestamp?: number;
-      marketId?: string;
+      marketId?: string; ephemeralKey?: string; ephemeralAddress?: string;
     }> = [];
     try {
       const storageKey = `predacy:orders:${walletAddress.toLowerCase()}`;
@@ -341,15 +412,18 @@ export default function PositionsPanel({
             const bs = batchRaw.status as BatchStatus;
             if (bs === BatchStatus.SETTLING || bs === BatchStatus.SETTLED) {
               results.push({
-                batchId:        id,
-                batchMarketId:  batchRaw.marketId,
-                batchStatus:    bs,
-                clearingPrice:  batchRaw.clearingPrice ?? 0n,
-                marketQuestion: order.marketQuestion,
+                batchId:          id,
+                batchMarketId:    batchRaw.marketId,
+                batchStatus:      bs,
+                clearingPrice:    batchRaw.clearingPrice ?? 0n,
+                marketQuestion:   order.marketQuestion,
                 position: { filledAmount: 0n, refundAmount: 0n, isBuy: order.isBuy, claimed: false },
-                shares: 0,
-                settling: bs === BatchStatus.SETTLING,
-                unfilled: bs === BatchStatus.SETTLED,
+                shares:           0,
+                settling:         bs === BatchStatus.SETTLING,
+                unfilled:         bs === BatchStatus.SETTLED,
+                ephemeralKey:     order.isBuy ? order.ephemeralKey     : undefined,
+                ephemeralAddress: order.isBuy ? order.ephemeralAddress : undefined,
+                unfilledAmount:   order.isBuy ? BigInt(order.amount)   : undefined,
               });
             }
             return;
@@ -601,26 +675,7 @@ export default function PositionsPanel({
                     <p className="text-[9px] text-muted-dim">Relayer is settling this batch — usually 10–30 s</p>
                   </div>
                 ) : (
-                  <div key={hp.batchId.toString()} className="px-4 py-3 border-b border-border/40">
-                    <div className="flex items-center gap-2 mb-1">
-                      <DirectionBadge isBuy={hp.position.isBuy} />
-                      <span className="text-[10px] text-muted tracking-widest uppercase">Not filled</span>
-                      <span className="text-[9px] text-muted-dim ml-auto">#{hp.batchId.toString()}</span>
-                    </div>
-                    {hp.marketQuestion && (
-                      <p className="text-[10px] text-text leading-snug line-clamp-2 mb-1">{hp.marketQuestion}</p>
-                    )}
-                    {hp.position.isBuy ? (
-                      <p className="text-[9px] text-muted-dim">
-                        Your limit was below the clearing price — USDC stays in your ephemeral wallet.
-                        Import the ephemeral key from localStorage to recover funds.
-                      </p>
-                    ) : (
-                      <p className="text-[9px] text-muted-dim">
-                        Sell order not filled — YES tokens returned.
-                      </p>
-                    )}
-                  </div>
+                  <UnfilledCard key={hp.batchId.toString()} hp={hp} />
                 )
               ))}
 

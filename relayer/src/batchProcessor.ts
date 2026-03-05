@@ -546,8 +546,25 @@ export class BatchProcessor {
     }
 
     if (effectiveClearingPrice === 0n) {
-      effectiveClearingPrice = 650_000n; // 0.65 fallback when API not configured
-      console.log(`[BatchProcessor] No Polymarket API — using fallback clearing price: ${effectiveClearingPrice}`);
+      // Try Gamma API (public, no auth required) to get actual YES market price.
+      // This avoids the 65¢ hardcode killing buy orders on low-probability markets.
+      try {
+        const market = await this.polymarket.getMarket(batchInfo.marketId.slice(2));
+        const yesPrice = parseFloat(market.outcomePrices?.[0] ?? "0");
+        if (yesPrice > 0 && yesPrice < 1) {
+          effectiveClearingPrice = BigInt(Math.round(yesPrice * 1_000_000));
+          console.log(
+            `[BatchProcessor] Gamma public price: ${yesPrice} → effectiveClearingPrice=${effectiveClearingPrice}`,
+          );
+        }
+      } catch (err) {
+        console.warn(`[BatchProcessor] Gamma price lookup failed (non-fatal):`, err);
+      }
+    }
+
+    if (effectiveClearingPrice === 0n) {
+      effectiveClearingPrice = 650_000n; // last-resort fallback
+      console.log(`[BatchProcessor] All price sources failed — using hardcoded fallback: ${effectiveClearingPrice}`);
     }
 
     console.log(`[BatchProcessor] Effective clearing price: ${effectiveClearingPrice}`);
