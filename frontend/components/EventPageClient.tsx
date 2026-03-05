@@ -452,8 +452,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   const [faucetLoading, setFaucetLoading] = useState(false);
   const [balanceVersion, setBalanceVersion] = useState(0);
   const [orderSealed, setOrderSealed] = useState(false);
-  const [activeTab, setActiveTab] = useState<"order" | "positions">("order");
-  const [leftTab, setLeftTab]     = useState<"outcomes" | "orderbook">("outcomes");
+  const [leftTab, setLeftTab]     = useState<"outcomes" | "positions" | "orderbook">("outcomes");
   const [claimLoading, setClaimLoading] = useState(false);
   const [historicalMarketIds, setHistoricalMarketIds] = useState<`0x${string}`[]>([]);
   const selectedMarketId = selectedMarket?.conditionId;
@@ -576,11 +575,10 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     return () => { cancelled = true; clearInterval(iv); };
   }, [selectedMarketId]);
 
-  // Auto-switch to My Positions when the batch settles so the user sees the
-  // claim button immediately without having to refresh or click a tab.
+  // Auto-switch left panel to My Positions when batch settles so claim CTA is visible.
   useEffect(() => {
     if (batch.status === BatchStatus.SETTLED && isConnected) {
-      setActiveTab("positions");
+      setLeftTab("positions");
     }
   }, [batch.status, isConnected]);
 
@@ -877,7 +875,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         } catch { /* ignore */ }
       }
       setOrderSealed(true);
-      setActiveTab("positions");
+      setLeftTab("positions");
       return;
     }
 
@@ -967,7 +965,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       } catch { /* ignore */ }
     }
     setOrderSealed(true);
-    setActiveTab("positions");
+    setLeftTab("positions");
   };
 
   // ── Faucet ───────────────────────────────────────────────────────────────────
@@ -1100,7 +1098,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
           {/* Chart only shown on Outcomes tab — hide when Orderbook active to give it full height */}
           {leftTab === "outcomes" && <MultiOutcomeChart markets={event.markets} />}
 
-          {/* Subheader with Outcomes / Orderbook tab toggle */}
+          {/* Subheader with Outcomes / My Positions / Orderbook tab toggle */}
           <div className="px-5 py-2.5 border-b border-border flex items-center justify-between flex-shrink-0">
             <span className="text-[10px] text-muted tracking-widest uppercase">
               {sorted.length} Outcomes
@@ -1115,6 +1113,16 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                 )}
               >
                 Outcomes
+              </button>
+              <button
+                type="button"
+                onClick={() => setLeftTab("positions")}
+                className={clsx(
+                  "px-3 py-1 border-l border-border transition-colors",
+                  leftTab === "positions" ? "text-text bg-surface/60" : "text-muted-dim hover:text-muted"
+                )}
+              >
+                My Positions
               </button>
               <button
                 type="button"
@@ -1134,6 +1142,29 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
 
           {leftTab === "orderbook" ? (
             <OrderbookPanel market={selectedMarket} />
+          ) : leftTab === "positions" ? (
+            isConnected && walletAddress ? (
+              <PositionsPanel
+                walletAddress={walletAddress}
+                currentBatchId={batch.batchId}
+                currentBatchStatus={batch.status}
+                currentBatchCommitments={commitments
+                  .filter((c) => c.trader === walletAddress)
+                  .map((c) => ({ hash: c.hash, amount: c.amount }))}
+                onClaim={handleClaimPosition}
+                onMarketIdsFound={setHistoricalMarketIds}
+              />
+            ) : (
+              <div className="flex-1 flex flex-col items-center justify-center gap-3 p-6">
+                <p className="text-muted text-xs text-center">Connect your wallet to view positions</p>
+                <button
+                  onClick={login}
+                  className="border border-border-bright text-text text-[11px] tracking-widest uppercase px-4 py-2 hover:border-text/30 transition-colors"
+                >
+                  Connect Wallet
+                </button>
+              </div>
+            )
           ) : (
           <div className="divide-y divide-border/40">
             {sorted.length === 0 && (
@@ -1223,60 +1254,8 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                 <p className="text-[11px] text-muted tracking-widest uppercase">Trade</p>
               </div>
 
-              {/* Order / My Positions tab bar */}
-              <div className="border-b border-border px-4 flex items-center">
-                <button
-                  type="button"
-                  onClick={() => { setActiveTab("order"); setOrderSealed(false); }}
-                  className={clsx(
-                    "px-3 py-3 text-[10px] tracking-widest uppercase transition-colors border-b-2",
-                    activeTab === "order"
-                      ? "border-text/40 text-text"
-                      : "border-transparent text-muted hover:text-text"
-                  )}
-                >
-                  Order
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab("positions")}
-                  className={clsx(
-                    "px-3 py-3 text-[10px] tracking-widest uppercase transition-colors border-b-2",
-                    activeTab === "positions"
-                      ? "border-text/40 text-text"
-                      : "border-transparent text-muted hover:text-text"
-                  )}
-                >
-                  My Positions
-                </button>
-              </div>
-
               {/* Tab content — scrolls internally, BatchTimer pinned below */}
               <div className="flex-1 min-h-0 overflow-y-auto">
-              {activeTab === "positions" ? (
-                isConnected && walletAddress ? (
-                  <PositionsPanel
-                    walletAddress={walletAddress}
-                    currentBatchId={batch.batchId}
-                    currentBatchStatus={batch.status}
-                    currentBatchCommitments={commitments
-                      .filter((c) => c.trader === walletAddress)
-                      .map((c) => ({ hash: c.hash, amount: c.amount }))}
-                    onClaim={handleClaimPosition}
-                    onMarketIdsFound={setHistoricalMarketIds}
-                  />
-                ) : (
-                  <div className="flex-1 flex flex-col items-center justify-center gap-3 p-6">
-                    <p className="text-muted text-xs text-center">Connect your wallet to view positions</p>
-                    <button
-                      onClick={login}
-                      className="border border-border-bright text-text text-[11px] tracking-widest uppercase px-4 py-2 hover:border-text/30 transition-colors"
-                    >
-                      Connect Wallet
-                    </button>
-                  </div>
-                )
-              ) : (
                 <>
                   {/* Order sealed confirmation */}
                   {orderSealed && (
@@ -1310,7 +1289,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                             : "no cross"}.
                         </p>
                         <button
-                          onClick={() => setActiveTab("positions")}
+                          onClick={() => setLeftTab("positions")}
                           className="text-[10px] text-accent tracking-widest uppercase hover:underline"
                         >
                           VIEW MY POSITIONS →
@@ -1349,7 +1328,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                     </div>
                   )}
                 </>
-              )}
+              
               </div>{/* end flex-1 scrollable tab content */}
 
               {/* Compact batch timer — pinned at bottom of trading panel */}
