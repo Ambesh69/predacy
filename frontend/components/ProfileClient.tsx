@@ -442,8 +442,9 @@ function ClosedPositionRow({
     ? Number(order.filledAmount) / 1e6
     : Number(order.rawAmount) / 1e6;
 
-  // For NO positions, current value uses the NO price (1 − yes)
-  const outcomePrice = order.currentYesPrice != null
+  // Sell orders are already exited — no ongoing P&L to show.
+  // For NO positions still held, current value uses the NO price (1 − yes).
+  const outcomePrice = !order.isSell && order.currentYesPrice != null
     ? (order.isBuy ? order.currentYesPrice : 1 - order.currentYesPrice)
     : null;
 
