@@ -30,6 +30,7 @@ interface StoredOrder {
   salt?:           string;
   amount:          string;
   isBuy:           boolean;
+  isSell?:         boolean;  // true = sell order (not a buy-NO order)
   limitPrice:      string;
   batchId:         string;
   marketId:        string | null;
@@ -44,6 +45,7 @@ interface OrderEntry {
   salt?:            string;
   rawAmount:        bigint;
   isBuy:            boolean;
+  isSell?:          boolean;  // true = sell order (not a buy-NO)
   limitPrice:       bigint;
   batchId:          bigint;
   marketId?:        `0x${string}`;
@@ -386,11 +388,13 @@ function PendingRow({ order }: { order: OrderEntry }) {
         <div className="flex items-center gap-2 flex-wrap">
           <span className={clsx(
             "text-[9px] tracking-widest uppercase px-1.5 py-0.5 border font-mono",
-            order.isBuy
-              ? "border-accent/30 text-accent bg-accent/5"
-              : "border-danger/30 text-danger bg-danger/5",
+            order.isSell
+              ? "border-amber-500/40 text-amber-400 bg-amber-500/5"
+              : order.isBuy
+                ? "border-accent/30 text-accent bg-accent/5"
+                : "border-danger/30 text-danger bg-danger/5",
           )}>
-            {order.isBuy ? "BUY YES" : "BUY NO"}
+            {order.isSell ? "SELL" : order.isBuy ? "BUY YES" : "BUY NO"}
           </span>
           <span className={clsx(
             "text-[9px] tracking-widest uppercase px-1.5 py-0.5 border",
@@ -427,7 +431,8 @@ function ClosedPositionRow({
   isClaiming: boolean;
   claimError?: string;
 }) {
-  const canClaim = !order.claimed && (order.filledAmount ?? 0n) > 0n;
+  // Sell orders: USDC auto-sent in settleBatch — no claim step
+  const canClaim = !order.isSell && !order.claimed && (order.filledAmount ?? 0n) > 0n;
 
   const avgCents = order.clearingPrice && order.clearingPrice > 0n
     ? (Number(order.clearingPrice) / 1e4).toFixed(1) + "¢"
@@ -484,10 +489,13 @@ function ClosedPositionRow({
           {/* Polymarket-style subtitle: "58.8 Yes at 34¢" */}
           <p className="text-[10px] text-muted-dim">
             {order.shares != null && order.shares > 0
-              ? `${order.shares.toFixed(1)} ${order.isBuy ? "Yes" : "No"} at ${avgCents}`
+              ? `${order.shares.toFixed(1)} ${order.isSell ? "Yes sold" : order.isBuy ? "Yes" : "No"} at ${avgCents}`
               : avgCents}
-            {order.claimed && (
+            {!order.isSell && order.claimed && (
               <span className="ml-2 text-accent/50">· claimed ✓</span>
+            )}
+            {order.isSell && (
+              <span className="ml-2 text-amber-400/60">· sold ✓</span>
             )}
           </p>
         </div>
@@ -556,7 +564,8 @@ function PositionRow({
 
   const isPending  = order.batchStatus === BatchStatus.OPEN || order.batchStatus === BatchStatus.SETTLING;
   const isSettled  = order.batchStatus === BatchStatus.SETTLED;
-  const canClaim   = isSettled && !order.claimed && (order.filledAmount ?? 0n) > 0n;
+  // Sell orders auto-settle (USDC paid in settleBatch) — no claim step needed
+  const canClaim   = !order.isSell && isSettled && !order.claimed && (order.filledAmount ?? 0n) > 0n;
 
   const avgCents = order.clearingPrice && order.clearingPrice > 0n
     ? (Number(order.clearingPrice) / 1e4).toFixed(1) + "¢"
@@ -589,11 +598,13 @@ function PositionRow({
           <div className="flex items-center gap-2 flex-wrap">
             <span className={clsx(
               "text-[9px] tracking-widest uppercase px-1.5 py-0.5 border font-mono",
-              order.isBuy
-                ? "border-accent/30 text-accent bg-accent/5"
-                : "border-danger/30 text-danger bg-danger/5",
+              order.isSell
+                ? "border-amber-500/40 text-amber-400 bg-amber-500/5"
+                : order.isBuy
+                  ? "border-accent/30 text-accent bg-accent/5"
+                  : "border-danger/30 text-danger bg-danger/5",
             )}>
-              {order.isBuy ? "YES" : "NO"}
+              {order.isSell ? "SELL" : order.isBuy ? "YES" : "NO"}
             </span>
             {isPending && (
               <span className={clsx(
@@ -605,7 +616,12 @@ function PositionRow({
                 {order.batchStatus === BatchStatus.SETTLING ? "SETTLING" : "PENDING"}
               </span>
             )}
-            {order.claimed && (
+            {order.isSell && isSettled && (
+              <span className="text-[9px] tracking-widest uppercase text-muted-dim border border-border/40 px-1.5 py-0.5">
+                SOLD ✓
+              </span>
+            )}
+            {!order.isSell && order.claimed && (
               <span className="text-[9px] tracking-widest uppercase text-accent/50 border border-accent/20 px-1.5 py-0.5">
                 CLAIMED ✓
               </span>
@@ -811,6 +827,7 @@ export default function ProfileClient() {
           salt:           o.salt,
           rawAmount:      BigInt(o.amount),
           isBuy:          o.isBuy,
+          isSell:         o.isSell === true,
           limitPrice:     BigInt(o.limitPrice),
           batchId:        BigInt(o.batchId),
           marketId:       (o.marketId ?? undefined) as `0x${string}` | undefined,
@@ -886,9 +903,10 @@ export default function ProfileClient() {
               }) as Promise<{ filledAmount: bigint; refundAmount: bigint; isBuy: boolean; claimed: boolean }>
             );
 
-            // usedNullifiers is authoritative for claimed state
+            // usedNullifiers is authoritative for claimed state.
+            // Sell orders auto-settle (USDC sent in settleBatch) — they have no nullifier.
             let claimed = pos.claimed || entry.claimed === true;
-            if (!claimed && entry.salt) {
+            if (!claimed && entry.salt && !entry.isSell) {
               try {
                 const nullifier = keccak256(
                   encodeAbiParameters(
@@ -1134,9 +1152,10 @@ export default function ProfileClient() {
   const totalVolume   = orders.reduce((s, o) => s + o.rawAmount, 0n);
   const totalOrders   = orders.length;
 
-  // P&L: sum over settled positions that have live price data
+  // P&L: sum over settled BUY positions that have live price data.
+  // Sell orders are excluded — they're exits, shares are no longer held.
   const pnlPositions = settledOrders.filter(
-    (o) => o.shares != null && o.currentYesPrice != null && o.filledAmount != null
+    (o) => !o.isSell && o.shares != null && o.currentYesPrice != null && o.filledAmount != null
   );
   const hasPnlData = !enriching && pnlPositions.length > 0;
   const totalPnl = pnlPositions.reduce((sum, o) => {
@@ -1152,8 +1171,10 @@ export default function ProfileClient() {
   // Claimed positions are excluded — those shares are already redeemed into the USDC balance.
   // Current market value of all settled positions (claimed or not) at live outcome price.
   // Claimed positions are included — the user still wants to see what their shares are worth.
+  // Portfolio value = current market value of held BUY positions only.
+  // Sell orders are excluded — those shares were already exited.
   const positionsValue = settledOrders.reduce((sum, o) => {
-    if (!o.shares || o.currentYesPrice == null) return sum;
+    if (o.isSell || !o.shares || o.currentYesPrice == null) return sum;
     const outcomePrice = o.isBuy ? o.currentYesPrice : 1 - o.currentYesPrice;
     return sum + o.shares * outcomePrice;
   }, 0);
@@ -1190,18 +1211,19 @@ export default function ProfileClient() {
     ? `${walletAddress.slice(0, 6)}…${walletAddress.slice(-4)}`
     : "";
 
-  // Polymarket semantics:
-  // Active  = pending bids (OPEN/SETTLING) + settled positions where underlying market hasn't resolved
-  // Closed  = settled positions where market resolved (price < 5% or > 95%)
+  // Active  = pending orders (OPEN/SETTLING) + settled BUY positions in live markets
+  // Closed  = settled SELL orders (exited positions) + settled positions in resolved markets
   const activeOrders = orders.filter((o) => {
     if (o.batchStatus === BatchStatus.OPEN || o.batchStatus === BatchStatus.SETTLING) return true;
     if (o.batchStatus !== BatchStatus.SETTLED) return false;
+    if (o.isSell) return false; // sold positions are closed, not active
     const yp = o.currentYesPrice;
     if (yp == null) return true; // no price data yet → treat as active
     return yp >= 0.05 && yp <= 0.95; // market still live
   });
   const closedOrders = orders.filter((o) => {
     if (o.batchStatus !== BatchStatus.SETTLED) return false;
+    if (o.isSell) return true; // all settled sell orders are closed positions
     const yp = o.currentYesPrice;
     return yp != null && (yp < 0.05 || yp > 0.95); // market resolved
   });
