@@ -237,7 +237,7 @@ export default function HomePage() {
 
       {/* Market list */}
       <main className="flex-1 px-4 md:px-6 py-6">
-        <div className="flex items-center justify-between mb-5">
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 mb-5">
           <div className="flex items-center gap-3 flex-wrap">
             <div className="flex items-center gap-3">
               <h2
@@ -266,9 +266,34 @@ export default function HomePage() {
               </Link>
             </div>
           </div>
-          <span className="text-[11px] text-muted-dim tracking-widest">
-            LIVE · POLYMARKET PRICES
-          </span>
+
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2 w-full lg:w-auto lg:max-w-[560px]">
+            <label className="flex items-center border border-border bg-surface px-3 py-2 focus-within:border-border-bright flex-1 min-w-0">
+              <svg className="w-3.5 h-3.5 text-muted mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="m21 21-4.3-4.3m1.8-5.2a7 7 0 1 1-14 0 7 7 0 0 1 14 0Z" />
+              </svg>
+              <input
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search events, markets, tags..."
+                className="w-full bg-transparent text-[13px] text-text placeholder:text-muted-dim focus:outline-none"
+              />
+            </label>
+
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-muted tracking-widest uppercase">Sort</span>
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
+                className="bg-surface border border-border text-[11px] text-text px-2.5 py-2 focus:outline-none focus:border-border-bright"
+              >
+                <option value="volume_desc">Highest Volume</option>
+                <option value="volume_asc">Lowest Volume</option>
+                <option value="ending_soon">Ending Soon</option>
+                <option value="newest">Latest Ending</option>
+              </select>
+            </div>
+          </div>
         </div>
 
         <DiscoveryControls
@@ -289,6 +314,7 @@ export default function HomePage() {
             setSelectedTag("all");
           }}
           hasFilters={hasFilters}
+          showPrimaryRow={false}
         />
 
         <div className="active-markets-grid grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-px bg-border/90 shadow-[0_0_0_1px_rgba(78,163,255,0.08)]">
