@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import DiscoveryControls from "@/components/DiscoveryControls";
 import EventCard from "@/components/EventCard";
 import WalletButton from "@/components/WalletButton";
 import { MOCK_MARKETS, getEvents, type PolyEvent } from "@/lib/polymarket";
@@ -295,27 +294,6 @@ export default function HomePage() {
             </div>
           </div>
         </div>
-
-        <DiscoveryControls
-          query={searchQuery}
-          onQueryChange={setSearchQuery}
-          sortBy={sortBy}
-          onSortChange={setSortBy}
-          categories={categories}
-          selectedCategory={selectedCategory}
-          onCategoryChange={setSelectedCategory}
-          tags={tags}
-          selectedTag={selectedTag}
-          onTagChange={setSelectedTag}
-          onClear={() => {
-            setSearchQuery("");
-            setSortBy("volume_desc");
-            setSelectedCategory("all");
-            setSelectedTag("all");
-          }}
-          hasFilters={hasFilters}
-          showPrimaryRow={false}
-        />
 
         <div className="active-markets-grid grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-px bg-border/90 shadow-[0_0_0_1px_rgba(78,163,255,0.08)]">
           {displayedEvents.map((event, idx) => {
