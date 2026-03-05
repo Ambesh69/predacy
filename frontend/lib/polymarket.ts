@@ -68,6 +68,7 @@ function normalizeEvent(e: any): PolyEvent {
     ...e,
     tags,
     category: e.category ?? (tags[0] || undefined),
+    volumeNum: e.volumeNum != null ? Number(e.volumeNum) : parseFloat(String(e.volume ?? "0")) || 0,
     markets: (e.markets ?? []).map(normalizeMarket),
   };
 }

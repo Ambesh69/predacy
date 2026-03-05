@@ -29,6 +29,7 @@ function normalizeEvent(event: any): PolyEvent {
     ...event,
     tags,
     category: event.category ?? (tags[0] || undefined),
+    volumeNum: event.volumeNum != null ? Number(event.volumeNum) : parseFloat(String(event.volume ?? "0")) || 0,
     markets: parseJsonMaybe<any[]>(event.markets, []).map((market) => ({
       ...market,
       tags: coerceTags(parseJsonMaybe<any[]>(market.tags, [])),
