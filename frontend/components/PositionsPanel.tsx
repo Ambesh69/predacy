@@ -400,9 +400,16 @@ export default function PositionsPanel({
       isBuy: boolean; isSell?: boolean; amount: string; marketQuestion?: string; timestamp?: number;
       marketId?: string; ephemeralKey?: string; ephemeralAddress?: string;
     }> = [];
+    const storageKey = `predacy:orders:${walletAddress.toLowerCase()}`;
     try {
-      const storageKey = `predacy:orders:${walletAddress.toLowerCase()}`;
       storedOrders = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
+      // ── Migration: any isBuy:false order is a sell (platform has no NO-buy orders).
+      // Tag them with isSell:true so all downstream code can rely on the flag alone.
+      const needsMigration = storedOrders.some((o) => !o.isBuy && !o.isSell);
+      if (needsMigration) {
+        storedOrders = storedOrders.map((o) => (!o.isBuy && !o.isSell) ? { ...o, isSell: true } : o);
+        try { localStorage.setItem(storageKey, JSON.stringify(storedOrders)); } catch { /* ignore */ }
+      }
     } catch { /* ignore */ }
 
     const historicalOrders = storedOrders
