@@ -134,14 +134,15 @@ function PositionRow({
 
   return (
     <div className="px-4 py-3 border-b border-border/40 last:border-b-0 space-y-2">
-      {/* Row header: direction badge + question */}
+      {/* Row header: direction badge + question + batch ID */}
       <div className="flex items-start gap-2 min-w-0">
         <div className="flex-shrink-0 pt-px">
           <DirectionBadge isBuy={position.isBuy} isSell={isSell} />
         </div>
-        <p className="text-[11px] text-text leading-snug line-clamp-2 min-w-0">
+        <p className="text-[11px] text-text leading-snug line-clamp-2 min-w-0 flex-1">
           {marketQuestion ?? `Batch #${batchId.toString()}`}
         </p>
+        <span className="text-[9px] text-muted-dim font-mono flex-shrink-0 pt-px">#{batchId.toString()}</span>
       </div>
 
       {/* Metrics row */}
@@ -267,11 +268,12 @@ function ActivityRow({
         )}
       </div>
 
-      {/* Amount + time */}
+      {/* Amount + time + batch */}
       <div className="text-right flex-shrink-0 space-y-0.5">
         <p className="text-[11px] text-text font-mono tabular-nums">{amountDisplay}</p>
         <p className="text-[9px] text-muted-dim">
-          {timestamp ? timeAgo(timestamp) : `#${batchId.toString()}`}
+          {timestamp ? timeAgo(timestamp) : null}{timestamp ? " · " : null}
+          <span className="font-mono">#{batchId.toString()}</span>
         </p>
         {batchStatus === BatchStatus.SETTLED && (
           <span className="text-[8px] text-muted-dim border border-border px-1">SETTLED</span>
