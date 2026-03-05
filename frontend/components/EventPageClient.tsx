@@ -49,6 +49,22 @@ const MOCK_BATCH = {
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+// Auto-split: orders larger than this are silently split into ≤$5 000 chunks
+// so no single batch is dominated by one order (price-impact cap + privacy mixing).
+const MAX_CHUNK_USDC_MICRO = 5_000_000_000n; // $5 000 in USDC micro-units (6 decimals)
+
+function splitIntoChunks(total: bigint, maxChunk: bigint): bigint[] {
+  const chunks: bigint[] = [];
+  let remaining = total;
+  while (remaining > 0n) {
+    const chunk = remaining > maxChunk ? maxChunk : remaining;
+    chunks.push(chunk);
+    remaining -= chunk;
+  }
+  return chunks;
+}
+
 function formatVolume(vol: number | string): string {
   const n = typeof vol === "string" ? parseFloat(vol) : vol;
   if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
@@ -795,17 +811,6 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         account: ephemeralAccount, chain: ACTIVE_CHAIN, transport: http(),
       });
 
-      const actualCommitment = computeCommitment({
-        // Use the actual Polymarket conditionId — this is what the contract uses
-        // in _verifyCommitments at settlement. Using batch.batchMarketId was wrong
-        // when batch.batchId === 0n (MOCK_BATCH has bytes32(0) as marketId).
-        marketId:   selectedMarket.conditionId as `0x${string}`,
-        isBuy:      true,
-        amount:     params.amount,
-        limitPrice: params.limitPrice,
-        salt:       params.salt,
-      });
-
       const ephemeralNonce = await publicClient.readContract({
         address: contracts.batchVault, abi: BATCH_VAULT_ABI, functionName: "nonces",
         args: [ephemeralAddress],
@@ -813,9 +818,14 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
 
       setSubmitStep("signing");
 
-      // Sign the primary CommitOrder (nonce N) — no batchId in v6 contract.
-      // batchId removed from EIP-712 so the same sig structure works for any batch,
-      // enabling the relayer to auto-requeue excluded orders without user interaction.
+      // Split large orders into ≤$5 000 chunks so no single batch is dominated
+      // by one order, preserving the price-impact cap and privacy mixing goal.
+      const chunks        = splitIntoChunks(params.amount, MAX_CHUNK_USDC_MICRO);
+      const isSplit       = chunks.length > 1;
+      const K             = chunks.length;
+      const requeueDeadline = BigInt(Math.floor(Date.now() / 1000) + 7 * 24 * 3600); // 7-day window
+
+      // EIP-712 types/domain shared across all chunks — no batchId in v6.
       const COMMIT_ORDER_TYPES = {
         CommitOrder: [
           { name: "commitment", type: "bytes32" },
@@ -828,125 +838,148 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         name: "BatchVault", version: "1", chainId: BigInt(ACTIVE_CHAIN.id), verifyingContract: contracts.batchVault,
       } as const;
 
-      const signature = await ephemeralWalletClient.signTypedData({
-        account: ephemeralAccount,
-        domain:  COMMIT_ORDER_DOMAIN,
-        types:   COMMIT_ORDER_TYPES,
-        primaryType: "CommitOrder",
-        message: { commitment: actualCommitment, amount: params.amount, nonce: ephemeralNonce, deadline },
-      });
+      // Pre-sign all CommitOrder sigs + requeue auths + transferAuths before any
+      // on-chain submission. Nonce allocation for K chunks, starting at ephemeral nonce N:
+      //   Chunk i  main commit : N + i
+      //   Chunk i  requeue 1   : N + K + 2i
+      //   Chunk i  requeue 2   : N + K + 2i + 1
+      const chunkOrders = await Promise.all(chunks.map(async (chunkAmount, i) => {
+        // Each chunk gets its own random salt → unique commitment (independent sealed bids).
+        // generatePrivateKey() produces 32 cryptographically random bytes — perfect as salt.
+        const chunkSalt       = generatePrivateKey();
+        const chunkCommitment = computeCommitment({
+          // Use the actual Polymarket conditionId — this is what the contract uses
+          // in _verifyCommitments at settlement. Using batch.batchMarketId was wrong
+          // when batch.batchId === 0n (MOCK_BATCH has bytes32(0) as marketId).
+          marketId:   selectedMarket.conditionId as `0x${string}`,
+          isBuy:      true,
+          amount:     chunkAmount,
+          limitPrice: params.limitPrice,
+          salt:       chunkSalt,
+        });
 
-      // Pre-sign 2 requeue CommitOrders (nonce+1, nonce+2) silently with the ephemeral key.
-      // These are invisible to the user — pure JS crypto, no MetaMask popup, ~2ms total.
-      // If this order is excluded at clearing price, the relayer uses these to requeue
-      // the order automatically into the next batch (up to 2 times).
-      const requeueDeadline = BigInt(Math.floor(Date.now() / 1000) + 7 * 24 * 3600); // 7-day requeue window
-      const requeueSig1 = await ephemeralWalletClient.signTypedData({
-        account: ephemeralAccount,
-        domain:  COMMIT_ORDER_DOMAIN,
-        types:   COMMIT_ORDER_TYPES,
-        primaryType: "CommitOrder",
-        message: { commitment: actualCommitment, amount: params.amount, nonce: ephemeralNonce + 1n, deadline: requeueDeadline },
-      });
-      const requeueSig2 = await ephemeralWalletClient.signTypedData({
-        account: ephemeralAccount,
-        domain:  COMMIT_ORDER_DOMAIN,
-        types:   COMMIT_ORDER_TYPES,
-        primaryType: "CommitOrder",
-        message: { commitment: actualCommitment, amount: params.amount, nonce: ephemeralNonce + 2n, deadline: requeueDeadline },
-      });
-      const requeueAuths = [
-        { ephemeral: ephemeralAddress, nonce: (ephemeralNonce + 1n).toString(), deadline: requeueDeadline.toString(), signature: requeueSig1 },
-        { ephemeral: ephemeralAddress, nonce: (ephemeralNonce + 2n).toString(), deadline: requeueDeadline.toString(), signature: requeueSig2 },
-      ];
+        const mainNonce = ephemeralNonce + BigInt(i);
+        const rq1Nonce  = ephemeralNonce + BigInt(K) + BigInt(2 * i);
+        const rq2Nonce  = ephemeralNonce + BigInt(K) + BigInt(2 * i + 1);
 
-      const nonceBytes = new Uint8Array(32);
-      crypto.getRandomValues(nonceBytes);
-      const transferNonce = ("0x" + Array.from(nonceBytes).map((b) => b.toString(16).padStart(2, "0")).join("")) as `0x${string}`;
-      const validAfter  = 0n;
-      const validBefore = BigInt(Math.floor(Date.now() / 1000) + 7200);
+        // Sign all 3 CommitOrder sigs in parallel (pure JS crypto, no MetaMask popup).
+        const [sig, rqSig1, rqSig2] = await Promise.all([
+          ephemeralWalletClient.signTypedData({
+            account: ephemeralAccount, domain: COMMIT_ORDER_DOMAIN, types: COMMIT_ORDER_TYPES, primaryType: "CommitOrder",
+            message: { commitment: chunkCommitment, amount: chunkAmount, nonce: mainNonce, deadline },
+          }),
+          ephemeralWalletClient.signTypedData({
+            account: ephemeralAccount, domain: COMMIT_ORDER_DOMAIN, types: COMMIT_ORDER_TYPES, primaryType: "CommitOrder",
+            message: { commitment: chunkCommitment, amount: chunkAmount, nonce: rq1Nonce, deadline: requeueDeadline },
+          }),
+          ephemeralWalletClient.signTypedData({
+            account: ephemeralAccount, domain: COMMIT_ORDER_DOMAIN, types: COMMIT_ORDER_TYPES, primaryType: "CommitOrder",
+            message: { commitment: chunkCommitment, amount: chunkAmount, nonce: rq2Nonce, deadline: requeueDeadline },
+          }),
+        ]);
 
-      const transferSig = await ephemeralWalletClient.signTypedData({
-        account: ephemeralAccount,
-        domain: { name: "USD Coin (Test)", version: "1", chainId: BigInt(ACTIVE_CHAIN.id), verifyingContract: contracts.usdc },
-        types: {
-          TransferWithAuthorization: [
-            { name: "from", type: "address" }, { name: "to",          type: "address" },
-            { name: "value", type: "uint256"}, { name: "validAfter",  type: "uint256" },
-            { name: "validBefore", type: "uint256" }, { name: "nonce", type: "bytes32" },
-          ],
-        },
-        primaryType: "TransferWithAuthorization",
-        message: { from: ephemeralAddress, to: contracts.batchVault, value: params.amount, validAfter, validBefore, nonce: transferNonce },
-      });
+        // Fresh random EIP-3009 nonce per chunk — allows multiple transferAuths from
+        // the same ephemeral wallet to coexist (they're independent authorizations).
+        const chunkNonceBytes = new Uint8Array(32);
+        crypto.getRandomValues(chunkNonceBytes);
+        const chunkTransferNonce = ("0x" + Array.from(chunkNonceBytes).map((b) => b.toString(16).padStart(2, "0")).join("")) as `0x${string}`;
+        const validBefore = BigInt(Math.floor(Date.now() / 1000) + 7200);
 
-      const r = transferSig.slice(0, 66) as `0x${string}`;
-      const s = ("0x" + transferSig.slice(66, 130)) as `0x${string}`;
-      const v = parseInt(transferSig.slice(130, 132), 16);
-      const transferAuth = { from: ephemeralAddress, validAfter: validAfter.toString(), validBefore: validBefore.toString(), nonce: transferNonce, v, r, s };
+        const chunkTransferSig = await ephemeralWalletClient.signTypedData({
+          account: ephemeralAccount,
+          domain: { name: "USD Coin (Test)", version: "1", chainId: BigInt(ACTIVE_CHAIN.id), verifyingContract: contracts.usdc },
+          types: {
+            TransferWithAuthorization: [
+              { name: "from", type: "address" }, { name: "to",          type: "address" },
+              { name: "value", type: "uint256"}, { name: "validAfter",  type: "uint256" },
+              { name: "validBefore", type: "uint256" }, { name: "nonce", type: "bytes32" },
+            ],
+          },
+          primaryType: "TransferWithAuthorization",
+          message: { from: ephemeralAddress, to: contracts.batchVault, value: chunkAmount, validAfter: 0n, validBefore, nonce: chunkTransferNonce },
+        });
 
+        const r = chunkTransferSig.slice(0, 66) as `0x${string}`;
+        const s = ("0x" + chunkTransferSig.slice(66, 130)) as `0x${string}`;
+        const v = parseInt(chunkTransferSig.slice(130, 132), 16);
+
+        return {
+          chunkAmount, chunkSalt, chunkCommitment, mainNonce, sig, rqSig1, rqSig2, rq1Nonce, rq2Nonce,
+          transferAuth: { from: ephemeralAddress, validAfter: "0", validBefore: validBefore.toString(), nonce: chunkTransferNonce, v, r, s },
+        };
+      }));
+
+      // Submit chunks sequentially — each await blocks until relayer confirms on-chain,
+      // ensuring the ephemeral nonce increments correctly for subsequent chunks.
       const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
       if (!relayerUrl) throw new Error("NEXT_PUBLIC_RELAYER_URL is not set");
-      const resp = await fetch(`${relayerUrl}/order`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          marketId:       selectedMarket.conditionId,
-          batchId:        batch.batchId.toString(),
-          signer:         ephemeralAddress,
-          isBuy: true, isSell: false,
-          amount:         params.amount.toString(),
-          limitPrice:     params.limitPrice.toString(),
-          salt:           params.salt,
-          commitment:     actualCommitment,
-          signature,
-          nonce:          ephemeralNonce.toString(),
-          deadline:       deadline.toString(),
-          transferAuth,
-          requeueAuths,
-          // Cross-device history sync: relayer stores summary keyed by real wallet
-          walletAddress:  walletAddress ?? null,
-          marketQuestion: selectedMarket.question ?? null,
-        }),
-      });
-      const relayerData = await resp.json().catch(() => ({}));
-      if (!resp.ok) {
-        throw new Error(relayerData.error ?? `Relayer returned ${resp.status}`);
-      }
-      // Use the actual batchId returned by the relayer — it may differ from
-      // batch.batchId if the batch was just opened on-demand for this market.
-      const actualBatchId: string = relayerData.batchId ?? batch.batchId.toString();
 
-      if (walletAddress) {
-        setCommitments((prev) => [...prev, { hash: actualCommitment, amount: params.amount, trader: walletAddress, timestamp: Date.now() }]);
-        setBatch((prev) => ({ ...prev, commitmentCount: prev.commitmentCount + 1, totalDeposited: prev.totalDeposited + params.amount }));
-        try {
-          const key = `predacy:orders:${walletAddress.toLowerCase()}`;
-          const existing: unknown[] = JSON.parse(localStorage.getItem(key) ?? "[]");
-          // Persist order preimage for ZK claim proof at claim time.
-          // ephemeralKey stored for USDC recovery: if settlement ever fails, import it
-          // into MetaMask (Account → Import account → Private key) to sweep USDC back.
-          existing.unshift({
-            commitment:      actualCommitment,
-            salt:            params.salt,
-            amount:          params.amount.toString(),
-            isBuy:           true,
-            limitPrice:      params.limitPrice.toString(),
-            batchId:         actualBatchId,
-            marketId:        selectedMarket.conditionId,
-            marketQuestion:  selectedMarket.question ?? null,
-            timestamp:       Date.now(),
-            ephemeralKey:    ephemeralPrivateKey,   // recovery: import into MetaMask if stuck
-            ephemeralAddress: ephemeralAddress,
-          });
-          localStorage.setItem(key, JSON.stringify(existing.slice(0, 200)));
-        } catch { /* ignore */ }
+      let actualBatchId = batch.batchId.toString();
+      for (const chunk of chunkOrders) {
+        const resp = await fetch(`${relayerUrl}/order`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            marketId:       selectedMarket.conditionId,
+            batchId:        actualBatchId,
+            signer:         ephemeralAddress,
+            isBuy: true, isSell: false,
+            amount:         chunk.chunkAmount.toString(),
+            limitPrice:     params.limitPrice.toString(),
+            salt:           chunk.chunkSalt,
+            commitment:     chunk.chunkCommitment,
+            signature:      chunk.sig,
+            nonce:          chunk.mainNonce.toString(),
+            deadline:       deadline.toString(),
+            transferAuth:   chunk.transferAuth,
+            requeueAuths: [
+              { ephemeral: ephemeralAddress, nonce: chunk.rq1Nonce.toString(), deadline: requeueDeadline.toString(), signature: chunk.rqSig1 },
+              { ephemeral: ephemeralAddress, nonce: chunk.rq2Nonce.toString(), deadline: requeueDeadline.toString(), signature: chunk.rqSig2 },
+            ],
+            // Cross-device history sync: relayer stores summary keyed by real wallet
+            walletAddress:  walletAddress ?? null,
+            marketQuestion: selectedMarket.question ?? null,
+          }),
+        });
+        const relayerData = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(relayerData.error ?? `Relayer returned ${resp.status}`);
+
+        // Track the batchId from each response — a large order may span two batches.
+        actualBatchId = relayerData.batchId ?? actualBatchId;
+
+        if (walletAddress) {
+          setCommitments((prev) => [...prev, { hash: chunk.chunkCommitment, amount: chunk.chunkAmount, trader: walletAddress, timestamp: Date.now() }]);
+          setBatch((prev) => ({ ...prev, commitmentCount: prev.commitmentCount + 1, totalDeposited: prev.totalDeposited + chunk.chunkAmount }));
+          try {
+            const key = `predacy:orders:${walletAddress.toLowerCase()}`;
+            const existing: unknown[] = JSON.parse(localStorage.getItem(key) ?? "[]");
+            // Persist order preimage for ZK claim proof at claim time.
+            // ephemeralKey stored for USDC recovery: if settlement ever fails, import it
+            // into MetaMask (Account → Import account → Private key) to sweep USDC back.
+            existing.unshift({
+              commitment:       chunk.chunkCommitment,
+              salt:             chunk.chunkSalt,
+              amount:           chunk.chunkAmount.toString(),
+              isBuy:            true,
+              limitPrice:       params.limitPrice.toString(),
+              batchId:          actualBatchId,
+              marketId:         selectedMarket.conditionId,
+              marketQuestion:   selectedMarket.question ?? null,
+              timestamp:        Date.now(),
+              ephemeralKey:     ephemeralPrivateKey,   // recovery: import into MetaMask if stuck
+              ephemeralAddress,
+            });
+            localStorage.setItem(key, JSON.stringify(existing.slice(0, 200)));
+          } catch { /* ignore */ }
+        }
       }
+
+      if (isSplit) pushToast(`Order split across ${K} batches for lower price impact`, "success");
       setOrderSealed(true);
       setActiveTab("positions");
-      // Start polling for auto-requeue events. Commitment is the unique key.
+      // Poll requeue status for the last chunk (most recently committed).
       setRequeueNotif(null);
-      setPendingRequeueCommitment(actualCommitment.toLowerCase());
+      setPendingRequeueCommitment(chunkOrders[chunkOrders.length - 1].chunkCommitment.toLowerCase());
       return;
     }
 
