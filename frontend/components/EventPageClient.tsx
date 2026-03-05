@@ -980,6 +980,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
           salt:           params.salt,
           amount:         params.amount.toString(),
           isBuy:          false,
+          isSell:         true,   // distinguish sell from "buy NO"
           limitPrice:     params.limitPrice.toString(),
           batchId:        batch.batchId.toString(),
           marketId:       selectedMarket.conditionId,

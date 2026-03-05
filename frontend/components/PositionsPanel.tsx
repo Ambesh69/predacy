@@ -19,13 +19,15 @@ interface HistoricalPosition {
   batchStatus:    BatchStatus;
   clearingPrice:  bigint;
   marketQuestion?: string;
+  /** True when this is a sell commitment (not a buy-NO) */
+  isSell?: boolean;
   position: {
     filledAmount: bigint;
     refundAmount: bigint;
     isBuy:        boolean;
     claimed:      boolean;
   };
-  /** Number of YES tokens received (buy) or USDC received (sell) — computed */
+  /** Number of YES tokens received (buy) or YES tokens sold (sell) — computed */
   shares?: number;
   /** True if the batch is still being settled by the relayer */
   settling?: boolean;
@@ -77,7 +79,14 @@ function timeAgo(ts: number) {
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
-function DirectionBadge({ isBuy }: { isBuy: boolean }) {
+function DirectionBadge({ isBuy, isSell }: { isBuy: boolean; isSell?: boolean }) {
+  if (isSell) {
+    return (
+      <span className="text-[9px] tracking-widest uppercase px-1.5 py-0.5 border font-mono border-amber-500/40 text-amber-400 bg-amber-500/5">
+        SELL
+      </span>
+    );
+  }
   return (
     <span className={clsx(
       "text-[9px] tracking-widest uppercase px-1.5 py-0.5 border font-mono",
@@ -110,12 +119,13 @@ interface PositionRowProps {
   isClaiming:     boolean;
   claimError?:    string;
   isActive:       boolean;  // true = unclaimed settled; false = claimed (holding)
+  isSell?:        boolean;  // true = sell order (shows SELL badge + SOLD ✓, no claim button)
   onClose?:       () => void; // pre-fills SELL form for this position
 }
 
 function PositionRow({
   batchId, position, clearingPrice, marketQuestion, shares,
-  onClaim, isClaiming, claimError, isActive, onClose,
+  onClaim, isClaiming, claimError, isActive, isSell, onClose,
 }: PositionRowProps) {
 
   const avgCents    = clearingPrice > 0n ? (Number(clearingPrice) / 1e4).toFixed(1) : "—";
@@ -127,7 +137,7 @@ function PositionRow({
       {/* Row header: direction badge + question */}
       <div className="flex items-start gap-2 min-w-0">
         <div className="flex-shrink-0 pt-px">
-          <DirectionBadge isBuy={position.isBuy} />
+          <DirectionBadge isBuy={position.isBuy} isSell={isSell} />
         </div>
         <p className="text-[11px] text-text leading-snug line-clamp-2 min-w-0">
           {marketQuestion ?? `Batch #${batchId.toString()}`}
@@ -150,8 +160,12 @@ function PositionRow({
         )}
       </div>
 
-      {/* Claimed / Claim button */}
-      {isActive ? (
+      {/* Action area — varies by order type and claim state */}
+      {isSell ? (
+        // Sell orders: USDC is paid out automatically in settleBatch — no claim step
+        <span className="text-[9px] text-muted-dim tracking-widest uppercase">SOLD ✓</span>
+      ) : isActive ? (
+        // Buy order, unclaimed — show CLAIM POSITION button
         <div className="space-y-1">
           <button
             onClick={() => onClaim(batchId)}
@@ -173,6 +187,7 @@ function PositionRow({
           )}
         </div>
       ) : (
+        // Buy order, claimed — holding YES tokens, offer CLOSE POSITION
         <div className="space-y-1.5">
           <span className="text-[9px] text-accent/60 tracking-widest uppercase">CLAIMED ✓</span>
           {onClose && (
@@ -340,7 +355,7 @@ export default function PositionsPanel({
 
   // Current-batch position (fetched when settled)
   const [currentPosition, setCurrentPosition] = useState<{
-    filledAmount: bigint; refundAmount: bigint; isBuy: boolean; claimed: boolean;
+    filledAmount: bigint; refundAmount: bigint; isBuy: boolean; claimed: boolean; isSell?: boolean;
   } | null>(null);
 
   // ── Fetch current batch position when settled ────────────────────────────────
@@ -353,7 +368,7 @@ export default function PositionsPanel({
     const run = async () => {
       try {
         const storageKey  = `predacy:orders:${walletAddress.toLowerCase()}`;
-        const stored: Array<{ commitment: string; batchId: string }> =
+        const stored: Array<{ commitment: string; batchId: string; isSell?: boolean }> =
           JSON.parse(localStorage.getItem(storageKey) ?? "[]");
         const myOrder = stored.find((o) => o.batchId === currentBatchId.toString());
         if (!myOrder) return;
@@ -365,7 +380,7 @@ export default function PositionsPanel({
           functionName: "getPosition",
           args:         [currentBatchId, myOrder.commitment as `0x${string}`],
         }) as { filledAmount: bigint; refundAmount: bigint; isBuy: boolean; claimed: boolean };
-        if (!cancelled) setCurrentPosition(pos);
+        if (!cancelled) setCurrentPosition({ ...pos, isSell: myOrder.isSell === true });
       } catch { /* RPC hiccup */ }
     };
     run();
@@ -380,7 +395,7 @@ export default function PositionsPanel({
 
     let storedOrders: Array<{
       commitment: string; batchId: string; salt?: string; claimed?: boolean;
-      isBuy: boolean; amount: string; marketQuestion?: string; timestamp?: number;
+      isBuy: boolean; isSell?: boolean; amount: string; marketQuestion?: string; timestamp?: number;
       marketId?: string; ephemeralKey?: string; ephemeralAddress?: string;
     }> = [];
     try {
@@ -435,6 +450,7 @@ export default function PositionsPanel({
                 batchStatus:      bs,
                 clearingPrice:    batchRaw.clearingPrice ?? 0n,
                 marketQuestion:   order.marketQuestion,
+                isSell:           order.isSell === true,
                 position: { filledAmount: 0n, refundAmount: 0n, isBuy: order.isBuy, claimed: false },
                 shares:           0,
                 settling:         bs === BatchStatus.SETTLING,
@@ -448,8 +464,9 @@ export default function PositionsPanel({
           }
 
           // Check usedNullifiers for claimed state
+          // Sell orders auto-settle (USDC sent in settleBatch) — they have no nullifier
           let claimed = posRaw.claimed || order.claimed === true;
-          if (!claimed && order.salt) {
+          if (!claimed && order.salt && !order.isSell) {
             try {
               const nullifier = keccak256(
                 encodeAbiParameters(
@@ -492,6 +509,7 @@ export default function PositionsPanel({
             batchStatus:    batchRaw.status as BatchStatus,
             clearingPrice,
             marketQuestion: order.marketQuestion,
+            isSell:         order.isSell === true,
             position:       { ...posRaw, claimed },
             shares,
           });
@@ -567,20 +585,19 @@ export default function PositionsPanel({
   // Current batch for Activity tab
   const currentForActivity = hasCurrentOrder ? currentBatchCommitments[0] : null;
 
-  // Active = all settled historical positions with actual fill (claimed or not).
-  // Claimed positions stay here — "CLAIMED ✓" means you hold the tokens, the
-  // position is still open. Only move to "Closed" when you actually exit.
+  // Active = filled buy orders (claimed or unclaimed — user still holds YES tokens).
+  // Sell orders go to Closed because the position has been exited.
   const activePositions = historicalPositions.filter(
-    (hp) => hp.batchStatus === BatchStatus.SETTLED && !hp.unfilled && !hp.settling
+    (hp) => hp.batchStatus === BatchStatus.SETTLED && !hp.unfilled && !hp.settling && !hp.isSell
   );
   // Pending = still being settled or not filled at clearing price
   const pendingPositions = historicalPositions.filter(
     (hp) => hp.settling || hp.unfilled
   );
-  // Closed = positions the user has exited (sold on Polymarket).
-  // Currently always empty — the app will populate this when exit-tracking
-  // is implemented. The tab is kept as a placeholder for that future state.
-  const closedPositions: typeof historicalPositions = [];
+  // Closed = settled sell orders (user exited their position, USDC returned via settleBatch).
+  const closedPositions = historicalPositions.filter(
+    (hp) => hp.batchStatus === BatchStatus.SETTLED && hp.isSell === true && !hp.settling
+  );
 
   // Activity = all historical stored orders (newest first) + current if exists
   // already newest-first from localStorage
@@ -676,8 +693,9 @@ export default function PositionsPanel({
                   isClaiming={claimingBatchId === currentBatchId}
                   claimError={claimErrors[currentBatchId.toString()]}
                   isActive={!currentPosition.claimed}
+                  isSell={currentPosition.isSell}
                   onClose={
-                    currentPosition.claimed && onClosePosition
+                    !currentPosition.isSell && currentPosition.claimed && onClosePosition
                       ? () => onClosePosition(computeYesAmount(currentPosition.filledAmount, currentBatchClearingPrice))
                       : undefined
                   }
@@ -744,8 +762,9 @@ export default function PositionsPanel({
                     isClaiming={claimingBatchId === hp.batchId}
                     claimError={claimErrors[hp.batchId.toString()]}
                     isActive={!hp.position.claimed}
+                    isSell={hp.isSell}
                     onClose={
-                      hp.position.claimed && onClosePosition
+                      !hp.isSell && hp.position.claimed && onClosePosition
                         ? () => onClosePosition(computeYesAmount(hp.position.filledAmount, hp.clearingPrice))
                         : undefined
                     }
@@ -777,6 +796,7 @@ export default function PositionsPanel({
                     onClaim={handleClaim}
                     isClaiming={false}
                     isActive={false}
+                    isSell={hp.isSell}
                   />
                 ))
               )}
