@@ -162,8 +162,26 @@ function PositionRow({
 
       {/* Action area — varies by order type and claim state */}
       {isSell ? (
-        // Sell orders: USDC is paid out automatically in settleBatch — no claim step
-        <span className="text-[9px] text-muted-dim tracking-widest uppercase">SOLD ✓</span>
+        // Sell orders need claimWithProof to receive USDC payout — same as buys.
+        isActive ? (
+          <div className="space-y-1">
+            <button
+              onClick={() => onClaim(batchId)}
+              disabled={isClaiming}
+              className={clsx(
+                "w-full py-1.5 border text-[10px] tracking-widest uppercase transition-colors",
+                isClaiming
+                  ? "border-amber-500/20 text-amber-400/40 cursor-not-allowed"
+                  : "border-amber-500/40 text-amber-400 hover:bg-amber-500/10",
+              )}
+            >
+              {isClaiming ? "CLAIMING…" : "CLAIM USDC"}
+            </button>
+            {claimError && <p className="mt-1 text-[9px] text-danger leading-snug">{claimError}</p>}
+          </div>
+        ) : (
+          <span className="text-[9px] text-muted-dim tracking-widest uppercase">SOLD ✓</span>
+        )
       ) : isActive ? (
         // Buy order, unclaimed — show CLAIM POSITION button
         <div className="space-y-1">
@@ -472,10 +490,9 @@ export default function PositionsPanel({
             return;
           }
 
-          // Check usedNullifiers for claimed state
-          // Sell orders auto-settle (USDC sent in settleBatch) — they have no nullifier
+          // Check usedNullifiers for claimed state (applies to both buy and sell orders).
           let claimed = posRaw.claimed || order.claimed === true;
-          if (!claimed && order.salt && !order.isSell) {
+          if (!claimed && order.salt) {
             try {
               const nullifier = keccak256(
                 encodeAbiParameters(
@@ -808,8 +825,9 @@ export default function PositionsPanel({
                       position={currentPosition}
                       clearingPrice={currentBatchClearingPrice}
                       onClaim={handleClaim}
-                      isClaiming={false}
-                      isActive={false}
+                      isClaiming={claimingBatchId === currentBatchId}
+                      claimError={claimErrors[currentBatchId.toString()]}
+                      isActive={!currentPosition.claimed}
                       isSell={true}
                     />
                   )}
@@ -822,8 +840,9 @@ export default function PositionsPanel({
                       marketQuestion={hp.marketQuestion}
                       shares={hp.shares}
                       onClaim={handleClaim}
-                      isClaiming={false}
-                      isActive={false}
+                      isClaiming={claimingBatchId === hp.batchId}
+                      claimError={claimErrors[hp.batchId.toString()]}
+                      isActive={!hp.position.claimed}
                       isSell={hp.isSell || !hp.position.isBuy}
                     />
                   ))}
