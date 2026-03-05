@@ -1221,52 +1221,51 @@ export default function ProfileClient() {
   const totalVolume   = orders.reduce((s, o) => s + o.rawAmount, 0n);
   const totalOrders   = orders.length;
 
-  // pnlPositions kept for sparkline + biggestWin (cosmetic only — visual chart).
-  const pnlPositions = settledOrders.filter(
-    (o) => !o.isSell && o.isBuy && o.shares != null && o.currentYesPrice != null && o.filledAmount != null
-  );
-
-  // P&L: realized (closed sells) + unrealized (net open shares), per market.
-  // Sold shares are subtracted from the open position before computing unrealized,
-  // so exited positions don't inflate the total.
-  const { totalPnl, hasPnlData } = (() => {
-    const byMarket = new Map<string, {
-      buyShares:    number;
-      buyCost:      number;   // total USDC spent on buys
-      sellShares:   number;
-      realizedPnl:  number;   // from sell exits where buyClearingPrice is known
-      yesPrice:     number | null;
+  // Per-market P&L map — shared by totalPnl, biggestWin, sparkPoints, and activeOrders filter.
+  // buyShares/sellShares track net position; realizedPnl from sell exits; sellEvents for sparkline.
+  const pnlByMarket = (() => {
+    const m = new Map<string, {
+      buyShares:   number;
+      buyCost:     number;
+      sellShares:  number;   // always tracked (even without buyClearingPrice)
+      realizedPnl: number;
+      yesPrice:    number | null;
+      sellEvents:  Array<{ timestamp: number; pnl: number }>;
     }>();
 
     for (const o of settledOrders) {
       if (o.filledAmount == null || !o.shares) continue;
       const key = (o.marketId ?? o.batchId.toString()).toLowerCase();
-      const e = byMarket.get(key) ?? { buyShares: 0, buyCost: 0, sellShares: 0, realizedPnl: 0, yesPrice: null };
+      const e = m.get(key) ?? { buyShares: 0, buyCost: 0, sellShares: 0, realizedPnl: 0, yesPrice: null, sellEvents: [] };
       if (o.isBuy && !o.isSell) {
         e.buyShares += o.shares;
         e.buyCost   += Number(o.filledAmount) / 1e6;
         if (o.currentYesPrice != null) e.yesPrice = o.currentYesPrice;
-      } else if (o.isSell && o.buyClearingPrice) {
-        e.sellShares  += o.shares;
-        const costBasis = o.shares * (Number(o.buyClearingPrice) / 1_000_000);
-        e.realizedPnl += Number(o.filledAmount) / 1e6 - costBasis;
+      } else if (o.isSell) {
+        e.sellShares += o.shares; // always track for net-shares
+        if (o.buyClearingPrice) {
+          const costBasis = o.shares * (Number(o.buyClearingPrice) / 1_000_000);
+          const realized  = Number(o.filledAmount) / 1e6 - costBasis;
+          e.realizedPnl  += realized;
+          e.sellEvents.push({ timestamp: o.timestamp, pnl: realized });
+        }
       }
-      byMarket.set(key, e);
+      m.set(key, e);
     }
+    return m;
+  })();
 
+  // P&L: realized (closed sells) + unrealized (net open shares), per market.
+  const { totalPnl, hasPnlData } = (() => {
     let total = 0;
-    for (const { buyShares, buyCost, sellShares, realizedPnl, yesPrice } of byMarket.values()) {
-      // Unrealized: only for net open shares
+    for (const { buyShares, buyCost, sellShares, realizedPnl, yesPrice } of pnlByMarket.values()) {
       if (buyShares > 0 && yesPrice != null) {
-        const netOpen    = Math.max(0, buyShares - sellShares);
-        const costPerShare = buyCost / buyShares;
-        total += netOpen * (yesPrice - costPerShare);
+        const netOpen = Math.max(0, buyShares - sellShares);
+        total += netOpen * (yesPrice - buyCost / buyShares);
       }
-      // Realized: from sell exits
       total += realizedPnl;
     }
-
-    const hasData = !enriching && byMarket.size > 0 && [...byMarket.values()].some(
+    const hasData = !enriching && pnlByMarket.size > 0 && [...pnlByMarket.values()].some(
       (v) => v.realizedPnl !== 0 || (v.yesPrice != null && v.buyShares > 0)
     );
     return { totalPnl: total, hasPnlData: hasData };
@@ -1304,25 +1303,35 @@ export default function ProfileClient() {
   })();
   const hasPositionData = settledOrders.some((o) => o.shares != null && o.currentYesPrice != null);
 
-  // Biggest single-position win (max positive P&L across all settled positions)
-  const biggestWin = pnlPositions.reduce((best, o) => {
-    const outcomePrice = o.isBuy ? (o.currentYesPrice ?? 0) : 1 - (o.currentYesPrice ?? 0);
-    const cv = (o.shares ?? 0) * outcomePrice;
-    const pnl = cv - Number(o.filledAmount ?? 0n) / 1e6;
-    return pnl > best ? pnl : best;
-  }, 0);
-
-  // Sparkline: cumulative P&L across settled orders sorted by timestamp
-  const sparkPoints = (() => {
-    const sorted = pnlPositions.slice().sort((a, b) => a.timestamp - b.timestamp);
-    let running = 0;
-    const pts = [0]; // start at zero
-    for (const o of sorted) {
-      const outcomePrice = o.isBuy ? (o.currentYesPrice ?? 0) : 1 - (o.currentYesPrice ?? 0);
-      const cv = (o.shares ?? 0) * outcomePrice;
-      running += cv - Number(o.filledAmount ?? 0n) / 1e6;
-      pts.push(running);
+  // Biggest single-market P&L (realized + unrealized, per market)
+  const biggestWin = (() => {
+    let best = 0;
+    for (const { buyShares, buyCost, sellShares, realizedPnl, yesPrice } of pnlByMarket.values()) {
+      let mktPnl = realizedPnl;
+      if (buyShares > 0 && yesPrice != null) {
+        const netOpen = Math.max(0, buyShares - sellShares);
+        mktPnl += netOpen * (yesPrice - buyCost / buyShares);
+      }
+      if (mktPnl > best) best = mktPnl;
     }
+    return best;
+  })();
+
+  // Sparkline: time-ordered P&L events — realized sells at sell time, open unrealized at "now"
+  const sparkPoints = (() => {
+    const events: Array<{ timestamp: number; pnl: number }> = [];
+    for (const { buyShares, buyCost, sellShares, yesPrice, sellEvents } of pnlByMarket.values()) {
+      for (const ev of sellEvents) events.push(ev);
+      if (buyShares > 0 && yesPrice != null) {
+        const netOpen = Math.max(0, buyShares - sellShares);
+        if (netOpen > 0)
+          events.push({ timestamp: Date.now(), pnl: netOpen * (yesPrice - buyCost / buyShares) });
+      }
+    }
+    events.sort((a, b) => a.timestamp - b.timestamp);
+    let running = 0;
+    const pts = [0];
+    for (const { pnl } of events) { running += pnl; pts.push(running); }
     return pts;
   })();
 
@@ -1340,7 +1349,13 @@ export default function ProfileClient() {
   const activeOrders = orders.filter((o) => {
     if (o.batchStatus === BatchStatus.OPEN || o.batchStatus === BatchStatus.SETTLING) return true;
     if (o.batchStatus !== BatchStatus.SETTLED) return false;
-    if (o.isSell) return false; // sold positions are closed, not active
+    if (o.isSell) return false; // sell orders appear in Closed
+    // Hide buy positions whose market has been fully exited via sell orders
+    if (o.isBuy && o.shares) {
+      const key = (o.marketId ?? o.batchId.toString()).toLowerCase();
+      const mkt = pnlByMarket.get(key);
+      if (mkt && mkt.sellShares >= mkt.buyShares - 0.001) return false;
+    }
     const yp = o.currentYesPrice;
     if (yp == null) return true; // no price data yet → treat as active
     return yp >= 0.05 && yp <= 0.95; // market still live
