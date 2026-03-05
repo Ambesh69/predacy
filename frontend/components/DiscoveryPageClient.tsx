@@ -88,7 +88,23 @@ export default function DiscoveryPageClient({
       </header>
 
       <main className="flex-1 px-4 md:px-6 py-6">
-        <p className="text-[11px] text-muted-dim tracking-widest uppercase mb-3">{subtitle}</p>
+        <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
+          <p className="text-[11px] text-muted-dim tracking-widest uppercase">{subtitle}</p>
+          <div className="flex items-center gap-2">
+            <Link
+              href="/search"
+              className="text-[10px] tracking-widest uppercase px-2.5 py-1 border border-border text-muted hover:text-text hover:border-border-bright transition-colors"
+            >
+              Search
+            </Link>
+            <Link
+              href="/categories"
+              className="text-[10px] tracking-widest uppercase px-2.5 py-1 border border-border text-muted hover:text-text hover:border-border-bright transition-colors"
+            >
+              Categories
+            </Link>
+          </div>
+        </div>
 
         <DiscoveryControls
           query={searchQuery}

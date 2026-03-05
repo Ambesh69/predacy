@@ -1,19 +1,13 @@
-"use client";
-
-import { use } from "react";
 import DiscoveryPageClient from "@/components/DiscoveryPageClient";
+import { categoryFromSlug } from "@/lib/discovery";
 
-function toCategoryLabel(slug: string): string {
-  return slug
-    .split("-")
-    .filter(Boolean)
-    .map((part) => part[0]?.toUpperCase() + part.slice(1))
-    .join(" ");
-}
-
-export default function CategoryPage({ params }: { params: Promise<{ slug: string }> }) {
-  const { slug } = use(params);
-  const category = toCategoryLabel(slug);
+export default async function CategoryPage({
+  params,
+}: {
+  params: Promise<{ slug: string }>;
+}) {
+  const { slug } = await params;
+  const category = categoryFromSlug(slug);
 
   return (
     <DiscoveryPageClient

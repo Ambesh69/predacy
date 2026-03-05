@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import DiscoveryControls from "@/components/DiscoveryControls";
 import EventCard from "@/components/EventCard";
 import WalletButton from "@/components/WalletButton";
@@ -237,16 +238,33 @@ export default function HomePage() {
       {/* Market list */}
       <main className="flex-1 px-4 md:px-6 py-6">
         <div className="flex items-center justify-between mb-5">
-          <div className="flex items-center gap-3">
-            <h2
-              className="text-lg font-black text-text tracking-tight"
-              style={{ fontFamily: "var(--font-display)" }}
-            >
-              ACTIVE MARKETS
-            </h2>
-            {loading && (
-              <div className="w-3 h-3 border border-muted/40 border-t-transparent rounded-full animate-spin" />
-            )}
+          <div className="flex items-center gap-3 flex-wrap">
+            <div className="flex items-center gap-3">
+              <h2
+                className="text-lg font-black text-text tracking-tight"
+                style={{ fontFamily: "var(--font-display)" }}
+              >
+                ACTIVE MARKETS
+              </h2>
+              {loading && (
+                <div className="w-3 h-3 border border-muted/40 border-t-transparent rounded-full animate-spin" />
+              )}
+            </div>
+
+            <div className="flex items-center gap-2">
+              <Link
+                href="/search"
+                className="text-[10px] tracking-widest uppercase px-2.5 py-1 border border-border text-muted hover:text-text hover:border-border-bright transition-colors"
+              >
+                Search Page
+              </Link>
+              <Link
+                href="/categories"
+                className="text-[10px] tracking-widest uppercase px-2.5 py-1 border border-border text-muted hover:text-text hover:border-border-bright transition-colors"
+              >
+                Categories
+              </Link>
+            </div>
           </div>
           <span className="text-[11px] text-muted-dim tracking-widest">
             LIVE · POLYMARKET PRICES
