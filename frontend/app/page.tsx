@@ -1,9 +1,17 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import DiscoveryControls from "@/components/DiscoveryControls";
 import EventCard from "@/components/EventCard";
 import WalletButton from "@/components/WalletButton";
 import { MOCK_MARKETS, getEvents, type PolyEvent } from "@/lib/polymarket";
+import {
+  filterAndSortEvents,
+  getDiscoveryCategories,
+  getDiscoveryTags,
+  type DiscoverySort,
+} from "@/lib/discovery";
 
 const TICKER_ITEMS = [
   "SEALED BIDS",
@@ -23,7 +31,7 @@ export default function HomePage() {
   const [liveMarketIds, setLiveMarketIds] = useState<Set<string>>(new Set());
   const [recentlyLiveEventIds, setRecentlyLiveEventIds] = useState<Set<string>>(new Set());
   const [searchQuery, setSearchQuery] = useState("");
-  const [sortBy, setSortBy] = useState<"volume_desc" | "volume_asc" | "ending_soon" | "newest">("volume_desc");
+  const [sortBy, setSortBy] = useState<DiscoverySort>("volume_desc");
   const [selectedCategory, setSelectedCategory] = useState("all");
   const [selectedTag, setSelectedTag] = useState("all");
   const prevLiveMarketIdsRef = useRef<Set<string>>(new Set());
@@ -114,62 +122,20 @@ export default function HomePage() {
   }, []);
 
   const categories = useMemo(() => {
-    const set = new Set<string>();
-    for (const e of events) {
-      const c = (e.category ?? "").trim();
-      if (c) set.add(c);
-    }
-    return ["all", ...Array.from(set).sort((a, b) => a.localeCompare(b))];
+    return getDiscoveryCategories(events);
   }, [events]);
 
   const tags = useMemo(() => {
-    const set = new Set<string>();
-    for (const e of events) {
-      for (const t of e.tags ?? []) {
-        const n = String(t).trim();
-        if (n) set.add(n);
-      }
-    }
-    return ["all", ...Array.from(set).sort((a, b) => a.localeCompare(b))];
+    return getDiscoveryTags(events);
   }, [events]);
 
   const displayedEvents = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    let list = [...events];
-
-    if (q) {
-      list = list.filter((e) => {
-        const haystack = [
-          e.title,
-          e.category ?? "",
-          ...(e.tags ?? []),
-          ...e.markets.map((m) => m.question ?? ""),
-        ].join(" ").toLowerCase();
-        return haystack.includes(q);
-      });
-    }
-
-    if (selectedCategory !== "all") {
-      list = list.filter((e) => (e.category ?? "").toLowerCase() === selectedCategory.toLowerCase());
-    }
-
-    if (selectedTag !== "all") {
-      list = list.filter((e) => (e.tags ?? []).some((t) => t.toLowerCase() === selectedTag.toLowerCase()));
-    }
-
-    const endTs = (e: PolyEvent) => {
-      const ts = Date.parse(e.endDate ?? "");
-      return Number.isNaN(ts) ? Number.POSITIVE_INFINITY : ts;
-    };
-
-    list.sort((a, b) => {
-      if (sortBy === "volume_asc") return (a.volumeNum ?? 0) - (b.volumeNum ?? 0);
-      if (sortBy === "ending_soon") return endTs(a) - endTs(b);
-      if (sortBy === "newest") return endTs(b) - endTs(a);
-      return (b.volumeNum ?? 0) - (a.volumeNum ?? 0);
+    return filterAndSortEvents(events, {
+      q: searchQuery,
+      category: selectedCategory,
+      tag: selectedTag,
+      sort: sortBy,
     });
-
-    return list;
   }, [events, searchQuery, selectedCategory, selectedTag, sortBy]);
 
   const hasFilters = searchQuery.trim() !== "" || selectedCategory !== "all" || selectedTag !== "all" || sortBy !== "volume_desc";
@@ -272,102 +238,58 @@ export default function HomePage() {
       {/* Market list */}
       <main className="flex-1 px-4 md:px-6 py-6">
         <div className="flex items-center justify-between mb-5">
-          <div className="flex items-center gap-3">
-            <h2
-              className="text-lg font-black text-text tracking-tight"
-              style={{ fontFamily: "var(--font-display)" }}
-            >
-              ACTIVE MARKETS
-            </h2>
-            {loading && (
-              <div className="w-3 h-3 border border-muted/40 border-t-transparent rounded-full animate-spin" />
-            )}
+          <div className="flex items-center gap-3 flex-wrap">
+            <div className="flex items-center gap-3">
+              <h2
+                className="text-lg font-black text-text tracking-tight"
+                style={{ fontFamily: "var(--font-display)" }}
+              >
+                ACTIVE MARKETS
+              </h2>
+              {loading && (
+                <div className="w-3 h-3 border border-muted/40 border-t-transparent rounded-full animate-spin" />
+              )}
+            </div>
+
+            <div className="flex items-center gap-2">
+              <Link
+                href="/search"
+                className="text-[10px] tracking-widest uppercase px-2.5 py-1 border border-border text-muted hover:text-text hover:border-border-bright transition-colors"
+              >
+                Search Page
+              </Link>
+              <Link
+                href="/categories"
+                className="text-[10px] tracking-widest uppercase px-2.5 py-1 border border-border text-muted hover:text-text hover:border-border-bright transition-colors"
+              >
+                Categories
+              </Link>
+            </div>
           </div>
           <span className="text-[11px] text-muted-dim tracking-widest">
             LIVE · POLYMARKET PRICES
           </span>
         </div>
 
-        {/* Discovery controls */}
-        <div className="mb-4 border border-border bg-surface/40 p-3 md:p-4 space-y-3">
-          <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-3">
-            <label className="flex items-center border border-border bg-surface px-3 py-2 focus-within:border-border-bright">
-              <svg className="w-3.5 h-3.5 text-muted mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="m21 21-4.3-4.3m1.8-5.2a7 7 0 1 1-14 0 7 7 0 0 1 14 0Z" />
-              </svg>
-              <input
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search events, markets, tags..."
-                className="w-full bg-transparent text-[13px] text-text placeholder:text-muted-dim focus:outline-none"
-              />
-            </label>
-
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] text-muted tracking-widest uppercase">Sort</span>
-              <select
-                value={sortBy}
-                onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
-                className="bg-surface border border-border text-[11px] text-text px-2.5 py-2 focus:outline-none focus:border-border-bright"
-              >
-                <option value="volume_desc">Highest Volume</option>
-                <option value="volume_asc">Lowest Volume</option>
-                <option value="ending_soon">Ending Soon</option>
-                <option value="newest">Latest Ending</option>
-              </select>
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-[10px] text-muted tracking-widest uppercase">Category</span>
-            {categories.map((c) => (
-              <button
-                key={c}
-                type="button"
-                onClick={() => setSelectedCategory(c)}
-                className={`px-2.5 py-1 text-[10px] tracking-widest uppercase border transition-colors ${
-                  selectedCategory === c
-                    ? "border-accent/45 text-accent bg-accent/10"
-                    : "border-border text-muted hover:text-text hover:border-border-bright"
-                }`}
-              >
-                {c}
-              </button>
-            ))}
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-[10px] text-muted tracking-widest uppercase">Tag</span>
-            {tags.slice(0, 18).map((t) => (
-              <button
-                key={t}
-                type="button"
-                onClick={() => setSelectedTag(t)}
-                className={`px-2.5 py-1 text-[10px] tracking-widest uppercase border transition-colors ${
-                  selectedTag === t
-                    ? "border-blue/45 text-blue bg-blue/10"
-                    : "border-border text-muted hover:text-text hover:border-border-bright"
-                }`}
-              >
-                {t}
-              </button>
-            ))}
-            {hasFilters && (
-              <button
-                type="button"
-                onClick={() => {
-                  setSearchQuery("");
-                  setSortBy("volume_desc");
-                  setSelectedCategory("all");
-                  setSelectedTag("all");
-                }}
-                className="ml-auto px-2.5 py-1 text-[10px] tracking-widest uppercase border border-danger/45 text-danger hover:bg-danger/10 transition-colors"
-              >
-                Clear Filters
-              </button>
-            )}
-          </div>
-        </div>
+        <DiscoveryControls
+          query={searchQuery}
+          onQueryChange={setSearchQuery}
+          sortBy={sortBy}
+          onSortChange={setSortBy}
+          categories={categories}
+          selectedCategory={selectedCategory}
+          onCategoryChange={setSelectedCategory}
+          tags={tags}
+          selectedTag={selectedTag}
+          onTagChange={setSelectedTag}
+          onClear={() => {
+            setSearchQuery("");
+            setSortBy("volume_desc");
+            setSelectedCategory("all");
+            setSelectedTag("all");
+          }}
+          hasFilters={hasFilters}
+        />
 
         <div className="active-markets-grid grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-px bg-border/90 shadow-[0_0_0_1px_rgba(78,163,255,0.08)]">
           {displayedEvents.map((event, idx) => {
