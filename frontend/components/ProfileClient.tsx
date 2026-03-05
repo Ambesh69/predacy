@@ -1202,17 +1202,57 @@ export default function ProfileClient() {
   const totalVolume   = orders.reduce((s, o) => s + o.rawAmount, 0n);
   const totalOrders   = orders.length;
 
-  // P&L: sum over settled BUY positions that have live price data.
-  // Sell orders are excluded — they're exits, shares are no longer held.
+  // pnlPositions kept for sparkline + biggestWin (cosmetic only — visual chart).
   const pnlPositions = settledOrders.filter(
     (o) => !o.isSell && o.isBuy && o.shares != null && o.currentYesPrice != null && o.filledAmount != null
   );
-  const hasPnlData = !enriching && pnlPositions.length > 0;
-  const totalPnl = pnlPositions.reduce((sum, o) => {
-    const currentValue = (o.shares ?? 0) * (o.currentYesPrice ?? 0);
-    const cost = Number(o.filledAmount ?? 0n) / 1e6;
-    return sum + currentValue - cost;
-  }, 0);
+
+  // P&L: realized (closed sells) + unrealized (net open shares), per market.
+  // Sold shares are subtracted from the open position before computing unrealized,
+  // so exited positions don't inflate the total.
+  const { totalPnl, hasPnlData } = (() => {
+    const byMarket = new Map<string, {
+      buyShares:    number;
+      buyCost:      number;   // total USDC spent on buys
+      sellShares:   number;
+      realizedPnl:  number;   // from sell exits where buyClearingPrice is known
+      yesPrice:     number | null;
+    }>();
+
+    for (const o of settledOrders) {
+      if (o.filledAmount == null || !o.shares) continue;
+      const key = (o.marketId ?? o.batchId.toString()).toLowerCase();
+      const e = byMarket.get(key) ?? { buyShares: 0, buyCost: 0, sellShares: 0, realizedPnl: 0, yesPrice: null };
+      if (o.isBuy && !o.isSell) {
+        e.buyShares += o.shares;
+        e.buyCost   += Number(o.filledAmount) / 1e6;
+        if (o.currentYesPrice != null) e.yesPrice = o.currentYesPrice;
+      } else if (o.isSell && o.buyClearingPrice) {
+        e.sellShares  += o.shares;
+        const costBasis = o.shares * (Number(o.buyClearingPrice) / 1_000_000);
+        e.realizedPnl += Number(o.filledAmount) / 1e6 - costBasis;
+      }
+      byMarket.set(key, e);
+    }
+
+    let total = 0;
+    for (const { buyShares, buyCost, sellShares, realizedPnl, yesPrice } of byMarket.values()) {
+      // Unrealized: only for net open shares
+      if (buyShares > 0 && yesPrice != null) {
+        const netOpen    = Math.max(0, buyShares - sellShares);
+        const costPerShare = buyCost / buyShares;
+        total += netOpen * (yesPrice - costPerShare);
+      }
+      // Realized: from sell exits
+      total += realizedPnl;
+    }
+
+    const hasData = !enriching && byMarket.size > 0 && [...byMarket.values()].some(
+      (v) => v.realizedPnl !== 0 || (v.yesPrice != null && v.buyShares > 0)
+    );
+    return { totalPnl: total, hasPnlData: hasData };
+  })();
+
   const pnlDisplay = hasPnlData
     ? (totalPnl >= 0 ? `+$${totalPnl.toFixed(2)}` : `-$${Math.abs(totalPnl).toFixed(2)}`)
     : (enriching ? "…" : "—");
@@ -1223,11 +1263,26 @@ export default function ProfileClient() {
   // Claimed positions are included — the user still wants to see what their shares are worth.
   // Portfolio value = current market value of held BUY positions only.
   // Sell orders are excluded — those shares were already exited.
-  const positionsValue = settledOrders.reduce((sum, o) => {
-    // Only count YES buy positions — sell orders are exited; isBuy:false w/o isSell guard catches legacy entries
-    if (o.isSell || !o.isBuy || !o.shares || o.currentYesPrice == null) return sum;
-    return sum + o.shares * o.currentYesPrice;
-  }, 0);
+  // Group by marketId; add buy shares, subtract sell shares, floor at 0.
+  // This correctly handles closed positions (sell order offsets the buy).
+  const positionsValue = (() => {
+    const byMarket = new Map<string, { net: number; yesPrice: number }>();
+    for (const o of settledOrders) {
+      if (!o.shares || o.currentYesPrice == null) continue;
+      const key = (o.marketId ?? o.batchId.toString()).toLowerCase();
+      const entry = byMarket.get(key) ?? { net: 0, yesPrice: o.currentYesPrice };
+      if (o.isBuy && !o.isSell) {
+        entry.net += o.shares;
+      } else if (o.isSell) {
+        entry.net -= o.shares;
+      }
+      byMarket.set(key, entry);
+    }
+    return [...byMarket.values()].reduce(
+      (sum, { net, yesPrice }) => sum + Math.max(0, net) * yesPrice,
+      0
+    );
+  })();
   const hasPositionData = settledOrders.some((o) => o.shares != null && o.currentYesPrice != null);
 
   // Biggest single-position win (max positive P&L across all settled positions)
