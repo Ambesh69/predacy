@@ -4,7 +4,7 @@ import { createPublicClient, http, parseAbiItem, recoverMessageAddress } from "v
 import { polygon, polygonAmoy } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 import { createWalletClient } from "viem";
-import { BatchProcessor, BATCH_VAULT_ABI, type RelayerConfig } from "./batchProcessor.js";
+import { BatchProcessor, BATCH_VAULT_ABI, type RelayerConfig, type RequeueResult } from "./batchProcessor.js";
 import { ZKClaimProver } from "./zkClaimProver.js";
 
 // ── Environment ───────────────────────────────────────────────────────────────
@@ -601,6 +601,29 @@ const server = createServer((req, res) => {
     return;
   }
 
+  // GET /order-status/:commitment
+  // Returns requeue status for a given commitment hash.
+  // Frontend polls this after order submission to detect auto-requeue and permanent failure.
+  //
+  // Response:
+  //   { found: false }                                                — no event yet (order still pending)
+  //   { found: true, status: 'requeued', fromBatch, toBatch, remainingAuths, timestamp }
+  //   { found: true, status: 'failed',   fromBatch, remainingAuths, timestamp }
+  if (req.method === "GET" && req.url?.startsWith("/order-status/")) {
+    const commitment = req.url.slice("/order-status/".length).toLowerCase();
+    if (!/^0x[0-9a-f]{64}$/.test(commitment)) {
+      send(400, { error: "Invalid commitment — expected 0x-prefixed 32-byte hex string" });
+      return;
+    }
+    getRequeueStatus(commitment)
+      .then((record) => {
+        if (!record) { send(200, { found: false }); return; }
+        send(200, { found: true, ...record });
+      })
+      .catch((e: any) => send(500, { error: e?.message ?? "Internal error" }));
+    return;
+  }
+
   send(404, { error: "Not found" });
 });
 
@@ -609,6 +632,7 @@ server.listen(PORT, () => {
   console.log(`[Relayer]   GET  /health                               — liveness check`);
   console.log(`[Relayer]   POST /warm                                 — pre-open a batch for a market (fire-and-forget)`);
   console.log(`[Relayer]   POST /order                                — submit off-chain order details (include marketId)`);
+  console.log(`[Relayer]   GET  /order-status/:commitment             — requeue/failure status for a commitment (frontend polling)`);
   console.log(`[Relayer]   GET  /history/:walletAddress              — cross-device order history (indexed by real wallet)`);
   console.log(`[Relayer]   POST /claim-proof                          — generate ZK claim proof and submit claimWithProof()`);
   console.log(`[Relayer]   POST /admin/force-advance?marketId=0x...   — skip stuck SETTLING batch`);
@@ -704,6 +728,49 @@ async function saveWalletHistoryEntry(walletAddr: string, entry: WalletHistoryEn
   const hKey = `predacy:wallet-history:${walletAddr}`;
   await r.hset(hKey, entry.commitment, JSON.stringify(entry));
   await r.expire(hKey, 90 * 24 * 3600); // 90-day TTL
+}
+
+// ── Requeue status store ──────────────────────────────────────────────────────
+// Lightweight per-commitment event log so the frontend can poll for requeue events.
+// Key: predacy:requeue-status:{commitment_lowercase}
+// Value: JSON — latest status event for this commitment
+// TTL: 30 days (order lifecycle ends long before that)
+
+export interface RequeueStatusRecord {
+  status:         "requeued" | "failed";   // 'failed' = no_auths (permanently dropped)
+  fromBatch:      string;
+  toBatch?:       string;                  // present when status='requeued'
+  remainingAuths: number;
+  timestamp:      number;
+}
+
+async function saveRequeueStatuses(results: RequeueResult[]): Promise<void> {
+  const r = await getHistoryRedis();
+  if (!r || results.length === 0) return;
+
+  const pipeline = r.pipeline();
+  for (const res of results) {
+    if (res.status !== "requeued" && res.status !== "no_auths") continue;
+    const record: RequeueStatusRecord = {
+      status:         res.status === "requeued" ? "requeued" : "failed",
+      fromBatch:      res.fromBatchId.toString(),
+      toBatch:        res.toBatchId?.toString(),
+      remainingAuths: res.remainingAuths,
+      timestamp:      Date.now(),
+    };
+    const key = `predacy:requeue-status:${res.commitment.toLowerCase()}`;
+    pipeline.set(key, JSON.stringify(record));
+    pipeline.expire(key, 30 * 24 * 3600); // 30-day TTL
+  }
+  await pipeline.exec();
+}
+
+async function getRequeueStatus(commitment: string): Promise<RequeueStatusRecord | null> {
+  const r = await getHistoryRedis();
+  if (!r) return null;
+  const raw = await r.get(`predacy:requeue-status:${commitment.toLowerCase()}`);
+  if (!raw) return null;
+  try { return JSON.parse(raw) as RequeueStatusRecord; } catch { return null; }
 }
 
 async function markPermanentlyFailed(batchId: bigint): Promise<void> {
@@ -812,7 +879,9 @@ async function sealBatch(state: MarketState, marketId: `0x${string}`, marketKey:
         // signed by the ephemeral wallet at submission time — no user interaction needed.
         if (excludedOrders.length > 0) {
           console.log(`[Relayer] Auto-requeueing ${excludedOrders.length} excluded order(s) for market ${marketKey}`);
-          await state.processor.requeueExcludedOrders(excludedOrders);
+          const results = await state.processor.requeueExcludedOrders(excludedOrders, closingId);
+          // Persist status for frontend polling (GET /order-status/:commitment)
+          saveRequeueStatuses(results).catch(() => {});
         }
       })
       .catch((err) => onSettleFail(state, marketKey, closingId, err))
@@ -878,7 +947,8 @@ const poll = async () => {
               state.settleFailures.delete(settlingId.toString());
               if (excludedOrders.length > 0) {
                 console.log(`[Relayer] Auto-requeueing ${excludedOrders.length} excluded order(s) for market ${marketKey}`);
-                await state.processor.requeueExcludedOrders(excludedOrders);
+                const results = await state.processor.requeueExcludedOrders(excludedOrders, settlingId);
+                saveRequeueStatuses(results).catch(() => {});
               }
             })
             .catch((err) => onSettleFail(state, marketKey, settlingId, err))

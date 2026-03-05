@@ -460,6 +460,14 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   const [sellPrefill, setSellPrefill] = useState<bigint | null>(null);
   // The buy clearing price of the position being closed — stored on the sell order for P&L.
   const [closeBuyClearingPrice, setCloseBuyClearingPrice] = useState<bigint | null>(null);
+  // Requeue UX: poll /order-status after buy order submission.
+  // Cleared when the user dismisses the notification or places a new order.
+  const [pendingRequeueCommitment, setPendingRequeueCommitment] = useState<string | null>(null);
+  const [requeueNotif, setRequeueNotif] = useState<{
+    type: "requeued" | "failed";
+    toBatch?: string;
+    remainingAuths?: number;
+  } | null>(null);
   const selectedMarketId = selectedMarket?.conditionId;
 
   // ── Toast notifications ──────────────────────────────────────────────────────
@@ -474,6 +482,38 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     setToast({ id, message, type });
     setTimeout(() => setToast((prev) => (prev?.id === id ? null : prev)), 4000);
   };
+
+  // ── Requeue status polling ───────────────────────────────────────────────────
+  // After a buy order is submitted, poll GET /order-status/{commitment} every 10s
+  // for up to 10 minutes. Stops when a terminal status ('requeued'/'failed') arrives.
+  useEffect(() => {
+    if (!pendingRequeueCommitment) return;
+    const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
+    if (!relayerUrl) return;
+
+    let cancelled = false;
+    const deadline = Date.now() + 10 * 60 * 1000; // 10-minute polling window
+
+    const poll = async () => {
+      if (cancelled || Date.now() > deadline) return;
+      try {
+        const res = await fetch(`${relayerUrl}/order-status/${pendingRequeueCommitment}`);
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (!data.found) return; // still pending — keep polling
+        setRequeueNotif({
+          type:           data.status,   // 'requeued' | 'failed'
+          toBatch:        data.toBatch,
+          remainingAuths: data.remainingAuths,
+        });
+        setPendingRequeueCommitment(null); // stop polling
+      } catch { /* network error — retry next interval */ }
+    };
+
+    const iv = setInterval(poll, 10_000);
+    poll(); // immediate first check
+    return () => { cancelled = true; clearInterval(iv); };
+  }, [pendingRequeueCommitment]);
 
   // ── Wallet ───────────────────────────────────────────────────────────────────
   const { authenticated, login } = usePrivy();
@@ -904,6 +944,9 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       }
       setOrderSealed(true);
       setActiveTab("positions");
+      // Start polling for auto-requeue events. Commitment is the unique key.
+      setRequeueNotif(null);
+      setPendingRequeueCommitment(actualCommitment.toLowerCase());
       return;
     }
 
@@ -1256,7 +1299,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
               <div className="border-b border-border px-4 flex items-center">
                 <button
                   type="button"
-                  onClick={() => { setActiveTab("order"); setOrderSealed(false); }}
+                  onClick={() => { setActiveTab("order"); setOrderSealed(false); setRequeueNotif(null); setPendingRequeueCommitment(null); }}
                   className={clsx(
                     "px-3 py-3 text-[10px] tracking-widest uppercase transition-colors border-b-2",
                     activeTab === "order"
@@ -1284,6 +1327,39 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
               <div className="flex-1 min-h-0 overflow-y-auto">
               {activeTab === "positions" ? (
                 isConnected && walletAddress ? (
+                  <>
+                  {/* Requeue notification banner */}
+                  {requeueNotif && (
+                    <div className={clsx(
+                      "px-4 py-3 border-b border-border flex items-start gap-3",
+                      requeueNotif.type === "requeued" ? "bg-accent/5" : "bg-red-900/10",
+                    )}>
+                      <div className="flex-1 space-y-0.5">
+                        {requeueNotif.type === "requeued" ? (
+                          <>
+                            <p className="text-[10px] text-accent tracking-widest uppercase">Order Requeued</p>
+                            <p className="text-[11px] text-muted-dim">
+                              Your limit was outside this batch&apos;s clearing price. Your order has been automatically moved to
+                              {requeueNotif.toBatch ? ` Batch #${requeueNotif.toBatch}` : " the next batch"}.
+                              {requeueNotif.remainingAuths === 0 && " This is your last auto-requeue — if excluded again, the order expires."}
+                            </p>
+                          </>
+                        ) : (
+                          <>
+                            <p className="text-[10px] tracking-widest uppercase" style={{ color: "#FF6B6B" }}>Order Expired</p>
+                            <p className="text-[11px] text-muted-dim">
+                              Your limit price was consistently outside the clearing price. The order has been dropped. Place a new order closer to the current market price.
+                            </p>
+                          </>
+                        )}
+                      </div>
+                      <button
+                        onClick={() => setRequeueNotif(null)}
+                        className="text-muted hover:text-text transition-colors text-lg leading-none mt-0.5"
+                        aria-label="Dismiss"
+                      >×</button>
+                    </div>
+                  )}
                   <PositionsPanel
                     walletAddress={walletAddress}
                     marketId={selectedMarketId}
@@ -1297,6 +1373,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                     onClosePosition={handleClosePosition}
                     onMarketIdsFound={setHistoricalMarketIds}
                   />
+                  </>
                 ) : (
                   <div className="flex-1 flex flex-col items-center justify-center gap-3 p-6">
                     <p className="text-muted text-xs text-center">Connect your wallet to view positions</p>

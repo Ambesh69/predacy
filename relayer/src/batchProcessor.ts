@@ -7,6 +7,19 @@ import { PolymarketClient } from "./polymarketClient.js";
 import { createOrderStore, type OrderStore } from "./orderStore.js";
 import type { Order, Commitment, BatchInfo, TransferAuth, RequeueAuth } from "./types.js";
 
+/** Result for one excluded order from requeueExcludedOrders(). */
+export interface RequeueResult {
+  commitment:      `0x${string}`;
+  /** 'requeued'  — successfully committed to toBatchId */
+  /** 'no_auths'  — no pre-signed requeue sigs left; permanently dropped */
+  /** 'error'     — on-chain tx failed; may retry next batch if auths remain */
+  status:          "requeued" | "no_auths" | "error";
+  fromBatchId:     bigint;
+  toBatchId?:      bigint;
+  remainingAuths:  number;
+  errorMessage?:   string;
+}
+
 // Polygon Amoy requires min 25 gwei priority fee. Apply to every write.
 const AMOY_GAS = {
   maxPriorityFeePerGas: 30_000_000_000n, // 30 gwei
@@ -758,11 +771,15 @@ export class BatchProcessor {
    */
   async requeueExcludedOrders(
     excludedOrders: Array<{ order: Order; commitment: `0x${string}` }>,
-  ): Promise<void> {
+    fromBatchId: bigint,
+  ): Promise<RequeueResult[]> {
+    const results: RequeueResult[] = [];
+
     for (const { order, commitment } of excludedOrders) {
       if (!order.isBuy) continue; // sell order requeue is not supported (YES tokens pre-deposited)
       if (!order.requeueAuths || order.requeueAuths.length === 0) {
         console.log(`[BatchProcessor] No requeue auths remaining for ${commitment} — cannot auto-requeue`);
+        results.push({ commitment, status: "no_auths", fromBatchId, remainingAuths: 0 });
         continue;
       }
 
@@ -803,10 +820,14 @@ export class BatchProcessor {
         await this.store.save(newBatchId.toString(), commitment.toLowerCase(), updatedOrder);
 
         console.log(`[BatchProcessor] Requeued ${commitment} → batch ${newBatchId} (${remainingAuths.length} requeue auth(s) remaining)`);
+        results.push({ commitment, status: "requeued", fromBatchId, toBatchId: newBatchId, remainingAuths: remainingAuths.length });
       } catch (err: any) {
         console.error(`[BatchProcessor] Failed to requeue ${commitment}:`, err.message);
+        results.push({ commitment, status: "error", fromBatchId, remainingAuths: order.requeueAuths.length - 1, errorMessage: err.message });
       }
     }
+
+    return results;
   }
 
   // ─── Helpers ───────────────────────────────────────────────────────────────
