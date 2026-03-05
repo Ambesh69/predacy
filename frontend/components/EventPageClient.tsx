@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, use } from "react";
+import { useState, useEffect, useRef, useCallback, use } from "react";
 import Link from "next/link";
 import { clsx } from "clsx";
 import {
@@ -456,6 +456,8 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   const [leftTab, setLeftTab]     = useState<"outcomes" | "orderbook">("outcomes");
   const [claimLoading, setClaimLoading] = useState(false);
   const [historicalMarketIds, setHistoricalMarketIds] = useState<`0x${string}`[]>([]);
+  // Pre-fill for SELL mode when user clicks "CLOSE POSITION" on a claimed entry.
+  const [sellPrefill, setSellPrefill] = useState<bigint | null>(null);
   const selectedMarketId = selectedMarket?.conditionId;
 
   // ── Toast notifications ──────────────────────────────────────────────────────
@@ -636,6 +638,12 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     if (!onTarget) throw new Error(`Still on wrong network. Please switch to ${ACTIVE_CHAIN_NAME} in your wallet.`);
     return createWalletClient({ account: walletAddress, chain: ACTIVE_CHAIN, transport: custom(provider) });
   };
+
+  // ── Close position: pre-fill the SELL order form and switch to ORDER tab ────────
+  const handleClosePosition = useCallback((yesAmount: bigint) => {
+    setSellPrefill(yesAmount);
+    setActiveTab("order");
+  }, []);
 
   // ── Claim position via ZK proof (relayer submits on-chain — no wallet tx needed) ──
   // The relayer generates a ZK proof of order membership and calls claimWithProof.
@@ -1275,10 +1283,12 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                     marketId={selectedMarketId}
                     currentBatchId={batch.batchId}
                     currentBatchStatus={batch.status}
+                    currentBatchClearingPrice={batch.clearingPrice}
                     currentBatchCommitments={commitments
                       .filter((c) => c.trader === walletAddress)
                       .map((c) => ({ hash: c.hash, amount: c.amount }))}
                     onClaim={handleClaimPosition}
+                    onClosePosition={handleClosePosition}
                     onMarketIdsFound={setHistoricalMarketIds}
                   />
                 ) : (
@@ -1367,6 +1377,8 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                         submitStep={submitStep}
                         balanceVersion={balanceVersion}
                         candidateMarketIds={[selectedMarket.conditionId as `0x${string}`, ...historicalMarketIds]}
+                        sellPrefill={sellPrefill}
+                        onSellPrefillConsumed={() => setSellPrefill(null)}
                       />
                     </div>
                   )}

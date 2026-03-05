@@ -1252,6 +1252,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
                 walletAddress={walletAddress}
                 currentBatchId={batch.batchId}
                 currentBatchStatus={batch.status}
+                currentBatchClearingPrice={batch.clearingPrice}
                 currentBatchCommitments={commitments
                   .filter((c) => c.trader === walletAddress)
                   .map((c) => ({ hash: c.hash, amount: c.amount }))}

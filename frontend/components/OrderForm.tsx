@@ -32,6 +32,8 @@ interface OrderFormProps {
   submitStep?: "approving" | "signing" | "railgun" | null;
   balanceVersion?: number;     // bumped by parent after a successful claim
   candidateMarketIds?: `0x${string}`[];  // all market IDs from batch history to check balance against
+  sellPrefill?: bigint | null;           // YES token amount to pre-fill in SELL mode (from "CLOSE POSITION")
+  onSellPrefillConsumed?: () => void;    // called so parent can clear the prefill
 }
 
 const PRICE_STEP        = 10_000;
@@ -70,6 +72,8 @@ export default function OrderForm({
   submitStep,
   balanceVersion = 0,
   candidateMarketIds = [],
+  sellPrefill,
+  onSellPrefillConsumed,
 }: OrderFormProps) {
   const [mode, setMode]           = useState<"buy" | "sell">("buy");
   const [isBuy, setIsBuy]         = useState(true);   // YES vs NO within buy mode
@@ -85,6 +89,19 @@ export default function OrderForm({
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showPrivacy,  setShowPrivacy]  = useState(false);
+
+  // ── Sell prefill (from "CLOSE POSITION" button) ──────────────────────────
+  useEffect(() => {
+    if (!sellPrefill || sellPrefill === 0n) return;
+    setMode("sell");
+    setSellYes(true);
+    // Convert 6-decimal YES token bigint to a display string (trim trailing zeros)
+    const displayAmount = (Number(sellPrefill) / 1_000_000)
+      .toFixed(6)
+      .replace(/\.?0+$/, "");
+    setAmountDisplay(displayAmount);
+    onSellPrefillConsumed?.();
+  }, [sellPrefill]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Slippage (market orders) ─────────────────────────────────────────────
   const [slippageBps, setSlippageBpsState] = useState<number>(() => {

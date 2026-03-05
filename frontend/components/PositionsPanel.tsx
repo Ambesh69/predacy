@@ -39,18 +39,26 @@ interface HistoricalPosition {
 }
 
 interface PositionsPanelProps {
-  walletAddress:           `0x${string}`;
-  marketId?:               string;  // conditionId — filter positions to this market only
-  currentBatchId:          bigint;
-  currentBatchStatus:      BatchStatus;
-  currentBatchCommitments: Array<{ hash: `0x${string}`; amount?: bigint }>;
-  onClaim:                 (batchId: bigint) => Promise<void>;
-  onMarketIdsFound?:       (ids: `0x${string}`[]) => void;
+  walletAddress:              `0x${string}`;
+  marketId?:                  string;  // conditionId — filter positions to this market only
+  currentBatchId:             bigint;
+  currentBatchStatus:         BatchStatus;
+  currentBatchClearingPrice:  bigint;  // needed to compute YES token count for close
+  currentBatchCommitments:    Array<{ hash: `0x${string}`; amount?: bigint }>;
+  onClaim:                    (batchId: bigint) => Promise<void>;
+  onClosePosition?:           (yesAmount: bigint) => void; // pre-fill sell form
+  onMarketIdsFound?:          (ids: `0x${string}`[]) => void;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function fUsdc(v: bigint) { return `$${(Number(v) / 1e6).toFixed(2)}`; }
+
+/** YES token amount (6-decimal) that corresponds to a filled buy position. */
+function computeYesAmount(filledAmount: bigint, clearingPrice: bigint): bigint {
+  if (clearingPrice === 0n || filledAmount === 0n) return 0n;
+  return filledAmount * 1_000_000n / clearingPrice;
+}
 
 function computeShares(filledAmount: bigint, clearingPrice: bigint): number {
   if (clearingPrice === 0n || filledAmount === 0n) return 0;
@@ -101,12 +109,13 @@ interface PositionRowProps {
   onClaim:        (batchId: bigint) => Promise<void>;
   isClaiming:     boolean;
   claimError?:    string;
-  isActive:       boolean;  // true = unclaimed settled; false = closed
+  isActive:       boolean;  // true = unclaimed settled; false = claimed (holding)
+  onClose?:       () => void; // pre-fills SELL form for this position
 }
 
 function PositionRow({
   batchId, position, clearingPrice, marketQuestion, shares,
-  onClaim, isClaiming, claimError, isActive,
+  onClaim, isClaiming, claimError, isActive, onClose,
 }: PositionRowProps) {
 
   const avgCents    = clearingPrice > 0n ? (Number(clearingPrice) / 1e4).toFixed(1) : "—";
@@ -114,10 +123,7 @@ function PositionRow({
   const sharesDisp  = shares != null ? shares.toFixed(1) : "—";
 
   return (
-    <div className={clsx(
-      "px-4 py-3 border-b border-border/40 last:border-b-0 space-y-2",
-      !isActive && "opacity-60",
-    )}>
+    <div className="px-4 py-3 border-b border-border/40 last:border-b-0 space-y-2">
       {/* Row header: direction badge + question */}
       <div className="flex items-start gap-2 min-w-0">
         <div className="flex-shrink-0 pt-px">
@@ -167,7 +173,17 @@ function PositionRow({
           )}
         </div>
       ) : (
-        <span className="text-[9px] text-accent/60 tracking-widest uppercase">CLAIMED ✓</span>
+        <div className="space-y-1.5">
+          <span className="text-[9px] text-accent/60 tracking-widest uppercase">CLAIMED ✓</span>
+          {onClose && (
+            <button
+              onClick={onClose}
+              className="w-full py-1.5 border border-border-bright text-muted text-[10px] tracking-widest uppercase hover:border-text/30 hover:text-text transition-colors"
+            >
+              CLOSE POSITION
+            </button>
+          )}
+        </div>
       )}
     </div>
   );
@@ -305,8 +321,10 @@ export default function PositionsPanel({
   marketId,
   currentBatchId,
   currentBatchStatus,
+  currentBatchClearingPrice,
   currentBatchCommitments,
   onClaim,
+  onClosePosition,
   onMarketIdsFound,
 }: PositionsPanelProps) {
   const [historicalPositions, setHistoricalPositions] = useState<HistoricalPosition[]>([]);
@@ -658,6 +676,11 @@ export default function PositionsPanel({
                   isClaiming={claimingBatchId === currentBatchId}
                   claimError={claimErrors[currentBatchId.toString()]}
                   isActive={!currentPosition.claimed}
+                  onClose={
+                    currentPosition.claimed && onClosePosition
+                      ? () => onClosePosition(computeYesAmount(currentPosition.filledAmount, currentBatchClearingPrice))
+                      : undefined
+                  }
                 />
               )}
 
@@ -721,6 +744,11 @@ export default function PositionsPanel({
                     isClaiming={claimingBatchId === hp.batchId}
                     claimError={claimErrors[hp.batchId.toString()]}
                     isActive={!hp.position.claimed}
+                    onClose={
+                      hp.position.claimed && onClosePosition
+                        ? () => onClosePosition(computeYesAmount(hp.position.filledAmount, hp.clearingPrice))
+                        : undefined
+                    }
                   />
                 ))
               )}
