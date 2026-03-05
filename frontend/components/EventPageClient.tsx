@@ -1014,7 +1014,6 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   const selNoPriceRaw = selectedMarket ? parseFloat(selectedMarket.outcomePrices?.[1] ?? "0") : 0;
   const selNoPrice    = selNoPriceRaw >= 0.999 ? (1 - selNoPriceRaw) : selNoPriceRaw;
   const selYesProb  = Math.round(selYesPrice * 100);
-  const selBarColor = selYesProb > 60 ? "#00FFB3" : selYesProb < 20 ? "#FF3355" : "#4D83FF";
 
   return (
     <div className="h-screen flex flex-col overflow-hidden">
@@ -1047,7 +1046,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         </div>
       </header>
 
-      {/* Event title */}
+      {/* Event title + selected outcome context */}
       <div className="border-b border-border px-6 py-4">
         <div className="flex items-center gap-2 mb-1.5 flex-wrap">
           {event.category && (
@@ -1061,6 +1060,27 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         <h1 className="text-xl font-black text-text tracking-tight leading-snug" style={{ fontFamily: "var(--font-display)" }}>
           {event.title}
         </h1>
+        <div className="mt-2.5 flex flex-wrap items-center gap-2.5 border border-border bg-surface/35 px-3 py-2">
+          <span className="text-[10px] text-muted tracking-widest uppercase">Selected</span>
+          <span className="text-sm font-bold text-text">
+            {selectedMarket ? outcomeLabel(selectedMarket) : "Select an outcome"}
+          </span>
+          {selectedMarket && (
+            <>
+              <span className="text-muted">•</span>
+              <span className="text-sm font-black text-text tabular-nums" style={{ fontFamily: "var(--font-display)" }}>
+                {selYesProb}% chance
+              </span>
+              <span className="text-muted">•</span>
+              <span className="text-[11px] text-accent tabular-nums">
+                YES {fmtCents(selYesPrice)}
+              </span>
+              <span className="text-[11px] text-danger tabular-nums">
+                NO {fmtCents(selNoPrice)}
+              </span>
+            </>
+          )}
+        </div>
       </div>
 
       {/* Chain error */}
@@ -1199,28 +1219,8 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
 
           {selectedMarket ? (
             <>
-              {/* Selected outcome header */}
-              <div className="px-4 py-3 border-b border-border">
-                <div className="flex items-center gap-2 mb-1">
-                  <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: selBarColor }} />
-                  <span className="text-xs text-muted tracking-widest uppercase">{event.title}</span>
-                </div>
-                <p className="text-sm font-bold text-text leading-snug">{outcomeLabel(selectedMarket)}</p>
-                <div className="flex items-center gap-2 mt-1.5">
-                  <span className="text-2xl font-black" style={{ fontFamily: "var(--font-display)", color: selBarColor }}>
-                    {fmtPct(selYesPrice)}
-                  </span>
-                  <span className="text-[10px] text-muted tracking-widest uppercase">chance</span>
-                  <div className="ml-auto flex items-center gap-1.5">
-                    <span className="text-[10px] px-1.5 py-0.5 border font-mono" style={{ borderColor: "#00FFB340", color: "#00FFB3", background: "#00FFB308" }}>
-                      YES {fmtCents(selYesPrice)}
-                    </span>
-                    <span className="text-[10px] px-1.5 py-0.5 border font-mono"
-                      style={{ borderColor: "#FF335540", color: "#FF3355", background: "#FF335508" }}>
-                      NO {fmtCents(selNoPrice)}
-                    </span>
-                  </div>
-                </div>
+              <div className="px-4 py-3 border-b border-border bg-surface/20">
+                <p className="text-[11px] text-muted tracking-widest uppercase">Trade</p>
               </div>
 
               {/* Order / My Positions tab bar */}
