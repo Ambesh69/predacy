@@ -121,7 +121,12 @@ const INTERVALS: { label: string; value: Interval; fidelity: number }[] = [
   { label: "ALL", value: "max", fidelity: 1440 },
 ];
 
-interface ChartSeries { name: string; color: string; pts: Array<{ t: number; p: number }>; }
+interface ChartSeries {
+  marketId: string;
+  name: string;
+  color: string;
+  pts: Array<{ t: number; p: number }>;
+}
 
 // SVG viewBox geometry
 const VW = 960, VH = 310;
@@ -163,7 +168,13 @@ function fmtXLabel(ts: number, iv: Interval): string {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric" }); // "Nov 15" for 1W
 }
 
-function MultiOutcomeChart({ markets }: { markets: Market[] }) {
+function MultiOutcomeChart({
+  markets,
+  selectedMarketId,
+}: {
+  markets: Market[];
+  selectedMarketId?: string;
+}) {
   const [iv, setIv]           = useState<Interval>("1d");
   const [lines, setLines]     = useState<ChartSeries[]>([]);
   const [loading, setLoading] = useState(true);
@@ -173,36 +184,42 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
   // chart outcomes: highest probability candidate first, then next, etc.
   // The Gamma API's own market order is NOT by probability (it's internal/alphabetical),
   // so we must sort ourselves. Judy Shelton at 4.5% should always rank above <1% candidates.
-  const top4 = filterAndDeduplicateMarkets(markets)
+  const sortedMarkets = filterAndDeduplicateMarkets(markets)
     .filter((m) => !!getTokenId(m))
     .sort((a, b) =>
       parseFloat(b.outcomePrices?.[0] ?? "0") - parseFloat(a.outcomePrices?.[0] ?? "0")
-    )
-    .slice(0, 4);
+    );
+  const selectedMarket = selectedMarketId
+    ? sortedMarkets.find((m) => m.conditionId === selectedMarketId)
+    : undefined;
+  const chartMarkets = selectedMarket && !sortedMarkets.slice(0, 4).some((m) => m.conditionId === selectedMarket.conditionId)
+    ? [selectedMarket, ...sortedMarkets.filter((m) => m.conditionId !== selectedMarket.conditionId).slice(0, 3)]
+    : sortedMarkets.slice(0, 4);
 
-  const marketKey = top4.map((m) => getTokenId(m) ?? m.conditionId).join(",");
+  const marketKey = chartMarkets.map((m) => getTokenId(m) ?? m.conditionId).join(",");
 
   useEffect(() => {
-    if (top4.length === 0) { setLoading(false); return; }
+    if (chartMarkets.length === 0) { setLoading(false); return; }
     setLoading(true);
     setHoverX(null);
     const fidelity = INTERVALS.find((i) => i.value === iv)?.fidelity ?? 60;
     Promise.all(
-      top4.map((m, idx) =>
+      chartMarkets.map((m, idx) =>
         fetch(`/api/prices?token_id=${encodeURIComponent(getTokenId(m)!)}&interval=${iv}&fidelity=${fidelity}`)
           .then((r) => r.json())
           .then((d) => ({
+            marketId: m.conditionId,
             name:  outcomeLabel(m),
             color: OUTCOME_COLORS[idx],
             pts:   (d.history ?? []).filter((p: any) => typeof p.p === "number" && p.p > 0) as Array<{ t: number; p: number }>,
           }))
-          .catch(() => ({ name: outcomeLabel(m), color: OUTCOME_COLORS[idx], pts: [] as Array<{ t: number; p: number }> })),
+          .catch(() => ({ marketId: m.conditionId, name: outcomeLabel(m), color: OUTCOME_COLORS[idx], pts: [] as Array<{ t: number; p: number }> })),
       ),
     )
       .then((results) => setLines(results.filter((r) => r.pts.length >= 2)))
       .finally(() => setLoading(false));
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [iv, marketKey]);
+  }, [iv, marketKey, selectedMarketId]);
 
   const hasData = lines.some((l) => l.pts.length >= 2);
 
@@ -275,13 +292,19 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
       {/* ── Legend: dot + name (no text), hover updates ───────────────────── */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-border/50 gap-3">
         <div className="flex items-center gap-2.5 flex-wrap min-w-0">
-          {(lines.length > 0 ? lines : top4.slice(0, 4).map((m, i) => ({ name: outcomeLabel(m), color: OUTCOME_COLORS[i], pts: [] as ChartSeries["pts"] }))).map((l, i) => {
+          {(lines.length > 0 ? lines : chartMarkets.slice(0, 4).map((m, i) => ({
+            marketId: m.conditionId,
+            name: outcomeLabel(m),
+            color: OUTCOME_COLORS[i],
+            pts: [] as ChartSeries["pts"],
+          }))).map((l, i) => {
             const liveP = l.pts[l.pts.length - 1]?.p ?? 0;
             const dispP = (inPlot && hoverT) ? lerp(l.pts, hoverT) : liveP;
+            const isSelected = !!selectedMarketId && l.marketId === selectedMarketId;
             return (
               <div key={i} className="flex items-center gap-1.5 flex-shrink-0">
                 <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: l.color }} />
-                <span className="text-[11px] text-text/70 truncate max-w-[160px]">{l.name}</span>
+                <span className={clsx("text-[11px] truncate max-w-[160px]", isSelected ? "text-text" : "text-text/70")}>{l.name}</span>
                 <span className="text-[11px] font-bold tabular-nums" style={{ color: l.color }}>
                   {fmtPct(dispP)}
                 </span>
@@ -335,6 +358,7 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
 
             {/* Price lines + current-value dots */}
             {lines.map((line, i) => {
+              const isSelected = !!selectedMarketId && line.marketId === selectedMarketId;
               const ds     = downsample(line.pts);
               const svgPts = ds.map((p) => ({ x: toX(p.t), y: toY(p.p) }));
               const path   = smoothPath(svgPts);
@@ -342,8 +366,8 @@ function MultiOutcomeChart({ markets }: { markets: Market[] }) {
               return (
                 <g key={i}>
                   <path d={path} fill="none" stroke={line.color}
-                    strokeWidth={i === 0 ? "2" : "1.5"} strokeLinejoin="round" strokeLinecap="round"
-                    opacity={i === 0 ? 1 : 0.85} />
+                    strokeWidth={isSelected ? "2.8" : "1.35"} strokeLinejoin="round" strokeLinecap="round"
+                    opacity={isSelected || !selectedMarketId ? 0.95 : 0.32} />
                   {last && !inPlot && (
                     <g>
                       {/* Pulsating outer ring */}
@@ -1096,7 +1120,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         <div className="flex-1 flex flex-col min-h-0">
 
           {/* Chart only shown on Outcomes tab — hide when Orderbook active to give it full height */}
-          {leftTab === "outcomes" && <MultiOutcomeChart markets={event.markets} />}
+          {leftTab === "outcomes" && <MultiOutcomeChart markets={event.markets} selectedMarketId={selectedMarket?.conditionId} />}
 
           {/* Subheader with Outcomes / My Positions / Orderbook tab toggle */}
           <div className="px-5 py-2.5 border-b border-border flex items-center justify-between flex-shrink-0">
@@ -1190,8 +1214,10 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                   key={market.conditionId}
                   onClick={() => { setSelectedMarket(market); setOrderSealed(false); }}
                   className={clsx(
-                    "flex items-center gap-3 px-5 py-3 cursor-crosshair transition-colors group",
-                    sel ? "bg-white/[0.04]" : "hover:bg-white/[0.02]",
+                    "flex items-center gap-3 px-5 py-3 cursor-crosshair transition-colors group border-l-2",
+                    sel
+                      ? "bg-surface/70 border-l-accent shadow-[inset_0_0_0_1px_rgba(78,163,255,0.22)]"
+                      : "border-l-transparent hover:bg-white/[0.02]",
                   )}
                 >
                   {/* Rank */}
