@@ -526,7 +526,7 @@ export class BatchProcessor {
     // ─── 4a. Price discovery ──────────────────────────────────────────────────
     if (this.config.polymarket.apiKey) {
       try {
-        const market = await this.polymarket.getMarket(batchInfo.marketId.slice(2));
+        const market = await this.polymarket.getMarket(batchInfo.marketId);
         cachedYesToken =
           market.tokens.find((t) => t.outcome?.toLowerCase() === "yes")?.token_id ??
           market.clobTokenIds?.[0];
@@ -549,7 +549,7 @@ export class BatchProcessor {
       // Try Gamma API (public, no auth required) to get actual YES market price.
       // This avoids the 65¢ hardcode killing buy orders on low-probability markets.
       try {
-        const market = await this.polymarket.getMarket(batchInfo.marketId.slice(2));
+        const market = await this.polymarket.getMarket(batchInfo.marketId);
         const yesPrice = parseFloat(market.outcomePrices?.[0] ?? "0");
         if (yesPrice > 0 && yesPrice < 1) {
           effectiveClearingPrice = BigInt(Math.round(yesPrice * 1_000_000));
