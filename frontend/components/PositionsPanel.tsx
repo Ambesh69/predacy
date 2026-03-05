@@ -35,6 +35,7 @@ interface HistoricalPosition {
 
 interface PositionsPanelProps {
   walletAddress:           `0x${string}`;
+  marketId?:               string;  // conditionId — filter positions to this market only
   currentBatchId:          bigint;
   currentBatchStatus:      BatchStatus;
   currentBatchCommitments: Array<{ hash: `0x${string}`; amount?: bigint }>;
@@ -230,6 +231,7 @@ function ActivityRow({
 
 export default function PositionsPanel({
   walletAddress,
+  marketId,
   currentBatchId,
   currentBatchStatus,
   currentBatchCommitments,
@@ -290,15 +292,16 @@ export default function PositionsPanel({
     let storedOrders: Array<{
       commitment: string; batchId: string; salt?: string; claimed?: boolean;
       isBuy: boolean; amount: string; marketQuestion?: string; timestamp?: number;
+      marketId?: string;
     }> = [];
     try {
       const storageKey = `predacy:orders:${walletAddress.toLowerCase()}`;
       storedOrders = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
     } catch { /* ignore */ }
 
-    const historicalOrders = storedOrders.filter(
-      (o) => o.batchId !== currentBatchId.toString()
-    );
+    const historicalOrders = storedOrders
+      .filter((o) => !marketId || o.marketId === marketId)
+      .filter((o) => o.batchId !== currentBatchId.toString());
 
     // Keep raw order list for Activity tab (enriched below)
     const rawActivity: typeof allStoredOrders = historicalOrders.map((o) => ({
@@ -411,7 +414,7 @@ export default function PositionsPanel({
 
     const uniqueMarketIds = [...new Set(results.map((r) => r.batchMarketId))];
     onMarketIdsFound?.(uniqueMarketIds);
-  }, [currentBatchId, walletAddress, onMarketIdsFound]);
+  }, [currentBatchId, marketId, walletAddress, onMarketIdsFound]);
 
   useEffect(() => {
     scanHistory();

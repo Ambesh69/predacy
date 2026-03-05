@@ -1261,6 +1261,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                 isConnected && walletAddress ? (
                   <PositionsPanel
                     walletAddress={walletAddress}
+                    marketId={selectedMarketId}
                     currentBatchId={batch.batchId}
                     currentBatchStatus={batch.status}
                     currentBatchCommitments={commitments
