@@ -579,8 +579,14 @@ export default function PositionsPanel({
     currentPosition !== null &&
     (currentPosition.filledAmount > 0n || currentPosition.refundAmount > 0n);
 
-  // Keep legacy alias used by a few downstream checks (unclaimed only)
-  const currentIsActive = currentPositionVisible && !currentPosition?.claimed;
+  // A current-batch sell (isBuy:false) should appear in Closed, not Active.
+  const currentIsSell = currentPositionVisible && currentPosition != null
+    && (currentPosition.isSell === true || !currentPosition.isBuy);
+  const currentPositionInActive = currentPositionVisible && !currentIsSell;
+  const currentPositionInClosed = currentPositionVisible && currentIsSell;
+
+  // Keep legacy alias used by a few downstream checks (unclaimed buy only)
+  const currentIsActive = currentPositionInActive && !currentPosition?.claimed;
 
   // Current batch for Activity tab
   const currentForActivity = hasCurrentOrder ? currentBatchCommitments[0] : null;
@@ -635,8 +641,8 @@ export default function PositionsPanel({
           <div className="border-b border-border/50 flex items-center px-4 gap-4 flex-shrink-0">
             {(["active", "closed"] as const).map((sub) => {
               const count = sub === "active"
-                ? activePositions.length + pendingPositions.length + (currentPositionVisible ? 1 : 0)
-                : closedPositions.length;
+                ? activePositions.length + pendingPositions.length + (currentPositionInActive ? 1 : 0)
+                : closedPositions.length + (currentPositionInClosed ? 1 : 0);
               return (
                 <button
                   key={sub}
@@ -685,8 +691,8 @@ export default function PositionsPanel({
                 </div>
               )}
 
-              {/* Current batch settled (claimed or unclaimed — stays in Active) */}
-              {currentPositionVisible && currentPosition && (
+              {/* Current batch settled buy (claimed or unclaimed — stays in Active) */}
+              {currentPositionInActive && currentPosition && (
                 <PositionRow
                   batchId={currentBatchId}
                   position={currentPosition}
@@ -695,9 +701,9 @@ export default function PositionsPanel({
                   isClaiming={claimingBatchId === currentBatchId}
                   claimError={claimErrors[currentBatchId.toString()]}
                   isActive={!currentPosition.claimed}
-                  isSell={currentPosition.isSell}
+                  isSell={false}
                   onClose={
-                    !currentPosition.isSell && currentPosition.claimed && onClosePosition
+                    currentPosition.claimed && onClosePosition
                       ? () => onClosePosition(computeYesAmount(currentPosition.filledAmount, currentBatchClearingPrice), currentBatchClearingPrice)
                       : undefined
                   }
@@ -779,7 +785,7 @@ export default function PositionsPanel({
           {/* ── CLOSED sub-tab ───────────────────────────────────────────── */}
           {posTab === "closed" && (
             <div className="flex-1 overflow-y-auto">
-              {closedPositions.length === 0 ? (
+              {closedPositions.length === 0 && !currentPositionInClosed ? (
                 <div className="px-4 py-8 text-center">
                   <p className="text-[11px] text-muted-dim">No closed positions yet.</p>
                   <p className="text-[10px] text-muted-dim mt-1">
@@ -787,20 +793,34 @@ export default function PositionsPanel({
                   </p>
                 </div>
               ) : (
-                closedPositions.map((hp) => (
-                  <PositionRow
-                    key={hp.batchId.toString()}
-                    batchId={hp.batchId}
-                    position={hp.position}
-                    clearingPrice={hp.clearingPrice}
-                    marketQuestion={hp.marketQuestion}
-                    shares={hp.shares}
-                    onClaim={handleClaim}
-                    isClaiming={false}
-                    isActive={false}
-                    isSell={hp.isSell || !hp.position.isBuy}
-                  />
-                ))
+                <>
+                  {/* Current-batch sell (most recent, show first) */}
+                  {currentPositionInClosed && currentPosition && (
+                    <PositionRow
+                      batchId={currentBatchId}
+                      position={currentPosition}
+                      clearingPrice={currentBatchClearingPrice}
+                      onClaim={handleClaim}
+                      isClaiming={false}
+                      isActive={false}
+                      isSell={true}
+                    />
+                  )}
+                  {closedPositions.map((hp) => (
+                    <PositionRow
+                      key={hp.batchId.toString()}
+                      batchId={hp.batchId}
+                      position={hp.position}
+                      clearingPrice={hp.clearingPrice}
+                      marketQuestion={hp.marketQuestion}
+                      shares={hp.shares}
+                      onClaim={handleClaim}
+                      isClaiming={false}
+                      isActive={false}
+                      isSell={hp.isSell || !hp.position.isBuy}
+                    />
+                  ))}
+                </>
               )}
             </div>
           )}
