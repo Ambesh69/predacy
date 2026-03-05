@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import EventCard from "@/components/EventCard";
 import WalletButton from "@/components/WalletButton";
 import { MOCK_MARKETS, getEvents, type PolyEvent } from "@/lib/polymarket";
@@ -21,6 +21,9 @@ export default function HomePage() {
   );
   const [loading, setLoading] = useState(true);
   const [liveMarketIds, setLiveMarketIds] = useState<Set<string>>(new Set());
+  const [recentlyLiveEventIds, setRecentlyLiveEventIds] = useState<Set<string>>(new Set());
+  const prevLiveMarketIdsRef = useRef<Set<string>>(new Set());
+  const shimmerTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
   // Fetch all markets with active batches from the relayer's /health endpoint.
   // Any market the relayer is tracking gets the "LIVE" badge.
@@ -58,14 +61,62 @@ export default function HomePage() {
       .finally(() => setLoading(false));
   }, [liveMarketIds]);
 
+  // Targeted shimmer:
+  // 1) top-volume cards (first 2 in sorted list),
+  // 2) cards whose markets just became LIVE (for a short pulse window).
+  useEffect(() => {
+    if (events.length === 0) return;
+    const prev = prevLiveMarketIdsRef.current;
+    const next = liveMarketIds;
+
+    const newlyLiveMarketIds = [...next].filter((id) => !prev.has(id));
+    if (newlyLiveMarketIds.length > 0) {
+      const newlyLiveEventIds = events
+        .filter((e) => e.markets.some((m) => newlyLiveMarketIds.includes(m.conditionId.toLowerCase())))
+        .map((e) => e.id);
+
+      if (newlyLiveEventIds.length > 0) {
+        setRecentlyLiveEventIds((curr) => {
+          const updated = new Set(curr);
+          for (const id of newlyLiveEventIds) updated.add(id);
+          return updated;
+        });
+
+        for (const id of newlyLiveEventIds) {
+          const existing = shimmerTimersRef.current.get(id);
+          if (existing) clearTimeout(existing);
+          const timer = setTimeout(() => {
+            setRecentlyLiveEventIds((curr) => {
+              const updated = new Set(curr);
+              updated.delete(id);
+              return updated;
+            });
+            shimmerTimersRef.current.delete(id);
+          }, 20000);
+          shimmerTimersRef.current.set(id, timer);
+        }
+      }
+    }
+
+    prevLiveMarketIdsRef.current = new Set(next);
+  }, [events, liveMarketIds]);
+
+  useEffect(() => {
+    const timers = shimmerTimersRef.current;
+    return () => {
+      for (const timer of timers.values()) clearTimeout(timer);
+      timers.clear();
+    };
+  }, []);
+
   return (
     <div className="min-h-screen flex flex-col">
       {/* Ticker tape */}
-      <div className="border-b border-border overflow-hidden py-2">
+      <div className="border-b border-border overflow-hidden py-2 bg-surface/45">
         <div className="flex ticker-content gap-8">
           {[...TICKER_ITEMS, ...TICKER_ITEMS].map((item, i) => (
-            <span key={i} className="text-[10px] text-muted-dim tracking-widest uppercase whitespace-nowrap flex items-center gap-2">
-              <span className="text-accent/30">◆</span>
+            <span key={i} className="text-[10px] text-muted tracking-widest uppercase whitespace-nowrap flex items-center gap-2">
+              <span className="text-accent/50">◆</span>
               {item}
             </span>
           ))}
@@ -73,10 +124,10 @@ export default function HomePage() {
       </div>
 
       {/* Header */}
-      <header className="border-b border-border px-6 py-5 flex items-end justify-between">
+      <header className="border-b border-border px-4 md:px-6 py-[22px] flex items-end justify-between bg-surface/25 backdrop-blur-[2px]">
         <div>
           <h1
-            className="text-4xl font-black tracking-tight leading-none text-text"
+            className="text-[2.65rem] font-black tracking-tight leading-none text-text glow-blue"
             style={{ fontFamily: "var(--font-display)" }}
           >
             PREDACY
@@ -89,7 +140,7 @@ export default function HomePage() {
 
         <div className="flex items-center gap-4">
           {/* Chain indicator */}
-          <div className="flex items-center gap-1.5 border border-border px-3 py-1.5">
+          <div className="flex items-center gap-1.5 border border-border-bright bg-surface px-3 py-1.5 shadow-[0_0_0_1px_rgba(78,163,255,0.12)]">
             <div className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
             <span className="text-[11px] text-muted tracking-widest">POLYGON</span>
           </div>
@@ -99,7 +150,7 @@ export default function HomePage() {
       </header>
 
       {/* Hero section */}
-      <section className="border-b border-border px-6 py-8 grid grid-cols-1 md:grid-cols-3 gap-0">
+      <section className="border-b border-border px-4 md:px-6 py-9 grid grid-cols-1 md:grid-cols-3 gap-0 bg-surface/[0.18]">
         {/* Big statement */}
         <div className="md:col-span-2 pr-0 md:pr-8 md:border-r border-border pb-6 md:pb-0">
           <p className="text-muted text-[11px] tracking-widest uppercase mb-3">How it works</p>
@@ -119,7 +170,7 @@ export default function HomePage() {
                   >
                     {label}
                   </span>
-                  <span className="text-xs text-muted-dim">{desc}</span>
+                  <span className="text-xs text-muted">{desc}</span>
                 </div>
               </div>
             ))}
@@ -142,7 +193,7 @@ export default function HomePage() {
                   <p className="text-[11px] text-muted-dim">{sub}</p>
                 </div>
                 <span
-                  className="text-xl font-black text-text"
+                  className="text-xl font-black text-blue"
                   style={{ fontFamily: "var(--font-display)" }}
                 >
                   {value}
@@ -154,8 +205,8 @@ export default function HomePage() {
       </section>
 
       {/* Market list */}
-      <main className="flex-1 px-6 py-6">
-        <div className="flex items-center justify-between mb-4">
+      <main className="flex-1 px-4 md:px-6 py-6">
+        <div className="flex items-center justify-between mb-5">
           <div className="flex items-center gap-3">
             <h2
               className="text-lg font-black text-text tracking-tight"
@@ -172,17 +223,19 @@ export default function HomePage() {
           </span>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-px bg-border">
-          {events.map((event) => (
-            <div key={event.id} className="bg-bg">
+        <div className="active-markets-grid grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-px bg-border/90 shadow-[0_0_0_1px_rgba(78,163,255,0.08)]">
+          {events.map((event, idx) => {
+            const shouldShimmer = idx < 2 || recentlyLiveEventIds.has(event.id);
+            return (
+            <div key={event.id} className={`bg-bg ${shouldShimmer ? "shimmer-card" : ""}`}>
               <EventCard event={event} liveMarketIds={liveMarketIds} />
             </div>
-          ))}
+          )})}
         </div>
       </main>
 
       {/* Footer */}
-      <footer className="border-t border-border px-6 py-4 flex items-center justify-between">
+      <footer className="border-t border-border px-4 md:px-6 py-4 flex items-center justify-between bg-surface/30">
         <span className="text-[10px] text-muted-dim tracking-widest uppercase">
           Predacy · Private Prediction Markets · Powered by Polymarket Liquidity
         </span>
