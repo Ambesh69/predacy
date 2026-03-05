@@ -1009,10 +1009,29 @@ export default function ProfileClient() {
         const filledAmount  = posInfo?.filledAmount ?? 0n;
         const currentYesPrice = priceMap.get((e.marketId ?? "").toLowerCase());
 
-        const shares =
-          clearingPrice > 0n && filledAmount > 0n
-            ? Number(filledAmount * 1_000_000n / clearingPrice) / 1_000_000
-            : undefined;
+        // Shares computation:
+        // - Buy orders:  shares = filledAmount_usdc / clearingPrice
+        // - Sell orders: rawAmount IS the YES token count submitted (6-decimal).
+        //   getPosition returns filledAmount=0 for sells (contract pays USDC directly
+        //   in settleBatch without writing to position struct), so we must use rawAmount.
+        const shares: number | undefined = e.isSell
+          ? (e.rawAmount > 0n ? Number(e.rawAmount) / 1_000_000 : undefined)
+          : (clearingPrice > 0n && filledAmount > 0n
+              ? Number(filledAmount * 1_000_000n / clearingPrice) / 1_000_000
+              : undefined);
+
+        // filledAmount for sell orders = USDC proceeds = rawAmount × clearingPrice / 1e6.
+        // Contract doesn't write this to the position struct, so derive it here.
+        const effectiveFilledAmount: bigint | undefined = (() => {
+          if (e.isSell) {
+            // Use on-chain value if it's non-zero (future-proof), otherwise derive.
+            if (filledAmount > 0n) return filledAmount;
+            if (clearingPrice > 0n && e.rawAmount > 0n)
+              return e.rawAmount * clearingPrice / 1_000_000n;
+            return undefined;
+          }
+          return posInfo ? filledAmount : undefined;
+        })();
 
         // For sell orders: if buyClearingPrice wasn't stored at sell time, derive it by
         // finding the most recent settled buy on the same market that preceded this batch.
@@ -1031,7 +1050,7 @@ export default function ProfileClient() {
           txHash:          txHashMap.get(e.commitment.toLowerCase()),
           batchStatus:     batchInfo?.status as BatchStatus | undefined,
           clearingPrice:   clearingPrice > 0n ? clearingPrice : undefined,
-          filledAmount:    posInfo ? filledAmount : undefined,
+          filledAmount:    effectiveFilledAmount,
           refundAmount:    posInfo?.refundAmount,
           claimed:         posInfo?.claimed ?? e.claimed,
           currentYesPrice,
