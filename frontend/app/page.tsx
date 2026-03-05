@@ -1,9 +1,17 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import DiscoveryControls from "@/components/DiscoveryControls";
 import EventCard from "@/components/EventCard";
 import WalletButton from "@/components/WalletButton";
 import { MOCK_MARKETS, getEvents, type PolyEvent } from "@/lib/polymarket";
+import {
+  filterAndSortEvents,
+  getDiscoveryCategories,
+  getDiscoveryTags,
+  type DiscoverySort,
+} from "@/lib/discovery";
 
 const TICKER_ITEMS = [
   "SEALED BIDS",
@@ -22,6 +30,10 @@ export default function HomePage() {
   const [loading, setLoading] = useState(true);
   const [liveMarketIds, setLiveMarketIds] = useState<Set<string>>(new Set());
   const [recentlyLiveEventIds, setRecentlyLiveEventIds] = useState<Set<string>>(new Set());
+  const [searchQuery, setSearchQuery] = useState("");
+  const [sortBy, setSortBy] = useState<DiscoverySort>("volume_desc");
+  const [selectedCategory, setSelectedCategory] = useState("all");
+  const [selectedTag, setSelectedTag] = useState("all");
   const prevLiveMarketIdsRef = useRef<Set<string>>(new Set());
   const shimmerTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
@@ -108,6 +120,25 @@ export default function HomePage() {
       timers.clear();
     };
   }, []);
+
+  const categories = useMemo(() => {
+    return getDiscoveryCategories(events);
+  }, [events]);
+
+  const tags = useMemo(() => {
+    return getDiscoveryTags(events);
+  }, [events]);
+
+  const displayedEvents = useMemo(() => {
+    return filterAndSortEvents(events, {
+      q: searchQuery,
+      category: selectedCategory,
+      tag: selectedTag,
+      sort: sortBy,
+    });
+  }, [events, searchQuery, selectedCategory, selectedTag, sortBy]);
+
+  const hasFilters = searchQuery.trim() !== "" || selectedCategory !== "all" || selectedTag !== "all" || sortBy !== "volume_desc";
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -207,24 +238,61 @@ export default function HomePage() {
       {/* Market list */}
       <main className="flex-1 px-4 md:px-6 py-6">
         <div className="flex items-center justify-between mb-5">
-          <div className="flex items-center gap-3">
-            <h2
-              className="text-lg font-black text-text tracking-tight"
-              style={{ fontFamily: "var(--font-display)" }}
-            >
-              ACTIVE MARKETS
-            </h2>
-            {loading && (
-              <div className="w-3 h-3 border border-muted/40 border-t-transparent rounded-full animate-spin" />
-            )}
+          <div className="flex items-center gap-3 flex-wrap">
+            <div className="flex items-center gap-3">
+              <h2
+                className="text-lg font-black text-text tracking-tight"
+                style={{ fontFamily: "var(--font-display)" }}
+              >
+                ACTIVE MARKETS
+              </h2>
+              {loading && (
+                <div className="w-3 h-3 border border-muted/40 border-t-transparent rounded-full animate-spin" />
+              )}
+            </div>
+
+            <div className="flex items-center gap-2">
+              <Link
+                href="/search"
+                className="text-[10px] tracking-widest uppercase px-2.5 py-1 border border-border text-muted hover:text-text hover:border-border-bright transition-colors"
+              >
+                Search Page
+              </Link>
+              <Link
+                href="/categories"
+                className="text-[10px] tracking-widest uppercase px-2.5 py-1 border border-border text-muted hover:text-text hover:border-border-bright transition-colors"
+              >
+                Categories
+              </Link>
+            </div>
           </div>
           <span className="text-[11px] text-muted-dim tracking-widest">
             LIVE · POLYMARKET PRICES
           </span>
         </div>
 
+        <DiscoveryControls
+          query={searchQuery}
+          onQueryChange={setSearchQuery}
+          sortBy={sortBy}
+          onSortChange={setSortBy}
+          categories={categories}
+          selectedCategory={selectedCategory}
+          onCategoryChange={setSelectedCategory}
+          tags={tags}
+          selectedTag={selectedTag}
+          onTagChange={setSelectedTag}
+          onClear={() => {
+            setSearchQuery("");
+            setSortBy("volume_desc");
+            setSelectedCategory("all");
+            setSelectedTag("all");
+          }}
+          hasFilters={hasFilters}
+        />
+
         <div className="active-markets-grid grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-px bg-border/90 shadow-[0_0_0_1px_rgba(78,163,255,0.08)]">
-          {events.map((event, idx) => {
+          {displayedEvents.map((event, idx) => {
             const shouldShimmer = idx < 2 || recentlyLiveEventIds.has(event.id);
             return (
             <div key={event.id} className={`bg-bg ${shouldShimmer ? "shimmer-card" : ""}`}>
@@ -232,6 +300,12 @@ export default function HomePage() {
             </div>
           )})}
         </div>
+        {!loading && displayedEvents.length === 0 && (
+          <div className="mt-3 border border-border bg-surface/25 px-4 py-6 text-center">
+            <p className="text-sm text-muted">No markets match your filters.</p>
+            <p className="text-[11px] text-muted-dim mt-1">Try clearing filters or searching another term.</p>
+          </div>
+        )}
       </main>
 
       {/* Footer */}
