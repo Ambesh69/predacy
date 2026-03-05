@@ -318,6 +318,7 @@ export default function PositionsPanel({
   const [claimingBatchId, setClaimingBatchId] = useState<bigint | null>(null);
   const [claimErrors,   setClaimErrors]   = useState<Record<string, string>>({});
   const [mainTab,       setMainTab]       = useState<"positions" | "activity">("positions");
+  const [posTab,        setPosTab]        = useState<"active" | "closed">("active");
 
   // Current-batch position (fetched when settled)
   const [currentPosition, setCurrentPosition] = useState<{
@@ -558,6 +559,10 @@ export default function PositionsPanel({
   const pendingPositions = historicalPositions.filter(
     (hp) => hp.settling || hp.unfilled
   );
+  // Closed = positions the user has exited (sold on Polymarket).
+  // Currently always empty — the app will populate this when exit-tracking
+  // is implemented. The tab is kept as a placeholder for that future state.
+  const closedPositions: typeof historicalPositions = [];
 
   // Activity = all historical stored orders (newest first) + current if exists
   // already newest-first from localStorage
@@ -589,22 +594,36 @@ export default function PositionsPanel({
       {mainTab === "positions" && (
         <div className="flex-1 flex flex-col overflow-hidden">
 
-          {/* Positions header */}
+          {/* Active / Closed sub-tabs */}
           <div className="border-b border-border/50 flex items-center px-4 gap-4 flex-shrink-0">
-            {(() => {
-              const count = activePositions.length + pendingPositions.length + (currentPositionVisible ? 1 : 0);
+            {(["active", "closed"] as const).map((sub) => {
+              const count = sub === "active"
+                ? activePositions.length + pendingPositions.length + (currentPositionVisible ? 1 : 0)
+                : closedPositions.length;
               return (
-                <span className="py-2 text-[10px] tracking-widest uppercase flex items-center gap-1.5 text-text">
-                  Active
-                  {count > 0 && (
-                    <span className="text-[8px] px-1 py-0.5 border border-text/30 text-text tabular-nums">{count}</span>
+                <button
+                  key={sub}
+                  type="button"
+                  onClick={() => setPosTab(sub)}
+                  className={clsx(
+                    "py-2 text-[10px] tracking-widest uppercase transition-colors flex items-center gap-1.5",
+                    posTab === sub ? "text-text" : "text-muted hover:text-text",
                   )}
-                </span>
+                >
+                  {sub === "active" ? "Active" : "Closed"}
+                  {count > 0 && (
+                    <span className={clsx(
+                      "text-[8px] px-1 py-0.5 border tabular-nums",
+                      posTab === sub ? "border-text/30 text-text" : "border-border text-muted-dim",
+                    )}>{count}</span>
+                  )}
+                </button>
               );
-            })()}
+            })}
           </div>
 
-          {/* ── ACTIVE positions ─────────────────────────────────────────── */}
+          {/* ── ACTIVE sub-tab ───────────────────────────────────────────── */}
+          {posTab === "active" && (
           <div className="flex-1 overflow-y-auto">
 
               {/* Current batch status */}
@@ -706,6 +725,35 @@ export default function PositionsPanel({
                 ))
               )}
             </div>
+          )}
+
+          {/* ── CLOSED sub-tab ───────────────────────────────────────────── */}
+          {posTab === "closed" && (
+            <div className="flex-1 overflow-y-auto">
+              {closedPositions.length === 0 ? (
+                <div className="px-4 py-8 text-center">
+                  <p className="text-[11px] text-muted-dim">No closed positions yet.</p>
+                  <p className="text-[10px] text-muted-dim mt-1">
+                    Positions you&apos;ve sold or exited on Polymarket will appear here.
+                  </p>
+                </div>
+              ) : (
+                closedPositions.map((hp) => (
+                  <PositionRow
+                    key={hp.batchId.toString()}
+                    batchId={hp.batchId}
+                    position={hp.position}
+                    clearingPrice={hp.clearingPrice}
+                    marketQuestion={hp.marketQuestion}
+                    shares={hp.shares}
+                    onClaim={handleClaim}
+                    isClaiming={false}
+                    isActive={false}
+                  />
+                ))
+              )}
+            </div>
+          )}
 
         </div>
       )}
