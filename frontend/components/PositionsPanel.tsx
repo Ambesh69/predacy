@@ -318,7 +318,6 @@ export default function PositionsPanel({
   const [claimingBatchId, setClaimingBatchId] = useState<bigint | null>(null);
   const [claimErrors,   setClaimErrors]   = useState<Record<string, string>>({});
   const [mainTab,       setMainTab]       = useState<"positions" | "activity">("positions");
-  const [posTab,        setPosTab]        = useState<"active" | "closed">("active");
 
   // Current-batch position (fetched when settled)
   const [currentPosition, setCurrentPosition] = useState<{
@@ -536,27 +535,28 @@ export default function PositionsPanel({
   // Current batch: does the user have a sealed order this session?
   const hasCurrentOrder = currentBatchCommitments.length > 0;
 
-  // Current batch position for Active tab (settled + unclaimed)
-  const currentIsActive =
+  // Current batch position: settled and has a fill (claimed or unclaimed).
+  // Shown in Active tab with claim button when unclaimed, "CLAIMED ✓" when claimed.
+  const currentPositionVisible =
     currentBatchStatus === BatchStatus.SETTLED &&
     currentPosition !== null &&
-    (currentPosition.filledAmount > 0n || currentPosition.refundAmount > 0n) &&
-    !currentPosition.claimed;
+    (currentPosition.filledAmount > 0n || currentPosition.refundAmount > 0n);
+
+  // Keep legacy alias used by a few downstream checks (unclaimed only)
+  const currentIsActive = currentPositionVisible && !currentPosition?.claimed;
 
   // Current batch for Activity tab
   const currentForActivity = hasCurrentOrder ? currentBatchCommitments[0] : null;
 
-  // Active = unclaimed settled historical with actual fill (can claim)
+  // Active = all settled historical positions with actual fill (claimed or not).
+  // Claimed positions stay here — "CLAIMED ✓" means you hold the tokens, the
+  // position is still open. Only move to "Closed" when you actually exit.
   const activePositions = historicalPositions.filter(
-    (hp) => hp.batchStatus === BatchStatus.SETTLED && !hp.position.claimed && !hp.unfilled && !hp.settling
+    (hp) => hp.batchStatus === BatchStatus.SETTLED && !hp.unfilled && !hp.settling
   );
   // Pending = still being settled or not filled at clearing price
   const pendingPositions = historicalPositions.filter(
     (hp) => hp.settling || hp.unfilled
-  );
-  // Closed = claimed historical
-  const closedPositions = historicalPositions.filter(
-    (hp) => hp.position.claimed
   );
 
   // Activity = all historical stored orders (newest first) + current if exists
@@ -589,37 +589,23 @@ export default function PositionsPanel({
       {mainTab === "positions" && (
         <div className="flex-1 flex flex-col overflow-hidden">
 
-          {/* Active / Closed sub-tabs */}
+          {/* Positions header */}
           <div className="border-b border-border/50 flex items-center px-4 gap-4 flex-shrink-0">
-            {(["active", "closed"] as const).map((sub) => {
-              const count = sub === "active"
-                ? activePositions.length + pendingPositions.length + (currentIsActive ? 1 : 0)
-                : closedPositions.length;
+            {(() => {
+              const count = activePositions.length + pendingPositions.length + (currentPositionVisible ? 1 : 0);
               return (
-                <button
-                  key={sub}
-                  type="button"
-                  onClick={() => setPosTab(sub)}
-                  className={clsx(
-                    "py-2 text-[10px] tracking-widest uppercase transition-colors flex items-center gap-1.5",
-                    posTab === sub ? "text-text" : "text-muted hover:text-text",
-                  )}
-                >
-                  {sub === "active" ? "Active" : "Closed"}
+                <span className="py-2 text-[10px] tracking-widest uppercase flex items-center gap-1.5 text-text">
+                  Active
                   {count > 0 && (
-                    <span className={clsx(
-                      "text-[8px] px-1 py-0.5 border tabular-nums",
-                      posTab === sub ? "border-text/30 text-text" : "border-border text-muted-dim",
-                    )}>{count}</span>
+                    <span className="text-[8px] px-1 py-0.5 border border-text/30 text-text tabular-nums">{count}</span>
                   )}
-                </button>
+                </span>
               );
-            })}
+            })()}
           </div>
 
-          {/* ── ACTIVE sub-tab ───────────────────────────────────────────── */}
-          {posTab === "active" && (
-            <div className="flex-1 overflow-y-auto">
+          {/* ── ACTIVE positions ─────────────────────────────────────────── */}
+          <div className="flex-1 overflow-y-auto">
 
               {/* Current batch status */}
               {currentBatchStatus === BatchStatus.OPEN && hasCurrentOrder && (
@@ -643,8 +629,8 @@ export default function PositionsPanel({
                 </div>
               )}
 
-              {/* Current batch settled + unclaimed */}
-              {currentIsActive && currentPosition && (
+              {/* Current batch settled (claimed or unclaimed — stays in Active) */}
+              {currentPositionVisible && currentPosition && (
                 <PositionRow
                   batchId={currentBatchId}
                   position={currentPosition}
@@ -652,7 +638,7 @@ export default function PositionsPanel({
                   onClaim={handleClaim}
                   isClaiming={claimingBatchId === currentBatchId}
                   claimError={claimErrors[currentBatchId.toString()]}
-                  isActive={true}
+                  isActive={!currentPosition.claimed}
                 />
               )}
 
@@ -715,39 +701,12 @@ export default function PositionsPanel({
                     onClaim={handleClaim}
                     isClaiming={claimingBatchId === hp.batchId}
                     claimError={claimErrors[hp.batchId.toString()]}
-                    isActive={true}
+                    isActive={!hp.position.claimed}
                   />
                 ))
               )}
             </div>
-          )}
 
-          {/* ── CLOSED sub-tab ───────────────────────────────────────────── */}
-          {posTab === "closed" && (
-            <div className="flex-1 overflow-y-auto">
-              {scanning ? (
-                <div><SkeletonRow /><SkeletonRow /></div>
-              ) : closedPositions.length === 0 ? (
-                <div className="px-4 py-8 text-center">
-                  <p className="text-[11px] text-muted-dim">No closed positions yet.</p>
-                </div>
-              ) : (
-                closedPositions.map((hp) => (
-                  <PositionRow
-                    key={hp.batchId.toString()}
-                    batchId={hp.batchId}
-                    position={hp.position}
-                    clearingPrice={hp.clearingPrice}
-                    marketQuestion={hp.marketQuestion}
-                    shares={hp.shares}
-                    onClaim={handleClaim}
-                    isClaiming={false}
-                    isActive={false}
-                  />
-                ))
-              )}
-            </div>
-          )}
         </div>
       )}
 
