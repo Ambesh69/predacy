@@ -21,7 +21,7 @@ import {
   fmtCents,
 } from "@/lib/marketUtils";
 import {
-  BATCH_VAULT_ABI, CTF_ABI, ERC20_ABI, MOCK_USDC_ABI,
+  BATCH_VAULT_ABI, CTF_ABI, ERC20_ABI, MOCK_USDC_ABI, TRANSFER_WITH_AUTH_ABI,
   BatchStatus, getContracts,
 } from "@/lib/contracts";
 import { computeCommitment } from "@/lib/commitmentHash";
@@ -780,6 +780,71 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     }
   };
 
+  // ── Sweep unfilled ephemeral USDC back to real wallet ────────────────────────
+  // When a buy order isn't filled (limit below clearing price), USDC sits in the
+  // ephemeral wallet. We already have the private key in localStorage, so we can
+  // sign a gasless EIP-3009 TransferWithAuthorization and have the real wallet
+  // submit it (one MetaMask popup, real wallet pays the gas).
+  const handleSweepUnfilled = async (ephemeralKey: string, ephemeralAddress: string, amount: bigint) => {
+    const contracts = getContracts(ACTIVE_CHAIN.id);
+
+    // Check live balance — may differ from stored amount if partially swept already.
+    const balance = await publicClient.readContract({
+      address: contracts.usdc, abi: ERC20_ABI, functionName: "balanceOf",
+      args: [ephemeralAddress as `0x${string}`],
+    }) as bigint;
+    if (balance === 0n) throw new Error("No USDC left in ephemeral wallet");
+
+    // Sign EIP-3009 auth with the ephemeral key (pure JS, no MetaMask).
+    const ephemeralAccount      = privateKeyToAccount(ephemeralKey as `0x${string}`);
+    const ephemeralWalletClient = createWalletClient({ account: ephemeralAccount, chain: ACTIVE_CHAIN, transport: http() });
+
+    const nonceBytes = new Uint8Array(32);
+    crypto.getRandomValues(nonceBytes);
+    const transferNonce = ("0x" + Array.from(nonceBytes).map((b) => b.toString(16).padStart(2, "0")).join("")) as `0x${string}`;
+    const validBefore = BigInt(Math.floor(Date.now() / 1000) + 3600);
+
+    const sig = await ephemeralWalletClient.signTypedData({
+      account: ephemeralAccount,
+      domain: { name: "USD Coin (Test)", version: "1", chainId: BigInt(ACTIVE_CHAIN.id), verifyingContract: contracts.usdc },
+      types: {
+        TransferWithAuthorization: [
+          { name: "from",        type: "address" }, { name: "to",          type: "address" },
+          { name: "value",       type: "uint256" }, { name: "validAfter",  type: "uint256" },
+          { name: "validBefore", type: "uint256" }, { name: "nonce",       type: "bytes32" },
+        ],
+      },
+      primaryType: "TransferWithAuthorization",
+      message: { from: ephemeralAddress as `0x${string}`, to: walletAddress as `0x${string}`, value: balance, validAfter: 0n, validBefore, nonce: transferNonce },
+    });
+
+    const r = sig.slice(0, 66) as `0x${string}`;
+    const s = ("0x" + sig.slice(66, 130)) as `0x${string}`;
+    const v = parseInt(sig.slice(130, 132), 16);
+
+    // Real wallet submits transferWithAuthorization (1 MetaMask popup, pays gas).
+    const walletClient = await ensureAmoy();
+    const txHash = await walletClient.writeContract({
+      address: contracts.usdc, abi: TRANSFER_WITH_AUTH_ABI,
+      functionName: "transferWithAuthorization",
+      args: [ephemeralAddress as `0x${string}`, walletAddress as `0x${string}`, balance, 0n, validBefore, transferNonce, v, r, s],
+      ...CHAIN_GAS,
+    });
+    await publicClient.waitForTransactionReceipt({ hash: txHash });
+
+    // Mark swept in localStorage so the card stops showing the button.
+    try {
+      const key = `predacy:orders:${walletAddress!.toLowerCase()}`;
+      const all: Array<Record<string, unknown>> = JSON.parse(localStorage.getItem(key) ?? "[]");
+      localStorage.setItem(key, JSON.stringify(
+        all.map((o) => o.ephemeralAddress === ephemeralAddress ? { ...o, swept: true } : o)
+      ));
+    } catch { /* ignore */ }
+
+    setBalanceVersion(v => v + 1);
+    pushToast(`${(Number(balance) / 1e6).toFixed(2)} USDC swept back to wallet`, "success");
+  };
+
   // ── Submit order (ephemeral wallet privacy pattern) ───────────────────────────
   // BUY: ephemeral keypair → fund → sign all 3 sigs in-browser → no settlement leak
   // SELL: unchanged — YES tokens must come from real wallet
@@ -1405,6 +1470,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                     onClaim={handleClaimPosition}
                     onClosePosition={handleClosePosition}
                     onMarketIdsFound={setHistoricalMarketIds}
+                    onSweepUnfilled={handleSweepUnfilled}
                   />
                   </>
                 ) : (

@@ -50,6 +50,8 @@ interface PositionsPanelProps {
   onClaim:                    (batchId: bigint) => Promise<void>;
   onClosePosition?:           (yesAmount: bigint, clearingPrice: bigint) => void; // pre-fill sell form
   onMarketIdsFound?:          (ids: `0x${string}`[]) => void;
+  /** Sweep USDC from an unfilled ephemeral wallet back to the real wallet via EIP-3009 */
+  onSweepUnfilled?:           (ephemeralKey: string, ephemeralAddress: string, amount: bigint) => Promise<void>;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -283,16 +285,36 @@ function ActivityRow({
   );
 }
 
-// ── Unfilled buy card (with ephemeral key recovery) ───────────────────────────
+// ── Unfilled buy card (with one-click USDC sweep) ─────────────────────────────
 
-function UnfilledCard({ hp }: { hp: HistoricalPosition }) {
-  const [copied, setCopied] = useState(false);
+function UnfilledCard({ hp, onSweep }: {
+  hp: HistoricalPosition;
+  onSweep?: (ephemeralKey: string, ephemeralAddress: string, amount: bigint) => Promise<void>;
+}) {
+  const [copied,   setCopied]   = useState(false);
+  const [sweeping, setSweeping] = useState(false);
+  const [swept,    setSwept]    = useState(false);
+  const [sweepErr, setSweepErr] = useState<string | null>(null);
 
   const copyKey = async () => {
     if (!hp.ephemeralKey) return;
     await navigator.clipboard.writeText(hp.ephemeralKey);
     setCopied(true);
     setTimeout(() => setCopied(false), 2500);
+  };
+
+  const doSweep = async () => {
+    if (!hp.ephemeralKey || !hp.ephemeralAddress || !onSweep) return;
+    setSweeping(true);
+    setSweepErr(null);
+    try {
+      await onSweep(hp.ephemeralKey, hp.ephemeralAddress, hp.unfilledAmount ?? 0n);
+      setSwept(true);
+    } catch (e: any) {
+      if (e?.code !== 4001) setSweepErr(e?.message ?? "Sweep failed");
+    } finally {
+      setSweeping(false);
+    }
   };
 
   const amountDisplay = hp.unfilledAmount != null
@@ -318,28 +340,47 @@ function UnfilledCard({ hp }: { hp: HistoricalPosition }) {
             {amountDisplay && <> {amountDisplay} USDC remains in your ephemeral wallet.</>}
           </p>
 
-          {hp.ephemeralKey && (
+          {hp.ephemeralKey && !swept && (
             <div className="space-y-1.5">
-              {hp.ephemeralAddress && (
-                <p className="text-[9px] text-muted-dim font-mono break-all">
-                  <span className="text-muted">Address: </span>{hp.ephemeralAddress}
-                </p>
+              {/* One-click sweep — signs EIP-3009 with ephemeral key, real wallet submits */}
+              {onSweep && (
+                <button
+                  onClick={doSweep}
+                  disabled={sweeping}
+                  className={clsx(
+                    "w-full py-1.5 border text-[10px] tracking-widest uppercase transition-colors",
+                    sweeping
+                      ? "border-accent/20 text-accent/40 cursor-not-allowed"
+                      : "border-accent/50 text-accent hover:bg-accent/5",
+                  )}
+                >
+                  {sweeping ? (
+                    <span className="flex items-center justify-center gap-1.5">
+                      <span className="w-2 h-2 border border-current border-t-transparent rounded-full animate-spin" />
+                      SWEEPING…
+                    </span>
+                  ) : `SWEEP ${amountDisplay ?? "USDC"} BACK TO WALLET`}
+                </button>
               )}
+              {sweepErr && <p className="text-[9px] text-danger leading-snug">{sweepErr}</p>}
+
+              {/* Fallback: manual recovery key */}
               <button
                 onClick={copyKey}
                 className={clsx(
                   "w-full py-1.5 border text-[10px] tracking-widest uppercase transition-colors",
                   copied
-                    ? "border-accent/50 text-accent/70 bg-accent/5"
-                    : "border-border-bright text-muted hover:border-accent/50 hover:text-accent",
+                    ? "border-muted/40 text-muted/60 bg-surface/40"
+                    : "border-border text-muted-dim hover:border-muted/50 hover:text-muted",
                 )}
               >
                 {copied ? "COPIED ✓" : "COPY RECOVERY KEY"}
               </button>
-              <p className="text-[8px] text-muted-dim text-center leading-snug">
-                Import this private key into MetaMask → sweep USDC back to your wallet
-              </p>
             </div>
+          )}
+
+          {swept && (
+            <p className="text-[9px] text-accent/70 tracking-widest uppercase">SWEPT ✓</p>
           )}
         </div>
       ) : (
@@ -361,6 +402,7 @@ export default function PositionsPanel({
   onClaim,
   onClosePosition,
   onMarketIdsFound,
+  onSweepUnfilled,
 }: PositionsPanelProps) {
   const [historicalPositions, setHistoricalPositions] = useState<HistoricalPosition[]>([]);
   const [allStoredOrders,     setAllStoredOrders]     = useState<Array<{
@@ -377,19 +419,26 @@ export default function PositionsPanel({
   const [currentPosition, setCurrentPosition] = useState<{
     filledAmount: bigint; refundAmount: bigint; isBuy: boolean; claimed: boolean; isSell?: boolean;
   } | null>(null);
+  // Ephemeral key/address for current-batch unfilled orders (for one-click sweep)
+  const [currentEphemeral, setCurrentEphemeral] = useState<{
+    key: string; address: string; amount: bigint;
+  } | null>(null);
 
   // ── Fetch current batch position when settled ────────────────────────────────
   useEffect(() => {
     if (currentBatchStatus !== BatchStatus.SETTLED || currentBatchId === 0n) {
       setCurrentPosition(null);
+      setCurrentEphemeral(null);
       return;
     }
     let cancelled = false;
     const run = async () => {
       try {
         const storageKey  = `predacy:orders:${walletAddress.toLowerCase()}`;
-        const stored: Array<{ commitment: string; batchId: string; isBuy?: boolean; isSell?: boolean }> =
-          JSON.parse(localStorage.getItem(storageKey) ?? "[]");
+        const stored: Array<{
+          commitment: string; batchId: string; isBuy?: boolean; isSell?: boolean;
+          ephemeralKey?: string; ephemeralAddress?: string; amount?: string; swept?: boolean;
+        }> = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
         const myOrder = stored.find((o) => o.batchId === currentBatchId.toString());
         if (!myOrder) return;
 
@@ -402,7 +451,20 @@ export default function PositionsPanel({
         }) as { filledAmount: bigint; refundAmount: bigint; isBuy: boolean; claimed: boolean };
         // Use localStorage isBuy (reliable) rather than contract isBuy to detect sells
         const isSellOrder = myOrder.isSell === true || myOrder.isBuy === false;
-        if (!cancelled) setCurrentPosition({ ...pos, isSell: isSellOrder });
+        if (!cancelled) {
+          setCurrentPosition({ ...pos, isSell: isSellOrder });
+          // If unfilled buy with ephemeral key, make it available for the sweep button
+          if (!isSellOrder && pos.filledAmount === 0n && pos.refundAmount === 0n
+              && myOrder.ephemeralKey && myOrder.ephemeralAddress && !myOrder.swept) {
+            setCurrentEphemeral({
+              key:     myOrder.ephemeralKey,
+              address: myOrder.ephemeralAddress,
+              amount:  BigInt(myOrder.amount ?? "0"),
+            });
+          } else {
+            setCurrentEphemeral(null);
+          }
+        }
       } catch { /* RPC hiccup */ }
     };
     run();
@@ -740,14 +802,20 @@ export default function PositionsPanel({
               {currentBatchStatus === BatchStatus.SETTLED && hasCurrentOrder &&
                currentPosition !== null &&
                currentPosition.filledAmount === 0n && currentPosition.refundAmount === 0n && (
-                <div className="px-4 py-3 border-b border-border/40 bg-surface/40">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="text-[10px] text-muted tracking-widest uppercase">Order not filled</span>
-                  </div>
-                  <p className="text-[9px] text-muted-dim">
-                    Your order was below the clearing price. USDC stays in your ephemeral wallet — recover via the private key stored in your browser.
-                  </p>
-                </div>
+                <UnfilledCard
+                  hp={{
+                    batchId:       currentBatchId,
+                    batchMarketId: ("0x" + "0".repeat(64)) as `0x${string}`,
+                    batchStatus:   BatchStatus.SETTLED,
+                    clearingPrice: 0n,
+                    position:      { filledAmount: 0n, refundAmount: 0n, isBuy: true, claimed: false },
+                    unfilled:      true,
+                    ephemeralKey:     currentEphemeral?.key,
+                    ephemeralAddress: currentEphemeral?.address,
+                    unfilledAmount:   currentEphemeral?.amount,
+                  }}
+                  onSweep={onSweepUnfilled}
+                />
               )}
 
               {/* Settling / unfilled orders */}
@@ -766,7 +834,7 @@ export default function PositionsPanel({
                     <p className="text-[9px] text-muted-dim">Relayer is settling this batch — usually 10–30 s</p>
                   </div>
                 ) : (
-                  <UnfilledCard key={hp.batchId.toString()} hp={hp} />
+                  <UnfilledCard key={hp.batchId.toString()} hp={hp} onSweep={onSweepUnfilled} />
                 )
               ))}
 
