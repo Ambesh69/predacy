@@ -585,18 +585,20 @@ export default function PositionsPanel({
   // Current batch for Activity tab
   const currentForActivity = hasCurrentOrder ? currentBatchCommitments[0] : null;
 
-  // Active = filled buy orders (claimed or unclaimed — user still holds YES tokens).
-  // Sell orders go to Closed because the position has been exited.
+  // Active = filled YES buy orders (claimed or unclaimed — user still holds YES tokens).
+  // Guard on position.isBuy to catch legacy sell entries that predate the isSell flag.
   const activePositions = historicalPositions.filter(
-    (hp) => hp.batchStatus === BatchStatus.SETTLED && !hp.unfilled && !hp.settling && !hp.isSell
+    (hp) => hp.batchStatus === BatchStatus.SETTLED && !hp.unfilled && !hp.settling
+            && !hp.isSell && hp.position.isBuy
   );
   // Pending = still being settled or not filled at clearing price
   const pendingPositions = historicalPositions.filter(
     (hp) => hp.settling || hp.unfilled
   );
-  // Closed = settled sell orders (user exited their position, USDC returned via settleBatch).
+  // Closed = settled sell orders — covers both isSell:true and legacy isBuy:false entries.
   const closedPositions = historicalPositions.filter(
-    (hp) => hp.batchStatus === BatchStatus.SETTLED && hp.isSell === true && !hp.settling
+    (hp) => hp.batchStatus === BatchStatus.SETTLED && !hp.settling
+            && (hp.isSell === true || !hp.position.isBuy)
   );
 
   // Activity = all historical stored orders (newest first) + current if exists
@@ -796,7 +798,7 @@ export default function PositionsPanel({
                     onClaim={handleClaim}
                     isClaiming={false}
                     isActive={false}
-                    isSell={hp.isSell}
+                    isSell={hp.isSell || !hp.position.isBuy}
                   />
                 ))
               )}

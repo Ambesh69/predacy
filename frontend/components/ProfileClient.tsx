@@ -200,9 +200,10 @@ function SkeletonRow() {
 function ActivityRow({ order }: { order: OrderEntry }) {
   const [expanded, setExpanded] = useState(false);
 
+  // For sell orders rawAmount is YES token count (6-decimal), not USDC
   const amountDisplay = order.isBuy
     ? fUsdc(order.rawAmount)
-    : `${(Number(order.rawAmount) / 1e18).toFixed(4)} YES`;
+    : `${(Number(order.rawAmount) / 1e6).toFixed(4)} YES`;
 
   return (
     <div className="bg-bg hover:bg-surface/20 transition-colors border-b border-border last:border-b-0">
@@ -1194,7 +1195,7 @@ export default function ProfileClient() {
   // P&L: sum over settled BUY positions that have live price data.
   // Sell orders are excluded — they're exits, shares are no longer held.
   const pnlPositions = settledOrders.filter(
-    (o) => !o.isSell && o.shares != null && o.currentYesPrice != null && o.filledAmount != null
+    (o) => !o.isSell && o.isBuy && o.shares != null && o.currentYesPrice != null && o.filledAmount != null
   );
   const hasPnlData = !enriching && pnlPositions.length > 0;
   const totalPnl = pnlPositions.reduce((sum, o) => {
@@ -1213,9 +1214,9 @@ export default function ProfileClient() {
   // Portfolio value = current market value of held BUY positions only.
   // Sell orders are excluded — those shares were already exited.
   const positionsValue = settledOrders.reduce((sum, o) => {
-    if (o.isSell || !o.shares || o.currentYesPrice == null) return sum;
-    const outcomePrice = o.isBuy ? o.currentYesPrice : 1 - o.currentYesPrice;
-    return sum + o.shares * outcomePrice;
+    // Only count YES buy positions — sell orders are exited; isBuy:false w/o isSell guard catches legacy entries
+    if (o.isSell || !o.isBuy || !o.shares || o.currentYesPrice == null) return sum;
+    return sum + o.shares * o.currentYesPrice;
   }, 0);
   const hasPositionData = settledOrders.some((o) => o.shares != null && o.currentYesPrice != null);
 
