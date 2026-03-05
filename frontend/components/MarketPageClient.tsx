@@ -1035,18 +1035,18 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
 
   const Row = ({ label, value }: { label: string; value: string }) => (
     <div className="flex justify-between">
-      <span className="text-[11px] text-muted">{label}</span>
-      <span className="text-[11px] text-text">{value}</span>
+      <span className="text-xs text-muted">{label}</span>
+      <span className="text-xs text-text">{value}</span>
     </div>
   );
 
   return (
     <div className="min-h-screen flex flex-col">
       {/* Header */}
-      <header className="border-b border-border px-6 py-4 flex items-center gap-4">
+      <header className="border-b border-border px-4 md:px-6 py-4 flex items-center gap-4 bg-surface/35 backdrop-blur-[2px]">
         <Link
           href="/"
-          className="text-muted hover:text-text transition-colors text-xs tracking-widest uppercase flex items-center gap-1.5"
+          className="text-muted hover:text-text transition-colors text-[11px] tracking-widest uppercase flex items-center gap-1.5"
         >
           <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="square" strokeWidth={1.5} d="M15 19l-7-7 7-7" />
@@ -1077,7 +1077,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
 
       {/* Chain error banner */}
       {chainError && (
-        <div className="border-b border-danger/30 bg-danger/5 px-6 py-2 flex items-center justify-between gap-4">
+        <div className="border-b border-danger/30 bg-danger/5 px-4 md:px-6 py-2 flex items-center justify-between gap-4">
           <p className="text-danger text-xs">{chainError}</p>
           <button onClick={() => setChainError(null)} className="text-danger/60 hover:text-danger text-xs">✕</button>
         </div>
@@ -1087,7 +1087,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
 
       {/* Wrong-network banner */}
       {onWrongChain && (
-        <div className="border-b border-yellow-500/30 bg-yellow-500/5 px-6 py-2">
+        <div className="border-b border-yellow-500/30 bg-yellow-500/5 px-4 md:px-6 py-2">
           <p className="text-yellow-400 text-xs">
             {walletName && walletName !== "MetaMask"
               ? `Connected via ${walletName} on the wrong network. Click any action below — ${walletName} will be prompted to switch to ${ACTIVE_CHAIN_NAME}. If ${walletName} doesn't support it, disable it and reconnect with MetaMask.`
@@ -1097,7 +1097,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       )}
 
       {/* Market info bar */}
-      <div className="border-b border-border px-6 py-4">
+      <div className="border-b border-border px-4 md:px-6 py-5 bg-surface/20">
         <div className="flex items-start justify-between gap-4">
           <div className="flex-1 min-w-0">
             {market.category && (
@@ -1105,7 +1105,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
                 {market.category}
               </span>
             )}
-            <h2 className="text-text text-sm leading-snug mt-1">{market.question}</h2>
+            <h2 className="text-text text-[15px] leading-snug mt-1">{market.question}</h2>
           </div>
           <div className="flex-shrink-0 text-right">
             <p className="text-[10px] text-muted tracking-widest uppercase">Polymarket Price</p>
@@ -1124,10 +1124,10 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       </div>
 
       {/* Main layout: 3 columns */}
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-[280px_1fr_320px] divide-x divide-border">
+      <div className="flex-1 grid grid-cols-1 lg:grid-cols-[280px_1fr_320px] divide-x divide-border/90">
 
         {/* Column 1: Batch timer + stats */}
-        <div className="p-6 flex flex-col gap-6 border-b lg:border-b-0">
+        <div className="p-4 md:p-6 flex flex-col gap-6 border-b lg:border-b-0 bg-surface/[0.18]">
           <BatchTimer
             openedAt={batch.openedAt}
             batchWindow={batch.batchWindow}
@@ -1180,7 +1180,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         </div>
 
         {/* Column 2: Price chart + Commitment feed */}
-        <div className="flex flex-col min-h-[400px] lg:min-h-0 border-b lg:border-b-0">
+        <div className="flex flex-col min-h-[400px] lg:min-h-0 border-b lg:border-b-0 bg-surface/[0.1]">
           {market.clobTokenIds?.[0] && (
             <PriceChart
               tokenId={market.clobTokenIds[0]}
@@ -1193,7 +1193,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         </div>
 
         {/* Column 3: Order form / Positions */}
-        <div className="flex flex-col">
+        <div className="flex flex-col bg-surface/[0.24]">
           {/* Column 3 header: tabs + batch status indicator */}
           <div className="border-b border-border px-4 py-0 flex items-center">
             {/* Tabs */}
@@ -1202,9 +1202,9 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
                 type="button"
                 onClick={() => setActiveTab("order")}
                 className={clsx(
-                  "px-3 py-3 text-[10px] tracking-widest uppercase transition-colors border-b-2",
+                    "px-3 py-3 text-[11px] tracking-widest uppercase transition-colors border-b-2",
                   activeTab === "order"
-                    ? "border-text/40 text-text"
+                    ? "border-accent/50 text-text bg-accent/10"
                     : "border-transparent text-muted hover:text-text"
                 )}
               >
@@ -1214,9 +1214,9 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
                 type="button"
                 onClick={() => setActiveTab("positions")}
                 className={clsx(
-                  "px-3 py-3 text-[10px] tracking-widest uppercase transition-colors border-b-2",
+                    "px-3 py-3 text-[11px] tracking-widest uppercase transition-colors border-b-2",
                   activeTab === "positions"
-                    ? "border-text/40 text-text"
+                    ? "border-accent/50 text-text bg-accent/10"
                     : "border-transparent text-muted hover:text-text"
                 )}
               >
