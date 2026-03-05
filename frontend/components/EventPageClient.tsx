@@ -597,6 +597,10 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   const ensureAmoy = async () => {
     if (!walletAddress) throw new Error("Wallet not connected");
     const { provider, name } = await findBestProvider();
+    // Re-authorize accounts before any tx — silently refreshes expired sessions.
+    // eth_requestAccounts shows no popup if already connected; only prompts if
+    // the dapp→wallet session has expired (which causes the 4100 Unauthorized error).
+    await provider.request({ method: "eth_requestAccounts" }).catch(() => {});
     try {
       await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: ACTIVE_CHAIN_ID_HEX }] });
     } catch (err: any) {
@@ -1333,10 +1337,16 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                         marketId={selectedMarket.conditionId as `0x${string}`}
                         batchOpen={batch.status === BatchStatus.OPEN}
                         onSubmit={async (p) => {
+                          setOrderSealed(false);
                           setSubmitStep(null);
                           try { await handleOrderSubmit(p); }
                           catch (e: any) {
-                            if (e?.code !== 4001) setChainError(e.message ?? "Order failed");
+                            if (e?.code === 4001) return; // user rejected
+                            if (e?.code === 4100 || e?.message?.includes("Unauthorized")) {
+                              setChainError("Wallet session expired — please reconnect your wallet and try again.");
+                            } else {
+                              setChainError(e.message ?? "Order failed");
+                            }
                           } finally { setSubmitStep(null); }
                         }}
                         walletAddress={walletAddress}

@@ -470,6 +470,9 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     // Discover the best provider (prefers MetaMask via EIP-6963)
     const { provider, name } = await findBestProvider();
 
+    // Re-authorize accounts before any tx — silently refreshes expired sessions.
+    await provider.request({ method: "eth_requestAccounts" }).catch(() => {});
+
     // Switch to Amoy — shows the wallet's native "Switch Network" dialog
     try {
       await provider.request({
