@@ -125,30 +125,37 @@ export class PolymarketClient {
   /**
    * Get the current mid-price for a token (YES or NO token ID).
    *
-   * Primary:  GET /midpoint — requires an active resting orderbook.
-   * Fallback: GET /last-trade-price — returns the most-recent matched trade price
+   * Primary:  GET /midpoint — requires active resting orders on both sides.
+   * Fallback: GET /last-trade-price — most recent matched trade; available
    *           even when no resting orders exist (illiquid / thin markets).
-   *           Returns 404 → throws only when BOTH sources fail or return 0.
+   *
+   * Polymarket CLOB signals "no orderbook" in two ways depending on conditions:
+   *   • HTTP 404 with body { error: "No orderbook exists for the requested token id" }
+   *   • HTTP 200 with body { mid: "0.5" }  ← sentinel / default value
+   * Both are treated as "no real price" and fall through to last-trade-price.
    */
   async getMidPrice(tokenId: string): Promise<number> {
     try {
       const res = await axios.get(`${CLOB_API}/midpoint`, {
         params: { token_id: tokenId },
       });
-      return parseFloat(res.data.mid);
+      const mid = parseFloat(res.data.mid ?? "0");
+      // Reject the sentinel: CLOB returns exactly 0.5 when there are no resting orders.
+      // A real mid is almost never exactly 0.5 (would require a perfectly symmetric book).
+      if (mid > 0 && mid < 1 && mid !== 0.5) return mid;
+      // fall through to last-trade-price below
     } catch (err: any) {
-      // /midpoint returns 404 "No orderbook exists" for markets with no resting orders.
-      // Fall back to /last-trade-price, which is available as long as ≥1 trade has occurred.
-      if (err?.response?.status === 404) {
-        const fallback = await axios.get(`${CLOB_API}/last-trade-price`, {
-          params: { token_id: tokenId },
-        });
-        const price = parseFloat(fallback.data.price ?? "0");
-        if (price > 0) return price;
-        throw new Error(`No mid-price or last-trade-price available for token ${tokenId}`);
-      }
-      throw err;
+      // 404 = "No orderbook exists" — fall through. Any other error: re-throw.
+      if (err?.response?.status !== 404) throw err;
     }
+
+    // /midpoint returned sentinel (0.5) or 404 — use the last matched trade price instead.
+    const fallback = await axios.get(`${CLOB_API}/last-trade-price`, {
+      params: { token_id: tokenId },
+    });
+    const price = parseFloat(fallback.data.price ?? "0");
+    if (price > 0) return price;
+    throw new Error(`No usable price for token ${tokenId} (mid was sentinel, no last-trade-price)`);
   }
 
   /** Get the order book for a token */
