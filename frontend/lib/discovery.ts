@@ -9,6 +9,13 @@ export interface DiscoveryQuery {
   sort?: DiscoverySort;
 }
 
+export interface DiscoveryCategorySummary {
+  name: string;
+  slug: string;
+  eventCount: number;
+  totalVolume: number;
+}
+
 export function getDiscoveryCategories(events: PolyEvent[]): string[] {
   const set = new Set<string>();
   for (const e of events) {
@@ -70,4 +77,48 @@ export function filterAndSortEvents(events: PolyEvent[], query: DiscoveryQuery):
   });
 
   return list;
+}
+
+export function slugifyCategory(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+export function categoryFromSlug(slug: string): string {
+  return slug
+    .split("-")
+    .filter(Boolean)
+    .map((part) => part[0]?.toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+export function summarizeCategories(events: PolyEvent[]): DiscoveryCategorySummary[] {
+  const map = new Map<string, DiscoveryCategorySummary>();
+
+  for (const event of events) {
+    const name = (event.category ?? "").trim();
+    if (!name) continue;
+    const slug = slugifyCategory(name);
+    if (!slug) continue;
+    const existing = map.get(slug);
+    const volume = event.volumeNum ?? 0;
+
+    if (existing) {
+      existing.eventCount += 1;
+      existing.totalVolume += volume;
+      continue;
+    }
+
+    map.set(slug, {
+      name,
+      slug,
+      eventCount: 1,
+      totalVolume: volume,
+    });
+  }
+
+  return Array.from(map.values()).sort((a, b) => b.totalVolume - a.totalVolume);
 }
