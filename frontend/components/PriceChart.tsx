@@ -55,10 +55,10 @@ function fmtTime(ts: number, iv: Interval): string {
 }
 
 // ── Colours ───────────────────────────────────────────────────────────────────
-const YES_COLOR = "#2CE8C6";   // accent green — always YES
-const NO_COLOR  = "#FF5F6D";   // danger red   — always NO
-const BORDER    = "#1A2B3D";
-const MUTED     = "#65798F";
+const YES_COLOR = "#00FFB3";   // accent green — always YES
+const NO_COLOR  = "#FF3355";   // danger red   — always NO
+const BORDER    = "#13131F";
+const MUTED     = "#42425A";
 const MONO      = "var(--font-mono)";
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -117,7 +117,7 @@ export default function PriceChart({ tokenId, currentPrice }: PriceChartProps) {
   const gradId = `pg-${tokenId.slice(0, 8)}`;
 
   return (
-    <div className="border-b border-border bg-surface/[0.12]">
+    <div className="border-b border-border">
 
       {/* ── Header ─────────────────────────────────────────────────────────── */}
       <div className="flex items-center justify-between px-4 py-2">
@@ -185,7 +185,7 @@ export default function PriceChart({ tokenId, currentPrice }: PriceChartProps) {
           <line
             x1={PAD.l}     y1={toY(0.5).toFixed(1)}
             x2={W - PAD.r} y2={toY(0.5).toFixed(1)}
-            stroke="#2B4560" strokeWidth="1"
+            stroke="#1E1E30" strokeWidth="1"
           />
 
           {/* YES area fill */}

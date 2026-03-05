@@ -37,8 +37,6 @@ export default function EventCard({ event, liveMarketIds }: EventCardProps) {
   const volume   = event.volumeNum ?? parseFloat(event.volume ?? "0");
   const endDate  = event.endDate ?? event.markets[0]?.endDate;
   const category = event.category ?? event.markets[0]?.category;
-  const yesChipStyles = { borderColor: "#2CE8C655", color: "#52F0D3", background: "#2CE8C612" };
-  const noChipStyles = { borderColor: "#FF5F6D55", color: "#FF7683", background: "#FF5F6D12" };
 
   // ── Single-outcome binary card ─────────────────────────────────────────────
   if (!isMulti) {
@@ -49,15 +47,15 @@ export default function EventCard({ event, liveMarketIds }: EventCardProps) {
     // Invert near-1.0 NO prices (Gamma API returns "1" for illiquid markets)
     const noDisplay = noRaw >= 0.999 ? (1 - noRaw) : noRaw;
     const probColor =
-      yesPrice > 0.6 ? "#2CE8C6" :
-      yesPrice < 0.4 ? "#FF5F6D" :
-      "#4EA3FF";
+      yesPrice > 0.6 ? "#00FFB3" :
+      yesPrice < 0.4 ? "#FF3355" :
+      "#4D83FF";
 
     return (
       <Link href={`/market/${market.conditionId}`} className="block h-full">
         <div className={clsx(
           "market-card border bg-surface p-5 cursor-crosshair flex flex-col gap-3 h-full",
-          isLive ? "border-accent/60 shadow-[0_0_0_1px_rgba(44,232,198,0.2),0_12px_28px_rgba(8,20,30,0.35)]" : "border-border",
+          isLive ? "border-accent/40" : "border-border",
         )}>
           {/* badges + date */}
           <div className="flex items-center gap-2 flex-wrap">
@@ -68,7 +66,7 @@ export default function EventCard({ event, liveMarketIds }: EventCardProps) {
               </span>
             )}
             {category && (
-              <span className="text-[10px] text-muted tracking-widest uppercase border border-border-bright bg-surface/70 px-2 py-0.5">
+              <span className="text-[10px] text-muted tracking-widest uppercase border border-border px-2 py-0.5">
                 {category}
               </span>
             )}
@@ -93,11 +91,11 @@ export default function EventCard({ event, liveMarketIds }: EventCardProps) {
             </div>
             <div className="flex items-center gap-1.5">
               <span className="text-[11px] px-2 py-1 border font-mono tabular-nums"
-                style={yesChipStyles}>
+                style={{ borderColor: "#00FFB340", color: "#00FFB3", background: "#00FFB308" }}>
                 YES {fmtCents(yesPrice)}
               </span>
               <span className="text-[11px] px-2 py-1 border font-mono tabular-nums"
-                style={noChipStyles}>
+                style={{ borderColor: "#FF335540", color: "#FF3355", background: "#FF335508" }}>
                 NO {fmtCents(noDisplay)}
               </span>
             </div>
@@ -148,7 +146,7 @@ export default function EventCard({ event, liveMarketIds }: EventCardProps) {
     <div
       className={clsx(
         "market-card border bg-surface flex flex-col h-full cursor-crosshair",
-        isLive ? "border-accent/60 shadow-[0_0_0_1px_rgba(44,232,198,0.2),0_10px_26px_rgba(8,20,30,0.32)]" : "border-border",
+        isLive ? "border-accent/40" : "border-border",
       )}
       onClick={() => router.push(`/event/${event.id}`)}
       role="link"
@@ -164,7 +162,7 @@ export default function EventCard({ event, liveMarketIds }: EventCardProps) {
               </span>
             )}
             {category && (
-              <span className="text-[10px] text-muted tracking-widest uppercase border border-border-bright bg-surface/70 px-2 py-0.5">
+              <span className="text-[10px] text-muted tracking-widest uppercase border border-border px-2 py-0.5">
                 {category}
               </span>
             )}
@@ -184,9 +182,9 @@ export default function EventCard({ event, liveMarketIds }: EventCardProps) {
           const yesPrice     = parseFloat(market.outcomePrices?.[0] ?? "0");
           const isMarketLive = liveMarketIds.has(market.conditionId.toLowerCase());
           const barColor =
-            yesPrice > 0.6 ? "#2CE8C6" :
-            yesPrice < 0.2 ? "#FF5F6D" :
-            "#4EA3FF";
+            yesPrice > 0.6 ? "#00FFB3" :
+            yesPrice < 0.2 ? "#FF3355" :
+            "#4D83FF";
 
           return (
             <Link
