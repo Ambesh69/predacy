@@ -142,11 +142,15 @@ export class PolymarketClient {
       const mid = parseFloat(res.data.mid ?? "0");
       // Reject the sentinel: CLOB returns exactly 0.5 when there are no resting orders.
       // A real mid is almost never exactly 0.5 (would require a perfectly symmetric book).
-      if (mid > 0 && mid < 1 && mid !== 0.5) return mid;
-      // fall through to last-trade-price below
+      if (mid > 0 && mid < 1 && mid !== 0.5) {
+        console.log(`[PolymarketClient] getMidPrice token=${tokenId.slice(0, 8)}…: /midpoint → ${mid}`);
+        return mid;
+      }
+      console.log(`[PolymarketClient] getMidPrice token=${tokenId.slice(0, 8)}…: /midpoint returned sentinel ${mid}, trying /last-trade-price`);
     } catch (err: any) {
       // 404 = "No orderbook exists" — fall through. Any other error: re-throw.
       if (err?.response?.status !== 404) throw err;
+      console.log(`[PolymarketClient] getMidPrice token=${tokenId.slice(0, 8)}…: /midpoint 404, trying /last-trade-price`);
     }
 
     // /midpoint returned sentinel (0.5) or 404 — use the last matched trade price instead.
@@ -154,6 +158,7 @@ export class PolymarketClient {
       params: { token_id: tokenId },
     });
     const price = parseFloat(fallback.data.price ?? "0");
+    console.log(`[PolymarketClient] getMidPrice token=${tokenId.slice(0, 8)}…: /last-trade-price → ${price}`);
     if (price > 0) return price;
     throw new Error(`No usable price for token ${tokenId} (mid was sentinel, no last-trade-price)`);
   }
