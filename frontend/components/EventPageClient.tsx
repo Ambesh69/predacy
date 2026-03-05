@@ -1252,6 +1252,25 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
             <>
               <div className="px-4 py-3 border-b border-border bg-surface/20">
                 <p className="text-[11px] text-muted tracking-widest uppercase">Trade</p>
+                <div className="mt-2">
+                  <label className="text-[10px] text-muted tracking-widest uppercase block mb-1">Outcome</label>
+                  <select
+                    value={selectedMarket.conditionId}
+                    onChange={(e) => {
+                      const next = sorted.find((m) => m.conditionId === e.target.value);
+                      if (!next) return;
+                      setSelectedMarket(next);
+                      setOrderSealed(false);
+                    }}
+                    className="w-full bg-surface border border-border text-[12px] text-text px-2.5 py-2 focus:outline-none focus:border-border-bright"
+                  >
+                    {sorted.map((market) => (
+                      <option key={market.conditionId} value={market.conditionId}>
+                        {outcomeLabel(market)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
 
               {/* Tab content — scrolls internally, BatchTimer pinned below */}
@@ -1324,6 +1343,8 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                         submitStep={submitStep}
                         balanceVersion={balanceVersion}
                         candidateMarketIds={[selectedMarket.conditionId as `0x${string}`, ...historicalMarketIds]}
+                        compactExecution={true}
+                        showAdvancedByDefault={false}
                       />
                     </div>
                   )}
@@ -1332,18 +1353,23 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
               </div>{/* end flex-1 scrollable tab content */}
 
               {/* Compact batch timer — pinned at bottom of trading panel */}
-              <div className="border-t border-border px-4 py-3 flex-shrink-0">
-                <BatchTimer
-                  openedAt={batch.openedAt}
-                  batchWindow={batch.batchWindow}
-                  commitmentCount={batch.commitmentCount}
-                  totalDeposited={batch.totalDeposited}
-                  batchId={batch.batchId}
-                  status={batch.status}
-                  clearingPrice={batch.clearingPrice}
-                  mini={true}
-                />
-              </div>
+              <details className="border-t border-border px-4 py-3 flex-shrink-0">
+                <summary className="cursor-pointer text-[10px] text-muted tracking-widest uppercase select-none">
+                  Advanced
+                </summary>
+                <div className="mt-2">
+                  <BatchTimer
+                    openedAt={batch.openedAt}
+                    batchWindow={batch.batchWindow}
+                    commitmentCount={batch.commitmentCount}
+                    totalDeposited={batch.totalDeposited}
+                    batchId={batch.batchId}
+                    status={batch.status}
+                    clearingPrice={batch.clearingPrice}
+                    mini={true}
+                  />
+                </div>
+              </details>
             </>
           ) : (
             /* Empty state */

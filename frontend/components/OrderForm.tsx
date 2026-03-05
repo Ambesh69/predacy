@@ -32,6 +32,8 @@ interface OrderFormProps {
   submitStep?: "approving" | "signing" | "railgun" | null;
   balanceVersion?: number;     // bumped by parent after a successful claim
   candidateMarketIds?: `0x${string}`[];  // all market IDs from batch history to check balance against
+  compactExecution?: boolean;
+  showAdvancedByDefault?: boolean;
 }
 
 const PRICE_STEP        = 10_000;
@@ -70,6 +72,8 @@ export default function OrderForm({
   submitStep,
   balanceVersion = 0,
   candidateMarketIds = [],
+  compactExecution = false,
+  showAdvancedByDefault = false,
 }: OrderFormProps) {
   const [mode, setMode]           = useState<"buy" | "sell">("buy");
   const [isBuy, setIsBuy]         = useState(true);   // YES vs NO within buy mode
@@ -85,6 +89,7 @@ export default function OrderForm({
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showPrivacy,  setShowPrivacy]  = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(showAdvancedByDefault);
 
   // ── Slippage (market orders) ─────────────────────────────────────────────
   const [slippageBps, setSlippageBpsState] = useState<number>(() => {
@@ -291,6 +296,31 @@ export default function OrderForm({
     </div>
   );
 
+  const advancedSection = (
+    <div className="pt-2 border-t border-border/40">
+      <button
+        type="button"
+        onClick={() => setShowAdvanced((v) => !v)}
+        className="w-full flex items-center gap-1.5 text-[10px] text-muted-dim hover:text-muted transition-colors"
+      >
+        <span className="tracking-widest uppercase">Advanced</span>
+        <span className="text-muted">•</span>
+        <span>
+          {mode === "buy"
+            ? `Slippage ${(slippageBps / 100).toFixed(1)}%`
+            : "Execution details"}
+        </span>
+        <svg
+          className={clsx("ml-auto w-2.5 h-2.5 transition-transform", showAdvanced && "rotate-180")}
+          fill="none" stroke="currentColor" viewBox="0 0 24 24"
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+      {showAdvanced && <div className="mt-2">{privacyToggle}</div>}
+    </div>
+  );
+
   return (
     <div className="flex flex-col h-full">
 
@@ -300,7 +330,8 @@ export default function OrderForm({
           type="button"
           onClick={() => setMode("buy")}
           className={clsx(
-            "px-4 py-2.5 text-[11px] tracking-widest uppercase font-medium border-b-2 transition-colors",
+            compactExecution ? "px-3 py-2 text-[10px]" : "px-4 py-2.5 text-[11px]",
+            "tracking-widest uppercase font-medium border-b-2 transition-colors",
             mode === "buy" ? "border-accent text-accent" : "border-transparent text-muted hover:text-text"
           )}
         >
@@ -310,7 +341,8 @@ export default function OrderForm({
           type="button"
           onClick={() => setMode("sell")}
           className={clsx(
-            "px-4 py-2.5 text-[11px] tracking-widest uppercase font-medium border-b-2 border-l border-border transition-colors",
+            compactExecution ? "px-3 py-2 text-[10px]" : "px-4 py-2.5 text-[11px]",
+            "tracking-widest uppercase font-medium border-b-2 border-l border-border transition-colors",
             mode === "sell" ? "border-danger text-danger" : "border-transparent text-muted hover:text-text"
           )}
         >
@@ -473,7 +505,7 @@ export default function OrderForm({
               </div>
             )}
 
-            {privacyToggle}
+            {advancedSection}
 
             {error && (
               <div className="p-2 border border-danger/30 bg-danger/5">
@@ -510,15 +542,13 @@ export default function OrderForm({
                     {submitStep === "approving" ? "APPROVING CTF…" : "SIGNING ORDER…"}
                   </span>
                 ) : (
-                  `SEAL ${orderType === "market" ? "MKT" : "LMT"} SELL YES — ${amountDisplay || "0"} tokens`
+                  "Sell YES"
                 )}
               </button>
             )}
-            {isConnected && batchOpen && (
-              <p className="text-center text-[10px] text-muted-dim mt-2">
-                {yesBalance === 0n
-                  ? "No YES tokens in wallet — buy YES first."
-                  : "1 tx (CTF approve, if needed) + 1 signature"}
+            {isConnected && batchOpen && amountNum > 0 && (
+              <p className="text-center text-[10px] text-muted-dim mt-2 tabular-nums">
+                Receive ${receiveUSDC.toFixed(2)} • Avg {(fillPrice * 100).toFixed(1)}¢
               </p>
             )}
           </div>
@@ -695,7 +725,7 @@ export default function OrderForm({
               </div>
             )}
 
-            {privacyToggle}
+            {advancedSection}
 
             {error && (
               <div className="p-2 border border-danger/30 bg-danger/5">
@@ -738,13 +768,13 @@ export default function OrderForm({
                     {submitStep === "approving" ? "FUNDING EPHEMERAL…" : "SIGNING ORDER…"}
                   </span>
                 ) : (
-                  `SEAL ${orderType === "market" ? "MKT" : "LMT"} ${isBuy ? "BUY YES" : "BUY NO"} — $${amountDisplay || "0"}`
+                  isBuy ? "Buy YES" : "Buy NO"
                 )}
               </button>
             )}
-            {isConnected && batchOpen && (
-              <p className="text-center text-[10px] text-muted-dim mt-2">
-                1 tx (fund ephemeral) + 3 in-browser sigs — no MetaMask popups
+            {isConnected && batchOpen && amountNum > 0 && (
+              <p className="text-center text-[10px] text-muted-dim mt-2 tabular-nums">
+                Cost ${amountNum.toFixed(2)} • Est payout ${toWin.toFixed(2)}
               </p>
             )}
           </div>
