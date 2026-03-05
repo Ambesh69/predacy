@@ -466,7 +466,12 @@ function ClosedPositionRow({
 
         {/* RESULT badge (fixed width, vertically centred) */}
         <div className="flex-shrink-0 w-16 pt-0.5">
-          {won ? (
+          {order.isSell ? (
+            <div className="flex items-center gap-1.5">
+              <span className="w-5 h-5 rounded-full bg-amber-500/10 border border-amber-500/40 flex items-center justify-center text-[10px] text-amber-400 flex-shrink-0">↩</span>
+              <span className="text-[11px] font-medium text-amber-400">Sold</span>
+            </div>
+          ) : won ? (
             <div className="flex items-center gap-1.5">
               <span className="w-5 h-5 rounded-full bg-accent/15 border border-accent/40 flex items-center justify-center text-[10px] text-accent flex-shrink-0">✓</span>
               <span className="text-[11px] font-medium text-accent">Won</span>
@@ -509,7 +514,13 @@ function ClosedPositionRow({
           </div>
           <div className="min-w-[88px]">
             <p className="text-[9px] text-muted-dim tracking-widest uppercase mb-1">AMOUNT WON</p>
-            {currentValue != null ? (
+            {order.isSell ? (
+              // Sell order: show USDC proceeds received
+              <div>
+                <p className="text-[12px] text-text tabular-nums font-mono">${filledUsdc.toFixed(2)}</p>
+                <p className="text-[10px] text-amber-400/70">proceeds</p>
+              </div>
+            ) : currentValue != null ? (
               <div>
                 <p className="text-[12px] text-text tabular-nums font-mono">${currentValue.toFixed(2)}</p>
                 {pnl != null && (
