@@ -2,25 +2,22 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { usePathname, useRouter } from "next/navigation";
 import DiscoveryControls from "@/components/DiscoveryControls";
 import EventCard from "@/components/EventCard";
 import WalletButton from "@/components/WalletButton";
 import {
+  filterAndSortEvents,
   getDiscoveryCategories,
   getDiscoveryTags,
   type DiscoverySort,
 } from "@/lib/discovery";
-import type { PolyEvent } from "@/lib/polymarket";
+import { getEvents, type PolyEvent } from "@/lib/polymarket";
 
 interface DiscoveryPageClientProps {
   title: string;
   subtitle: string;
   fixedCategory?: string;
   initialQuery?: string;
-  initialSort?: DiscoverySort;
-  initialTag?: string;
-  initialCategory?: string;
 }
 
 function normalizeCategory(category: string) {
@@ -32,19 +29,14 @@ export default function DiscoveryPageClient({
   subtitle,
   fixedCategory,
   initialQuery = "",
-  initialSort = "volume_desc",
-  initialTag = "all",
-  initialCategory = "all",
 }: DiscoveryPageClientProps) {
   const [events, setEvents] = useState<PolyEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [liveMarketIds, setLiveMarketIds] = useState<Set<string>>(new Set());
   const [searchQuery, setSearchQuery] = useState(initialQuery);
-  const [sortBy, setSortBy] = useState<DiscoverySort>(initialSort);
-  const [selectedCategory, setSelectedCategory] = useState(fixedCategory ?? initialCategory);
-  const [selectedTag, setSelectedTag] = useState(initialTag);
-  const router = useRouter();
-  const pathname = usePathname();
+  const [sortBy, setSortBy] = useState<DiscoverySort>("volume_desc");
+  const [selectedCategory, setSelectedCategory] = useState(fixedCategory ?? "all");
+  const [selectedTag, setSelectedTag] = useState("all");
 
   useEffect(() => {
     const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
@@ -59,50 +51,25 @@ export default function DiscoveryPageClient({
   }, []);
 
   useEffect(() => {
-    const controller = new AbortController();
-    const category = fixedCategory ?? selectedCategory;
-    const params = new URLSearchParams();
-    if (searchQuery.trim()) params.set("q", searchQuery.trim());
-    if (category !== "all") params.set("category", category);
-    if (selectedTag !== "all") params.set("tag", selectedTag);
-    if (sortBy !== "volume_desc") params.set("sort", sortBy);
-    params.set("limit", "120");
-
-    setLoading(true);
-    fetch(`/api/discovery?${params.toString()}`, {
-      signal: controller.signal,
-      cache: "no-store",
-    })
-      .then((res) => (res.ok ? res.json() : Promise.reject()))
-      .then((data) => setEvents(data.events ?? []))
-      .catch(() => {
-        if (controller.signal.aborted) return;
-        setEvents([]);
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
-      });
-
-    return () => controller.abort();
-  }, [fixedCategory, searchQuery, selectedCategory, selectedTag, sortBy]);
-
-  useEffect(() => {
-    const params = new URLSearchParams();
-    if (searchQuery.trim()) params.set("q", searchQuery.trim());
-    if (!fixedCategory && selectedCategory !== "all") params.set("category", selectedCategory);
-    if (selectedTag !== "all") params.set("tag", selectedTag);
-    if (sortBy !== "volume_desc") params.set("sort", sortBy);
-    const next = params.toString();
-    router.replace(next ? `${pathname}?${next}` : pathname, { scroll: false });
-  }, [fixedCategory, pathname, router, searchQuery, selectedCategory, selectedTag, sortBy]);
+    getEvents(100)
+      .then((fetched) => setEvents(fetched))
+      .catch(() => setEvents([]))
+      .finally(() => setLoading(false));
+  }, []);
 
   const categories = useMemo(() => getDiscoveryCategories(events), [events]);
   const tags = useMemo(() => getDiscoveryTags(events), [events]);
 
   const displayed = useMemo(() => {
-    if (!fixedCategory) return events;
-    return events.filter((e) => normalizeCategory(e.category ?? "") === normalizeCategory(fixedCategory));
-  }, [events, fixedCategory]);
+    const filtered = filterAndSortEvents(events, {
+      q: searchQuery,
+      category: selectedCategory,
+      tag: selectedTag,
+      sort: sortBy,
+    });
+    if (!fixedCategory) return filtered;
+    return filtered.filter((e) => normalizeCategory(e.category ?? "") === normalizeCategory(fixedCategory));
+  }, [events, fixedCategory, searchQuery, selectedCategory, selectedTag, sortBy]);
 
   const hasFilters = searchQuery.trim() !== "" || selectedCategory !== (fixedCategory ?? "all") || selectedTag !== "all" || sortBy !== "volume_desc";
 
