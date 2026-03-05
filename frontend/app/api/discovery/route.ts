@@ -17,13 +17,21 @@ function parseJsonMaybe<T>(value: unknown, fallback: T): T {
   }
 }
 
+function coerceTags(raw: any[]): string[] {
+  return raw.map((t: any) =>
+    typeof t === "string" ? t : (t?.label ?? t?.id ?? String(t))
+  );
+}
+
 function normalizeEvent(event: any): PolyEvent {
+  const tags = coerceTags(parseJsonMaybe<any[]>(event.tags, []));
   return {
     ...event,
-    tags: parseJsonMaybe<string[]>(event.tags, []),
+    tags,
+    category: event.category ?? (tags[0] || undefined),
     markets: parseJsonMaybe<any[]>(event.markets, []).map((market) => ({
       ...market,
-      tags: parseJsonMaybe<string[]>(market.tags, []),
+      tags: coerceTags(parseJsonMaybe<any[]>(market.tags, [])),
     })),
   };
 }

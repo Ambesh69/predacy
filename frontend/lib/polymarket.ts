@@ -60,9 +60,14 @@ export async function getMarkets(limit = 20): Promise<Market[]> {
 
 function normalizeEvent(e: any): PolyEvent {
   const parse = (v: any) => (typeof v === "string" ? JSON.parse(v) : v);
+  const rawTags: any[] = parse(e.tags) ?? [];
+  const tags: string[] = rawTags.map((t: any) =>
+    typeof t === "string" ? t : (t?.label ?? t?.id ?? String(t))
+  );
   return {
     ...e,
-    tags:    parse(e.tags)    ?? [],
+    tags,
+    category: e.category ?? (tags[0] || undefined),
     markets: (e.markets ?? []).map(normalizeMarket),
   };
 }
