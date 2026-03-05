@@ -1463,7 +1463,7 @@ export default function ProfileClient() {
             <div className="flex items-start gap-0 divide-x divide-border">
               <div className="pr-5">
                 <p className="text-base font-black text-text leading-tight" style={{ fontFamily: "var(--font-display)" }}>
-                  {usdcBalance === null ? "…" : `$${(Number(usdcBalance) / 1e6).toFixed(2)}`}
+                  {usdcBalance === null ? "…" : `$${(Number(usdcBalance) / 1e6).toFixed(6).replace(/\.(\d{2,}?)0+$/, '.$1')}`}
                 </p>
                 <p className="text-[10px] text-muted-dim mt-0.5">USDC Balance</p>
               </div>
