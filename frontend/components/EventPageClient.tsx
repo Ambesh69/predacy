@@ -1113,11 +1113,11 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         </div>
       )}
 
-      {/* Two-column: outcome list | trading panel */}
-      <div className="flex flex-1 min-h-0 divide-x divide-border">
+      {/* Exploration + trading layout */}
+      <div className="flex flex-1 min-h-0 flex-col xl:flex-row xl:divide-x xl:divide-border">
 
         {/* ── Left column: compact chart + scrollable outcome list ──────── */}
-        <div className="flex-1 flex flex-col min-h-0">
+        <div className="flex-1 flex flex-col min-h-[320px] min-w-0">
 
           {/* Chart only shown on Outcomes tab — hide when Orderbook active to give it full height */}
           {leftTab === "outcomes" && <MultiOutcomeChart markets={event.markets} selectedMarketId={selectedMarket?.conditionId} />}
@@ -1272,7 +1272,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         </div>{/* end left column */}
 
         {/* ── Trading panel ────────────────────────────────────────────────── */}
-        <div className="w-[340px] xl:w-[380px] flex-shrink-0 flex flex-col overflow-hidden">
+        <div className="w-full xl:w-[380px] xl:flex-shrink-0 flex flex-col overflow-hidden border-t border-border xl:border-t-0">
 
           {selectedMarket ? (
             <>
