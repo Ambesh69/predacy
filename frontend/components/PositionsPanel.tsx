@@ -48,7 +48,7 @@ interface PositionsPanelProps {
   currentBatchClearingPrice:  bigint;  // needed to compute YES token count for close
   currentBatchCommitments:    Array<{ hash: `0x${string}`; amount?: bigint }>;
   onClaim:                    (batchId: bigint) => Promise<void>;
-  onClosePosition?:           (yesAmount: bigint) => void; // pre-fill sell form
+  onClosePosition?:           (yesAmount: bigint, clearingPrice: bigint) => void; // pre-fill sell form
   onMarketIdsFound?:          (ids: `0x${string}`[]) => void;
 }
 
@@ -696,7 +696,7 @@ export default function PositionsPanel({
                   isSell={currentPosition.isSell}
                   onClose={
                     !currentPosition.isSell && currentPosition.claimed && onClosePosition
-                      ? () => onClosePosition(computeYesAmount(currentPosition.filledAmount, currentBatchClearingPrice))
+                      ? () => onClosePosition(computeYesAmount(currentPosition.filledAmount, currentBatchClearingPrice), currentBatchClearingPrice)
                       : undefined
                   }
                 />
@@ -765,7 +765,7 @@ export default function PositionsPanel({
                     isSell={hp.isSell}
                     onClose={
                       !hp.isSell && hp.position.claimed && onClosePosition
-                        ? () => onClosePosition(computeYesAmount(hp.position.filledAmount, hp.clearingPrice))
+                        ? () => onClosePosition(computeYesAmount(hp.position.filledAmount, hp.clearingPrice), hp.clearingPrice)
                         : undefined
                     }
                   />

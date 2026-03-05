@@ -458,6 +458,8 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   const [historicalMarketIds, setHistoricalMarketIds] = useState<`0x${string}`[]>([]);
   // Pre-fill for SELL mode when user clicks "CLOSE POSITION" on a claimed entry.
   const [sellPrefill, setSellPrefill] = useState<bigint | null>(null);
+  // The buy clearing price of the position being closed — stored on the sell order for P&L.
+  const [closeBuyClearingPrice, setCloseBuyClearingPrice] = useState<bigint | null>(null);
   const selectedMarketId = selectedMarket?.conditionId;
 
   // ── Toast notifications ──────────────────────────────────────────────────────
@@ -640,8 +642,9 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   };
 
   // ── Close position: pre-fill the SELL order form and switch to ORDER tab ────────
-  const handleClosePosition = useCallback((yesAmount: bigint) => {
+  const handleClosePosition = useCallback((yesAmount: bigint, clearingPrice: bigint) => {
     setSellPrefill(yesAmount);
+    setCloseBuyClearingPrice(clearingPrice);
     setActiveTab("order");
   }, []);
 
@@ -976,16 +979,18 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         const key = `predacy:orders:${walletAddress.toLowerCase()}`;
         const existing: unknown[] = JSON.parse(localStorage.getItem(key) ?? "[]");
         existing.unshift({
-          commitment:     params.commitment,
-          salt:           params.salt,
-          amount:         params.amount.toString(),
-          isBuy:          false,
-          isSell:         true,   // distinguish sell from "buy NO"
-          limitPrice:     params.limitPrice.toString(),
-          batchId:        batch.batchId.toString(),
-          marketId:       selectedMarket.conditionId,
-          marketQuestion: selectedMarket.question ?? null,
-          timestamp:      Date.now(),
+          commitment:       params.commitment,
+          salt:             params.salt,
+          amount:           params.amount.toString(),
+          isBuy:            false,
+          isSell:           true,   // distinguish sell from "buy NO"
+          limitPrice:       params.limitPrice.toString(),
+          batchId:          batch.batchId.toString(),
+          marketId:         selectedMarket.conditionId,
+          marketQuestion:   selectedMarket.question ?? null,
+          timestamp:        Date.now(),
+          // Cost basis of the position being closed — used for P&L display
+          buyClearingPrice: closeBuyClearingPrice != null ? closeBuyClearingPrice.toString() : undefined,
         });
         localStorage.setItem(key, JSON.stringify(existing.slice(0, 200)));
       } catch { /* ignore */ }
@@ -1379,7 +1384,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                         balanceVersion={balanceVersion}
                         candidateMarketIds={[selectedMarket.conditionId as `0x${string}`, ...historicalMarketIds]}
                         sellPrefill={sellPrefill}
-                        onSellPrefillConsumed={() => setSellPrefill(null)}
+                        onSellPrefillConsumed={() => { setSellPrefill(null); setCloseBuyClearingPrice(null); }}
                       />
                     </div>
                   )}

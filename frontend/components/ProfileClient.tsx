@@ -26,17 +26,18 @@ const ORDER_COMMITTED_EVENT = parseAbiItem(
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 interface StoredOrder {
-  commitment:      string;
-  salt?:           string;
-  amount:          string;
-  isBuy:           boolean;
-  isSell?:         boolean;  // true = sell order (not a buy-NO order)
-  limitPrice:      string;
-  batchId:         string;
-  marketId:        string | null;
-  marketQuestion:  string | null;
-  timestamp:       number;
-  claimed?:        boolean;
+  commitment:        string;
+  salt?:             string;
+  amount:            string;
+  isBuy:             boolean;
+  isSell?:           boolean;  // true = sell order (not a buy-NO order)
+  limitPrice:        string;
+  batchId:           string;
+  marketId:          string | null;
+  marketQuestion:    string | null;
+  timestamp:         number;
+  claimed?:          boolean;
+  buyClearingPrice?: string;   // clearing price of the buy position that was closed (for P&L)
 }
 
 interface OrderEntry {
@@ -62,6 +63,8 @@ interface OrderEntry {
   // market data
   currentYesPrice?: number;   // 0–1 float from Gamma API
   shares?:          number;   // computed from filledAmount / clearingPrice
+  // for sell orders: the clearing price of the original buy position (stored at sell time for P&L)
+  buyClearingPrice?: bigint;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -442,8 +445,18 @@ function ClosedPositionRow({
     ? Number(order.filledAmount) / 1e6
     : Number(order.rawAmount) / 1e6;
 
-  // Sell orders are already exited — no ongoing P&L to show.
-  // For NO positions still held, current value uses the NO price (1 − yes).
+  // Sell orders: compute realised P&L = proceeds − cost basis (if buy clearing price is known).
+  const sellProfit: number | null = (() => {
+    if (!order.isSell) return null;
+    if (!order.buyClearingPrice || !order.shares) return null;
+    const costBasis = order.shares * (Number(order.buyClearingPrice) / 1_000_000);
+    return filledUsdc - costBasis;
+  })();
+  const sellProfitPct = sellProfit != null && order.shares && order.buyClearingPrice
+    ? (sellProfit / (order.shares * (Number(order.buyClearingPrice) / 1_000_000))) * 100
+    : null;
+
+  // For buy positions still held, current value uses the outcome price.
   const outcomePrice = !order.isSell && order.currentYesPrice != null
     ? (order.isBuy ? order.currentYesPrice : 1 - order.currentYesPrice)
     : null;
@@ -515,11 +528,24 @@ function ClosedPositionRow({
           <div className="min-w-[88px]">
             <p className="text-[9px] text-muted-dim tracking-widest uppercase mb-1">AMOUNT WON</p>
             {order.isSell ? (
-              // Sell order: show USDC proceeds received
-              <div>
-                <p className="text-[12px] text-text tabular-nums font-mono">${filledUsdc.toFixed(2)}</p>
-                <p className="text-[10px] text-amber-400/70">proceeds</p>
-              </div>
+              // Sell order: show realised profit if we have buy price, else proceeds
+              sellProfit != null ? (
+                <div>
+                  <p className={clsx("text-[12px] tabular-nums font-mono font-medium", sellProfit >= 0 ? "text-accent" : "text-danger")}>
+                    {sellProfit >= 0 ? "+" : ""}{sellProfit.toFixed(2)}
+                  </p>
+                  {sellProfitPct != null && (
+                    <p className={clsx("text-[10px] tabular-nums", sellProfit >= 0 ? "text-accent/70" : "text-danger/70")}>
+                      {sellProfit >= 0 ? "+" : ""}{sellProfitPct.toFixed(1)}%
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <div>
+                  <p className="text-[12px] text-text tabular-nums font-mono">${filledUsdc.toFixed(2)}</p>
+                  <p className="text-[10px] text-amber-400/70">proceeds</p>
+                </div>
+              )
             ) : currentValue != null ? (
               <div>
                 <p className="text-[12px] text-text tabular-nums font-mono">${currentValue.toFixed(2)}</p>
@@ -839,13 +865,14 @@ export default function ProfileClient() {
           salt:           o.salt,
           rawAmount:      BigInt(o.amount),
           isBuy:          o.isBuy,
-          isSell:         o.isSell === true,
-          limitPrice:     BigInt(o.limitPrice),
-          batchId:        BigInt(o.batchId),
-          marketId:       (o.marketId ?? undefined) as `0x${string}` | undefined,
-          marketQuestion: o.marketQuestion ?? undefined,
-          timestamp:      o.timestamp,
-          claimed:        o.claimed,
+          isSell:           o.isSell === true,
+          limitPrice:       BigInt(o.limitPrice),
+          batchId:          BigInt(o.batchId),
+          marketId:         (o.marketId ?? undefined) as `0x${string}` | undefined,
+          marketQuestion:   o.marketQuestion ?? undefined,
+          timestamp:        o.timestamp,
+          claimed:          o.claimed,
+          buyClearingPrice: o.buyClearingPrice ? BigInt(o.buyClearingPrice) : undefined,
         }));
 
       setOrders(entries);
