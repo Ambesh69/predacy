@@ -548,14 +548,34 @@ export class BatchProcessor {
     if (effectiveClearingPrice === 0n) {
       // Try Gamma API (public, no auth required) to get actual YES market price.
       // This avoids the 65¢ hardcode killing buy orders on low-probability markets.
+      // If Gamma outcomePrices is also 0 (mirrors CLOB data for illiquid markets),
+      // fall back to CLOB /last-trade-price via getMidPrice.
       try {
         const market = await this.polymarket.getMarket(batchInfo.marketId);
+        const yesToken =
+          cachedYesToken ??
+          market.tokens.find((t) => t.outcome?.toLowerCase() === "yes")?.token_id ??
+          market.clobTokenIds?.[0];
         const yesPrice = parseFloat(market.outcomePrices?.[0] ?? "0");
         if (yesPrice > 0 && yesPrice < 1) {
           effectiveClearingPrice = BigInt(Math.round(yesPrice * 1_000_000));
           console.log(
             `[BatchProcessor] Gamma public price: ${yesPrice} → effectiveClearingPrice=${effectiveClearingPrice}`,
           );
+        } else if (yesToken) {
+          // Gamma outcomePrices reflects CLOB mid — also 0 when no active orderbook.
+          // getMidPrice() now internally falls back to /last-trade-price on 404.
+          try {
+            const lastPrice = await this.polymarket.getMidPrice(yesToken);
+            if (lastPrice > 0) {
+              effectiveClearingPrice = BigInt(Math.round(lastPrice * 1_000_000));
+              console.log(
+                `[BatchProcessor] CLOB last-trade-price: ${lastPrice} → effectiveClearingPrice=${effectiveClearingPrice}`,
+              );
+            }
+          } catch (priceErr) {
+            console.warn(`[BatchProcessor] CLOB last-trade-price also failed (non-fatal):`, priceErr);
+          }
         }
       } catch (err) {
         console.warn(`[BatchProcessor] Gamma price lookup failed (non-fatal):`, err);

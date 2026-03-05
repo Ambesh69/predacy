@@ -122,12 +122,33 @@ export class PolymarketClient {
     return normalizeMarket(res.data[0]);
   }
 
-  /** Get the current mid-price for a token (YES or NO token ID) */
+  /**
+   * Get the current mid-price for a token (YES or NO token ID).
+   *
+   * Primary:  GET /midpoint — requires an active resting orderbook.
+   * Fallback: GET /last-trade-price — returns the most-recent matched trade price
+   *           even when no resting orders exist (illiquid / thin markets).
+   *           Returns 404 → throws only when BOTH sources fail or return 0.
+   */
   async getMidPrice(tokenId: string): Promise<number> {
-    const res = await axios.get(`${CLOB_API}/midpoint`, {
-      params: { token_id: tokenId },
-    });
-    return parseFloat(res.data.mid);
+    try {
+      const res = await axios.get(`${CLOB_API}/midpoint`, {
+        params: { token_id: tokenId },
+      });
+      return parseFloat(res.data.mid);
+    } catch (err: any) {
+      // /midpoint returns 404 "No orderbook exists" for markets with no resting orders.
+      // Fall back to /last-trade-price, which is available as long as ≥1 trade has occurred.
+      if (err?.response?.status === 404) {
+        const fallback = await axios.get(`${CLOB_API}/last-trade-price`, {
+          params: { token_id: tokenId },
+        });
+        const price = parseFloat(fallback.data.price ?? "0");
+        if (price > 0) return price;
+        throw new Error(`No mid-price or last-trade-price available for token ${tokenId}`);
+      }
+      throw err;
+    }
   }
 
   /** Get the order book for a token */
