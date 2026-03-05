@@ -1014,6 +1014,18 @@ export default function ProfileClient() {
             ? Number(filledAmount * 1_000_000n / clearingPrice) / 1_000_000
             : undefined;
 
+        // For sell orders: if buyClearingPrice wasn't stored at sell time, derive it by
+        // finding the most recent settled buy on the same market that preceded this batch.
+        let buyClearingPrice = e.buyClearingPrice;
+        if (e.isSell && !buyClearingPrice && e.marketId) {
+          const priorBuy = entries
+            .filter((b) => b.isBuy && !b.isSell && b.marketId === e.marketId && b.batchId < e.batchId)
+            .sort((a, b) => (a.batchId > b.batchId ? -1 : 1))[0]; // most recent prior buy
+          if (priorBuy) {
+            buyClearingPrice = batchMap.get(priorBuy.batchId)?.clearingPrice;
+          }
+        }
+
         return {
           ...e,
           txHash:          txHashMap.get(e.commitment.toLowerCase()),
@@ -1024,6 +1036,7 @@ export default function ProfileClient() {
           claimed:         posInfo?.claimed ?? e.claimed,
           currentYesPrice,
           shares,
+          buyClearingPrice: buyClearingPrice ?? e.buyClearingPrice,
         };
       });
 
