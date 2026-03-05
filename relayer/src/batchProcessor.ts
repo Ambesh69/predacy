@@ -586,13 +586,12 @@ export class BatchProcessor {
             cachedYesToken,
             fills.netBuyAmount,
           );
-          console.log(`[BatchProcessor] → Polymarket BUY order ${orderId} placed (limit ${limitPrice})`);
-
-          if (clearing.clearingPrice === 0n) {
-            effectiveClearingPrice = BigInt(Math.round(limitPrice * 1_000_000));
-            fills = computeFillsAtPrice(orders, effectiveClearingPrice);
-            console.log(`[BatchProcessor] → Refined clearing price to ${effectiveClearingPrice}`);
-          }
+          // NOTE: do NOT refine effectiveClearingPrice from limitPrice here.
+          // limitPrice = mid * 1.01 (1% execution slippage) — using it as the
+          // clearing price would push it above users' typical 0.5% limit,
+          // causing their orders to be marked not-filled even though they should
+          // have matched. The mid price set in step 4a is the correct clearing price.
+          console.log(`[BatchProcessor] → Polymarket BUY order ${orderId} placed (execution limit ${limitPrice}, clearing price unchanged: ${effectiveClearingPrice})`);
         } else if (fills.netSellYes > 0n) {
           const yesStr = (Number(fills.netSellYes) / 1e6).toFixed(4);
           console.log(`[BatchProcessor] → Routing net SELL YES: ${yesStr} tokens to Polymarket`);
