@@ -538,6 +538,10 @@ export default function PositionsPanel({
             // so the user can see their order status instead of a blank panel.
             const bs = batchRaw.status as BatchStatus;
             if (bs === BatchStatus.SETTLING || bs === BatchStatus.SETTLED) {
+              // A SETTLING batch older than 5 min is stuck (relayer gave up) — show sweep button
+              const isStuck = bs === BatchStatus.SETTLING
+                && !!order.timestamp
+                && (Date.now() - order.timestamp > 5 * 60 * 1000);
               results.push({
                 batchId:          id,
                 batchMarketId:    batchRaw.marketId,
@@ -547,8 +551,8 @@ export default function PositionsPanel({
                 isSell:           order.isSell === true || !order.isBuy,
                 position: { filledAmount: 0n, refundAmount: 0n, isBuy: order.isBuy, claimed: false },
                 shares:           0,
-                settling:         bs === BatchStatus.SETTLING,
-                unfilled:         bs === BatchStatus.SETTLED,
+                settling:         bs === BatchStatus.SETTLING && !isStuck,
+                unfilled:         bs === BatchStatus.SETTLED || isStuck,
                 ephemeralKey:     order.isBuy ? order.ephemeralKey     : undefined,
                 ephemeralAddress: order.isBuy ? order.ephemeralAddress : undefined,
                 unfilledAmount:   order.isBuy ? BigInt(order.amount)   : undefined,
