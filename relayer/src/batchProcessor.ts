@@ -332,6 +332,7 @@ export class BatchProcessor {
       config.polymarket.apiPassphrase,
       config.polymarket.signerPrivateKey,
       config.polymarket.proxyWallet,
+      config.rpcUrl,
     );
     this.store = createOrderStore(config.redisUrl);
   }

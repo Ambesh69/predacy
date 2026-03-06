@@ -202,6 +202,8 @@ export class PolymarketClient {
   private proxyWallet:   string | null;
   /** In-process cache: conditionId (lower) → PolymarketMarket */
   private _marketCache = new Map<string, PolymarketMarket>();
+  /** Alchemy/custom RPC URL for on-chain scanning (uses default polygon RPC if unset) */
+  private rpcUrl: string | undefined;
 
   constructor(
     apiKey:        string,
@@ -209,12 +211,14 @@ export class PolymarketClient {
     apiPassphrase: string,
     signerPrivateKey?: `0x${string}`,
     proxyWallet?:  string,
+    rpcUrl?:       string,
   ) {
     this.apiKey        = apiKey;
     this.apiSecret     = apiSecret;
     this.apiPassphrase = apiPassphrase;
     this.account       = signerPrivateKey ? privateKeyToAccount(signerPrivateKey) : null;
     this.proxyWallet   = proxyWallet ?? null;
+    this.rpcUrl        = rpcUrl;
   }
 
   // ─── Market data (no auth required) ────────────────────────────────────────
@@ -598,7 +602,8 @@ export class PolymarketClient {
     const nowSec = BigInt(Math.floor(Date.now() / 1000));
 
     // Create a Polygon mainnet public client for on-chain scanning.
-    const client = createPublicClient({ chain: polygon, transport: http() });
+    // Use the configured Alchemy RPC (passed from RelayerConfig) to avoid free-tier getLogs limits.
+    const client = createPublicClient({ chain: polygon, transport: http(this.rpcUrl) });
 
     // 1. Get recent OrderFilled events from CTFExchange.
     const latestBlock = await client.getBlockNumber();
