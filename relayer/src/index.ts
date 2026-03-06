@@ -29,6 +29,9 @@ const baseConfig = {
     // EIP-712 order signing key. Must be the key that owns the Polymarket API key.
     // Falls back to RELAYER_PRIVATE_KEY if not set.
     signerPrivateKey: (process.env.POLYMARKET_SIGNER_KEY ?? process.env.RELAYER_PRIVATE_KEY) as `0x${string}` | undefined,
+    // Polymarket proxy wallet (maker address). Visible in polymarket.com → Builder Codes → Address.
+    // Must be set for CLOB order placement to work (maker ≠ signer EOA).
+    proxyWallet: process.env.POLYMARKET_PROXY_WALLET || undefined,
   },
   batchWindowMs:  parseInt(process.env.BATCH_WINDOW_MS ?? "30000"),
   useRealZk:      process.env.USE_REAL_ZK === "true",

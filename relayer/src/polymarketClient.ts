@@ -94,6 +94,8 @@ export class PolymarketClient {
   private apiSecret:     string;
   private apiPassphrase: string;
   private account:       ReturnType<typeof privateKeyToAccount> | null;
+  /** Polymarket proxy wallet address (maker). If set, used as `maker`; signer stays as EOA. */
+  private proxyWallet:   string | null;
   /** In-process cache: conditionId (lower) → PolymarketMarket */
   private _marketCache = new Map<string, PolymarketMarket>();
 
@@ -102,11 +104,13 @@ export class PolymarketClient {
     apiSecret:     string,
     apiPassphrase: string,
     signerPrivateKey?: `0x${string}`,
+    proxyWallet?:  string,
   ) {
     this.apiKey        = apiKey;
     this.apiSecret     = apiSecret;
     this.apiPassphrase = apiPassphrase;
     this.account       = signerPrivateKey ? privateKeyToAccount(signerPrivateKey) : null;
+    this.proxyWallet   = proxyWallet ?? null;
   }
 
   // ─── Market data (no auth required) ────────────────────────────────────────
@@ -368,9 +372,10 @@ export class PolymarketClient {
     // Use current timestamp as salt — unique per order, no pre-image concerns
     const salt = BigInt(Date.now());
 
+    const makerAddress = (this.proxyWallet ?? account.address) as `0x${string}`;
     const orderMessage = {
       salt,
-      maker:         account.address,
+      maker:         makerAddress,
       signer:        account.address,
       taker:         TAKER_ZERO,
       tokenId:       BigInt(tokenId),
@@ -395,7 +400,7 @@ export class PolymarketClient {
     const body = JSON.stringify({
       order: {
         salt:          salt.toString(),
-        maker:         account.address,
+        maker:         makerAddress,
         signer:        account.address,
         taker:         TAKER_ZERO,
         tokenId,

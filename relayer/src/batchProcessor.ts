@@ -252,6 +252,7 @@ export interface RelayerConfig {
     apiSecret:       string;
     apiPassphrase:   string;
     signerPrivateKey?: `0x${string}`; // EIP-712 order signing key (maker address must match API key owner)
+    proxyWallet?:    string;          // Polymarket proxy wallet shown in Builder Codes → Address
   };
   batchWindowMs: number;
 }
@@ -307,6 +308,7 @@ export class BatchProcessor {
       config.polymarket.apiSecret,
       config.polymarket.apiPassphrase,
       config.polymarket.signerPrivateKey,
+      config.polymarket.proxyWallet,
     );
     this.store = createOrderStore(config.redisUrl);
   }
