@@ -57,6 +57,13 @@ const TAKER_ZERO = "0x0000000000000000000000000000000000000000" as `0x${string}`
 /** How many Polygon blocks back to scan for CTFExchange fills (~1 hour at 2s/block) */
 const SCAN_BLOCKS = 2000n;
 
+/**
+ * Public Polygon RPC used exclusively for read-only historical getLogs scans.
+ * Ankr's public endpoint supports up to 10 000-block ranges without auth.
+ * We keep the Alchemy key (this.rpcUrl) for write operations / low-latency calls.
+ */
+const POLYGON_SCAN_RPC = "https://rpc.ankr.com/polygon";
+
 /** ABI for decoding CTFExchange fillOrders / fillOrder calldata */
 const FILL_ORDERS_ABI = [
   {
@@ -602,8 +609,10 @@ export class PolymarketClient {
     const nowSec = BigInt(Math.floor(Date.now() / 1000));
 
     // Create a Polygon mainnet public client for on-chain scanning.
-    // Use the configured Alchemy RPC (passed from RelayerConfig) to avoid free-tier getLogs limits.
-    const client = createPublicClient({ chain: polygon, transport: http(this.rpcUrl) });
+    // Use the dedicated scan RPC (Ankr public) — supports 10 000-block getLogs ranges for free.
+    // The Alchemy key (this.rpcUrl) is intentionally NOT used here: Alchemy free tier caps
+    // eth_getLogs at 10 blocks per request, which is insufficient for our 2000-block scan window.
+    const client = createPublicClient({ chain: polygon, transport: http(POLYGON_SCAN_RPC) });
 
     // 1. Get recent OrderFilled events from CTFExchange.
     const latestBlock = await client.getBlockNumber();
