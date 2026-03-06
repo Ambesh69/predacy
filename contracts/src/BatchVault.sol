@@ -824,10 +824,11 @@ contract BatchVault {
     }
 
     function _getYesTokenId(bytes32 conditionId) internal view returns (uint256) {
+        // Polymarket binary markets: YES = indexSet 1 (outcome slot 0), NO = indexSet 2 (outcome slot 1)
         bytes32 collectionId = IConditionalTokens(ctf).getCollectionId(
             bytes32(0),
             conditionId,
-            2
+            1
         );
         return IConditionalTokens(ctf).getPositionId(usdc, collectionId);
     }

@@ -178,9 +178,9 @@ contract MockCTF is IConditionalTokens {
     // ── Internal ─────────────────────────────────────────────────────────────
 
     /// @notice Compute the YES token ID for a given collateral and conditionId.
-    ///         YES = index set 2 (binary: 10). Matches BatchVault._getYesTokenId().
+    ///         YES = index set 1 (outcome slot 0). Matches BatchVault._getYesTokenId() and Polymarket convention.
     function _getYesId(address collateral, bytes32 conditionId) internal pure returns (uint256) {
-        bytes32 collectionId = keccak256(abi.encodePacked(bytes32(0), conditionId, uint256(2)));
+        bytes32 collectionId = keccak256(abi.encodePacked(bytes32(0), conditionId, uint256(1)));
         return uint256(keccak256(abi.encodePacked(collateral, collectionId)));
     }
 

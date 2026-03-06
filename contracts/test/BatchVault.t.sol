@@ -71,9 +71,10 @@ contract MockCTF {
         splitCallCount++;
         lastSplitAmount = amount;
         // Mint YES and NO tokens using IDs that match _getYesTokenId / _getNoTokenId
-        bytes32 yesCollectionId = keccak256(abi.encode(conditionId, uint256(2)));
+        // Polymarket convention: YES = indexSet 1 (outcome 0), NO = indexSet 2 (outcome 1)
+        bytes32 yesCollectionId = keccak256(abi.encode(conditionId, uint256(1)));
         uint256 yesTokenId = uint256(keccak256(abi.encode(collateralToken, yesCollectionId)));
-        bytes32 noCollectionId  = keccak256(abi.encode(conditionId, uint256(1)));
+        bytes32 noCollectionId  = keccak256(abi.encode(conditionId, uint256(2)));
         uint256 noTokenId  = uint256(keccak256(abi.encode(collateralToken, noCollectionId)));
         balanceOf[msg.sender][yesTokenId] += amount;
         balanceOf[msg.sender][noTokenId]  += amount;
@@ -81,7 +82,7 @@ contract MockCTF {
 
     /// @dev Mint YES tokens directly (used in tests to give sellers an initial balance)
     function mintYes(address collateralToken, bytes32 conditionId, address to, uint256 amount) external {
-        bytes32 yesCollectionId = keccak256(abi.encode(conditionId, uint256(2)));
+        bytes32 yesCollectionId = keccak256(abi.encode(conditionId, uint256(1)));
         uint256 yesTokenId = uint256(keccak256(abi.encode(collateralToken, yesCollectionId)));
         balanceOf[to][yesTokenId] += amount;
     }
@@ -118,9 +119,9 @@ contract MockCTF {
         MockUSDC(collateral).mint(msg.sender, usdcAmount);
     }
 
-    /// @dev Compute YES token ID — mirrors getCollectionId(bytes32(0), conditionId, 2) + getPositionId
+    /// @dev Compute YES token ID — mirrors getCollectionId(bytes32(0), conditionId, 1) + getPositionId
     function _getYesId(address collateral, bytes32 conditionId) internal pure returns (uint256) {
-        bytes32 collectionId = keccak256(abi.encode(conditionId, uint256(2)));
+        bytes32 collectionId = keccak256(abi.encode(conditionId, uint256(1)));
         return uint256(keccak256(abi.encode(collateral, collectionId)));
     }
 
@@ -231,7 +232,7 @@ contract BatchVaultTest is Test {
 
     /// @dev Get the YES token ID for the test market (mirrors BatchVault._getYesTokenId)
     function _yesTokenId() internal view returns (uint256) {
-        bytes32 collectionId = ctf.getCollectionId(bytes32(0), MARKET_ID, 2);
+        bytes32 collectionId = ctf.getCollectionId(bytes32(0), MARKET_ID, 1);
         return ctf.getPositionId(address(usdc), collectionId);
     }
 
