@@ -225,11 +225,13 @@ function ActivityRow({ order }: { order: OrderEntry }) {
             <div className="flex items-center gap-2 flex-wrap">
               <span className={clsx(
                 "text-[9px] tracking-widest uppercase px-1.5 py-0.5 border font-mono",
-                order.isBuy
-                  ? "border-accent/30 text-accent bg-accent/5"
-                  : "border-danger/30 text-danger bg-danger/5",
+                order.isSell
+                  ? "border-amber-500/40 text-amber-400 bg-amber-500/5"
+                  : order.isBuy
+                    ? "border-accent/30 text-accent bg-accent/5"
+                    : "border-danger/30 text-danger bg-danger/5",
               )}>
-                {order.isBuy ? "BUY" : "SELL"}
+                {order.isSell ? "SELL YES" : order.isBuy ? "BUY YES" : "BUY NO"}
               </span>
               <StatusBadge status={order.batchStatus} />
               <span className="text-[10px] text-muted-dim">{timeAgo(order.timestamp)}</span>
@@ -398,7 +400,7 @@ function PendingRow({ order }: { order: OrderEntry }) {
                 ? "border-accent/30 text-accent bg-accent/5"
                 : "border-danger/30 text-danger bg-danger/5",
           )}>
-            {order.isSell ? "SELL" : order.isBuy ? "BUY YES" : "BUY NO"}
+            {order.isSell ? "SELL YES" : order.isBuy ? "BUY YES" : "BUY NO"}
           </span>
           <span className={clsx(
             "text-[9px] tracking-widest uppercase px-1.5 py-0.5 border",
@@ -640,7 +642,7 @@ function PositionRow({
                   ? "border-accent/30 text-accent bg-accent/5"
                   : "border-danger/30 text-danger bg-danger/5",
             )}>
-              {order.isSell ? "SELL" : order.isBuy ? "YES" : "NO"}
+              {order.isSell ? "SELL YES" : order.isBuy ? "BUY YES" : "BUY NO"}
             </span>
             {isPending && (
               <span className={clsx(

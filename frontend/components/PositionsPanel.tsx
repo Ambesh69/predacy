@@ -87,7 +87,7 @@ function DirectionBadge({ isBuy, isSell }: { isBuy: boolean; isSell?: boolean })
   if (isSell) {
     return (
       <span className="text-[9px] tracking-widest uppercase px-1.5 py-0.5 border font-mono border-amber-500/40 text-amber-400 bg-amber-500/5">
-        SELL
+        SELL YES
       </span>
     );
   }
