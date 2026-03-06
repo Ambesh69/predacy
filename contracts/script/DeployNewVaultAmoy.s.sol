@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "forge-std/Script.sol";
+import "../src/mocks/MockCTFExchange.sol";
 import "../src/BatchVault.sol";
 // Note: Do NOT import BatchVerifier.sol or ClaimVerifier.sol here — they share
 // top-level library names and cannot be co-imported. Both verifiers are pre-deployed.
@@ -61,9 +62,14 @@ contract DeployNewVaultAmoy is Script {
 
         vm.startBroadcast(deployerKey);
 
+        // Deploy MockCTFExchange — no-op stub (no real CTFExchange on Amoy testnet)
+        MockCTFExchange ctfExchange = new MockCTFExchange();
+        console.log("MockCTFExchange:       ", address(ctfExchange));
+
         BatchVault vault = new BatchVault(
             MOCK_USDC,
             MOCK_CTF,
+            address(ctfExchange),
             deployer,       // relayer = deployer wallet for testing
             adapter,        // batch verifier: PublicInputAdapter wrapping HonkVerifier
             claimVerifier

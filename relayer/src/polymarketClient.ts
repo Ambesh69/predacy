@@ -458,6 +458,66 @@ export class PolymarketClient {
   }
 
   /**
+   * Fetch resting signed maker orders from the Polymarket CLOB for on-chain
+   * CTFExchange.fillOrders (v7.2 vault-as-taker model).
+   *
+   * For NET BUY batches: side="SELL" — makers selling YES for USDC.
+   * For NET SELL batches: side="BUY" — makers buying YES with USDC.
+   *
+   * Returns enough orders (with their EIP-712 signatures) to cover `totalAmount`.
+   * Orders are taken greedily from the best prices first.
+   */
+  async fetchRestingOrders(
+    tokenId:     string,
+    side:        "BUY" | "SELL",
+    totalAmount: bigint,
+  ): Promise<{ orders: ClobOrderForChain[]; fillAmounts: bigint[] }> {
+    const sideNum = side === "SELL" ? 1 : 0;
+    const res = await axios.get(`${CLOB_API}/orders`, {
+      params: { token_id: tokenId, side: sideNum, status: "OPEN" },
+      headers: this._authHeaders("GET", "/orders", ""),
+    });
+    const rawOrders: any[] = Array.isArray(res.data) ? res.data : (res.data?.data ?? []);
+
+    const orders: ClobOrderForChain[] = [];
+    const fillAmounts: bigint[] = [];
+    let covered = 0n;
+
+    for (const o of rawOrders) {
+      if (covered >= totalAmount) break;
+      const filled    = BigInt(o.size_matched ?? o.filledAmount ?? 0);
+      const size      = BigInt(o.original_size ?? o.size ?? o.makerAmount ?? 0);
+      const remaining = size - filled;
+      if (remaining === 0n) continue;
+
+      const fill = remaining < totalAmount - covered ? remaining : totalAmount - covered;
+      orders.push({
+        salt:          BigInt(o.salt ?? 0),
+        maker:         (o.maker ?? o.owner) as `0x${string}`,
+        signer:        (o.signer ?? o.maker ?? o.owner) as `0x${string}`,
+        taker:         (o.taker ?? "0x0000000000000000000000000000000000000000") as `0x${string}`,
+        tokenId:       BigInt(o.asset_id ?? o.tokenId ?? tokenId),
+        makerAmount:   BigInt(o.price_amount ?? o.makerAmount ?? size),
+        takerAmount:   BigInt(o.size_amount  ?? o.takerAmount ?? size),
+        expiration:    BigInt(o.expiration ?? 0),
+        nonce:         BigInt(o.nonce ?? 0),
+        feeRateBps:    BigInt(o.fee_rate_bps ?? o.feeRateBps ?? 0),
+        side:          Number(o.side ?? sideNum),
+        signatureType: Number(o.signature_type ?? o.signatureType ?? 0),
+        signature:     (o.signature ?? "0x") as `0x${string}`,
+      });
+      fillAmounts.push(fill);
+      covered += fill;
+    }
+
+    if (covered < totalAmount) {
+      throw new Error(`Insufficient CLOB liquidity: need ${totalAmount}, found ${covered}`);
+    }
+
+    return { orders, fillAmounts };
+  }
+
+  /**
    * HMAC-SHA256 signature matching Polymarket's canonical format.
    *
    * Key:    apiSecret decoded from base64url → raw binary (Polymarket stores secrets as base64url)
@@ -480,4 +540,21 @@ export class PolymarketClient {
 export interface PriceLevel {
   price: number;
   size:  number;
+}
+
+/** On-chain order struct for CTFExchange.fillOrders — passed in settleBatch v7.2. */
+export interface ClobOrderForChain {
+  salt:          bigint;
+  maker:         `0x${string}`;
+  signer:        `0x${string}`;
+  taker:         `0x${string}`;
+  tokenId:       bigint;
+  makerAmount:   bigint;
+  takerAmount:   bigint;
+  expiration:    bigint;
+  nonce:         bigint;
+  feeRateBps:    bigint;
+  side:          number;
+  signatureType: number;
+  signature:     `0x${string}`;
 }

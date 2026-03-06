@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import "./interfaces/IBatchVerifier.sol";
 import "./interfaces/IConditionalTokens.sol";
+import "./interfaces/IPolymarketCTF.sol";
 
 interface IERC20 {
     function transfer(address to, uint256 amount) external returns (bool);
@@ -147,6 +148,7 @@ contract BatchVault {
 
     address public immutable usdc;
     address public immutable ctf;          // ConditionalTokens
+    address public immutable ctfExchange;  // Polymarket CTFExchange (0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E)
     address public immutable relayer;      // Trusted batch processor address
     IBatchVerifier public verifier;        // ZK verifier for batch clearing proofs
     IBatchVerifier public claimVerifier;   // ZK verifier for ZK claim proofs
@@ -239,17 +241,24 @@ contract BatchVault {
     constructor(
         address _usdc,
         address _ctf,
+        address _ctfExchange,
         address _relayer,
         address _verifier,
         address _claimVerifier
     ) {
         usdc = _usdc;
         ctf = _ctf;
+        ctfExchange = _ctfExchange;
         relayer = _relayer;
         verifier = IBatchVerifier(_verifier);
         if (_claimVerifier != address(0)) {
             claimVerifier = IBatchVerifier(_claimVerifier);
         }
+        // One-time approvals: vault is the taker on CTFExchange.
+        // CTFExchange pulls USDC from vault when filling SELL orders (net buy batches).
+        // CTFExchange pulls YES tokens from vault when filling BUY orders (net sell batches).
+        IERC20(_usdc).approve(_ctfExchange, type(uint256).max);
+        IConditionalTokens(_ctf).setApprovalForAll(_ctfExchange, true);
         DOMAIN_SEPARATOR = keccak256(abi.encode(
             EIP712_DOMAIN_TYPEHASH,
             keccak256("BatchVault"),
@@ -470,7 +479,9 @@ contract BatchVault {
         uint256 totalSellVol,
         uint256 netBuyAmount,
         uint256 netSellYes,
-        bytes calldata proof
+        bytes calldata proof,
+        IPolymarketCTF.Order[] calldata clobOrders,
+        uint256[] calldata clobFillAmounts
     ) external {
         if (msg.sender != relayer) revert OnlyRelayer();
 
@@ -518,15 +529,15 @@ contract BatchVault {
             }
         }
 
-        // 5a. Execute net buy on Polymarket
+        // 5a. Execute net buy on Polymarket — vault fills resting SELL orders on CTFExchange
         uint256 yesTokensReceived = 0;
         if (netBuyAmount > 0) {
-            yesTokensReceived = _executeOnPolymarket(batch.marketId, netBuyAmount, clearingPrice);
+            yesTokensReceived = _executeOnPolymarket(netBuyAmount, clearingPrice, clobOrders, clobFillAmounts);
         }
 
-        // 5b. Execute net sell on Polymarket
+        // 5b. Execute net sell on Polymarket — vault fills resting BUY orders on CTFExchange
         if (netSellYes > 0) {
-            _executeSellOnPolymarket(batch.marketId, netSellYes, clearingPrice);
+            _executeSellOnPolymarket(clobOrders, clobFillAmounts);
         }
 
         // 6. Compute per-commitment positions (keyed by commitment hash, no trader address)
@@ -805,22 +816,31 @@ contract BatchVault {
         }
     }
 
-    function _executeOnPolymarket(bytes32 conditionId, uint256 usdcAmount, uint256 clearingPrice) internal returns (uint256 yesTokens) {
-        uint256 yesTokenId = _getYesTokenId(conditionId);
-        yesTokens = (usdcAmount * PRICE_DECIMALS) / clearingPrice;
-        // Pull YES tokens from relayer wallet — relayer pre-bought on Polymarket CLOB
-        IConditionalTokens(ctf).safeTransferFrom(msg.sender, address(this), yesTokenId, yesTokens, "");
-        // Reimburse relayer for the USDC it spent acquiring the YES tokens
-        IERC20(usdc).transfer(msg.sender, usdcAmount);
+    function _executeOnPolymarket(
+        uint256 netBuyAmount,
+        uint256 clearingPrice,
+        IPolymarketCTF.Order[] calldata clobOrders,
+        uint256[] calldata clobFillAmounts
+    ) internal returns (uint256 yesTokens) {
+        // Vault fills resting SELL orders on CTFExchange.
+        // CTFExchange pulls USDC from vault (approved in constructor) and sends YES tokens to vault.
+        // No relayer capital required — USDC comes from users' commitOrder deposits.
+        if (clobOrders.length > 0) {
+            IPolymarketCTF(ctfExchange).fillOrders(clobOrders, clobFillAmounts);
+        }
+        // Expected YES tokens received (for storage + event); based on clearing price
+        yesTokens = (netBuyAmount * PRICE_DECIMALS) / clearingPrice;
     }
 
-    function _executeSellOnPolymarket(bytes32 conditionId, uint256 yesAmount, uint256 clearingPrice) internal {
-        uint256 yesTokenId = _getYesTokenId(conditionId);
-        uint256 usdcPayment = (yesAmount * clearingPrice) / PRICE_DECIMALS;
-        // Send YES tokens to relayer — relayer will sell them on Polymarket CLOB
-        IConditionalTokens(ctf).safeTransferFrom(address(this), msg.sender, yesTokenId, yesAmount, "");
-        // Pull USDC from relayer (relayer pre-approved this allowance)
-        IERC20(usdc).transferFrom(msg.sender, address(this), usdcPayment);
+    function _executeSellOnPolymarket(
+        IPolymarketCTF.Order[] calldata clobOrders,
+        uint256[] calldata clobFillAmounts
+    ) internal {
+        // Vault fills resting BUY orders on CTFExchange.
+        // CTFExchange pulls YES tokens from vault (setApprovalForAll in constructor) and sends USDC to vault.
+        if (clobOrders.length > 0) {
+            IPolymarketCTF(ctfExchange).fillOrders(clobOrders, clobFillAmounts);
+        }
     }
 
     function _getYesTokenId(bytes32 conditionId) internal view returns (uint256) {

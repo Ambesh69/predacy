@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import "forge-std/Script.sol";
 import "../src/mocks/MockUSDC.sol";
 import "../src/mocks/MockCTF.sol";
+import "../src/mocks/MockCTFExchange.sol";
 import "../src/BatchVerifier.sol";
 import "../src/PublicInputAdapter.sol";
 import "../src/BatchVault.sol";
@@ -79,10 +80,15 @@ contract DeployAmoyHonk is Script {
         // 5. Claim ZK verifier — pre-deployed, read from CLAIM_VERIFIER env var.
         console.log("ClaimHonkVerifier (claim):", claimVerifier);
 
-        // 6. BatchVault — deployer is relayer for this test deploy
+        // 6. MockCTFExchange — no-op stub (no real CTFExchange on Amoy testnet)
+        MockCTFExchange ctfExchange = new MockCTFExchange();
+        console.log("MockCTFExchange:          ", address(ctfExchange));
+
+        // 7. BatchVault — deployer is relayer for this test deploy
         BatchVault vault = new BatchVault(
             address(usdc),
             address(ctf),
+            address(ctfExchange),
             deployer,             // relayer = deployer wallet for testing
             address(adapter),     // batch verifier: PublicInputAdapter wrapping HonkVerifier
             claimVerifier

@@ -5,6 +5,7 @@ import "forge-std/Script.sol";
 import "../src/mocks/MockUSDC.sol";
 import "../src/mocks/MockCTF.sol";
 import "../src/MockBatchVerifier.sol";
+import "../src/mocks/MockCTFExchange.sol";
 import "../src/BatchVault.sol";
 
 /// @notice Deploy Predacy to Polygon Amoy testnet.
@@ -36,10 +37,15 @@ contract DeployTestnet is Script {
         MockBatchVerifier verifier = new MockBatchVerifier();
         console.log("MockBatchVerifier: ", address(verifier));
 
-        // 4. BatchVault — deployer is relayer for testnet
+        // 4. MockCTFExchange — no-op stub (no real CTFExchange on Amoy testnet)
+        MockCTFExchange ctfExchange = new MockCTFExchange();
+        console.log("MockCTFExchange:   ", address(ctfExchange));
+
+        // 5. BatchVault — deployer is relayer for testnet
         BatchVault vault = new BatchVault(
             address(usdc),
             address(ctf),
+            address(ctfExchange),
             deployer,   // relayer
             address(verifier),
             address(verifier) // claimVerifier — same mock for now

@@ -3,7 +3,8 @@ import { polygon, polygonAmoy } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 import { computeClearingPrice, computeFillsAtPrice } from "./clearingPrice.js";
 import { ZKProver } from "./zkProver.js";
-import { PolymarketClient } from "./polymarketClient.js";
+import { PolymarketClient, type ClobOrderForChain } from "./polymarketClient.js";
+export type { ClobOrderForChain };
 import { createOrderStore, type OrderStore } from "./orderStore.js";
 import type { Order, Commitment, BatchInfo, TransferAuth, RequeueAuth } from "./types.js";
 
@@ -140,6 +141,26 @@ export const BATCH_VAULT_ABI = [
       { name: "netBuyAmount",  type: "uint256" },
       { name: "netSellYes",    type: "uint256" },
       { name: "proof",         type: "bytes"   },
+      {
+        name: "clobOrders",
+        type: "tuple[]",
+        components: [
+          { name: "salt",          type: "uint256" },
+          { name: "maker",         type: "address" },
+          { name: "signer",        type: "address" },
+          { name: "taker",         type: "address" },
+          { name: "tokenId",       type: "uint256" },
+          { name: "makerAmount",   type: "uint256" },
+          { name: "takerAmount",   type: "uint256" },
+          { name: "expiration",    type: "uint256" },
+          { name: "nonce",         type: "uint256" },
+          { name: "feeRateBps",    type: "uint256" },
+          { name: "side",          type: "uint8"   },
+          { name: "signatureType", type: "uint8"   },
+          { name: "signature",     type: "bytes"   },
+        ],
+      },
+      { name: "clobFillAmounts", type: "uint256[]" },
     ],
     outputs: [],
     stateMutability: "nonpayable",
@@ -650,43 +671,22 @@ export class BatchProcessor {
       `sellYes=${fills.filledSellYes}, netBuy=${fills.netBuyAmount}, netSellYes=${fills.netSellYes}`,
     );
 
-    // ─── 4b. Pre-buy/pre-fund on Polymarket CLOB (before settleBatch) ──────────
-    // v7 contract model: relayer pre-buys YES tokens, then settleBatch atomically
-    // pulls YES from relayer and reimburses USDC. For sell batches, relayer pre-approves
-    // USDC so the vault can pull it, then relayer sells YES on CLOB after settlement.
-    if (this.config.polymarket.apiKey && cachedYesToken) {
+    // ─── 4b. Fetch resting signed CLOB orders for CTFExchange.fillOrders (v7.2) ──
+    // Vault calls fillOrders directly during settleBatch — no relayer capital required.
+    // For net BUY batches: fetch resting SELL orders (makers selling YES for USDC).
+    // For net SELL batches: fetch resting BUY orders (makers buying YES with USDC).
+    let clobOrders: ClobOrderForChain[] = [];
+    let clobFillAmounts: bigint[] = [];
+    if (cachedYesToken && (fills.netBuyAmount > 0n || fills.netSellYes > 0n)) {
+      const side = fills.netBuyAmount > 0n ? "SELL" : "BUY";
+      const amount = fills.netBuyAmount > 0n ? fills.netBuyAmount : fills.netSellYes;
       try {
-        if (fills.netBuyAmount > 0n) {
-          const usdcStr = (Number(fills.netBuyAmount) / 1e6).toFixed(2);
-          console.log(`[BatchProcessor] Pre-buying YES tokens: $${usdcStr} USDC on Polymarket CLOB`);
-          const { orderId } = await this.polymarket.placeMarketBuy(
-            cachedYesToken,
-            fills.netBuyAmount,
-          );
-          console.log(`[BatchProcessor] Buy order ${orderId} placed — waiting 4s for fill...`);
-          // Taker market orders on liquid markets fill in <2s; 4s is a safe buffer.
-          await new Promise(r => setTimeout(r, 4_000));
-          console.log(`[BatchProcessor] Proceeding to settleBatch with pre-bought YES tokens`);
-        } else if (fills.netSellYes > 0n && this.config.usdcAddress) {
-          // Approve vault to pull USDC from relayer (relayer will be reimbursed via CLOB sell)
-          const usdcNeeded = (fills.netSellYes * effectiveClearingPrice) / 1_000_000n;
-          console.log(`[BatchProcessor] Approving vault to pull ${usdcNeeded} USDC (sell-batch pre-fund)`);
-          const approveHash = await this._write({
-            address: this.config.usdcAddress,
-            abi: ERC20_APPROVE_ABI,
-            functionName: "approve",
-            args: [this.config.vaultAddress, usdcNeeded],
-            ...chainGas(this.config.chainId),
-          });
-          await this.publicClient.waitForTransactionReceipt({ hash: approveHash });
-          console.log(`[BatchProcessor] USDC approval confirmed (tx: ${approveHash})`);
-        } else {
-          console.log(`[BatchProcessor] No net position to route`);
-        }
+        const result = await this.polymarket.fetchRestingOrders(cachedYesToken, side, amount);
+        clobOrders = result.orders;
+        clobFillAmounts = result.fillAmounts;
+        console.log(`[BatchProcessor] Fetched ${clobOrders.length} resting ${side} orders (total: ${amount})`);
       } catch (err) {
-        // Abort — do not call settleBatch without the pre-buy having succeeded.
-        // (vault would try safeTransferFrom YES tokens that relayer doesn't have)
-        console.error(`[BatchProcessor] CLOB pre-routing failed — aborting settleBatch:`, err);
+        console.error(`[BatchProcessor] Failed to fetch CLOB orders — aborting:`, err);
         throw err;
       }
     }
@@ -772,25 +772,14 @@ export class BatchProcessor {
         fills.netBuyAmount,
         fills.netSellYes,
         proof as `0x${string}`,
+        clobOrders,
+        clobFillAmounts,
       ],
       ...chainGas(this.config.chainId),
     });
 
     await this.publicClient.waitForTransactionReceipt({ hash: settleHash });
     console.log(`[BatchProcessor] Batch ${batchId} settled! tx: ${settleHash}`);
-
-    // Post-settle: sell YES tokens on CLOB (for net sell batches only)
-    // Vault sent YES tokens to relayer during settleBatch; now relayer sells them to recover USDC.
-    if (fills.netSellYes > 0n && cachedYesToken && this.config.polymarket.apiKey) {
-      try {
-        const yesStr = (Number(fills.netSellYes) / 1e6).toFixed(4);
-        console.log(`[BatchProcessor] Post-settle: selling ${yesStr} YES tokens on Polymarket CLOB`);
-        const { orderId } = await this.polymarket.placeMarketSell(cachedYesToken, fills.netSellYes);
-        console.log(`[BatchProcessor] Sell order ${orderId} placed — relayer will recover USDC`);
-      } catch (err) {
-        console.warn(`[BatchProcessor] Post-settle CLOB sell failed (non-fatal — relayer holds YES tokens):`, err);
-      }
-    }
 
     // Clean up order store
     await this.store.delete(batchId.toString());
