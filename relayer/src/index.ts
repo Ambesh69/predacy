@@ -452,8 +452,8 @@ const server = createServer((req, res) => {
           abi:          BATCH_VAULT_ABI,
           functionName: "claimWithProof",
           args:         [batchIdBig, proof, publicInputs],
-          maxPriorityFeePerGas: 30_000_000_000n,
-          maxFeePerGas:         35_000_000_000n,
+          maxPriorityFeePerGas: 100_000_000_000n,  // 100 gwei
+          maxFeePerGas:         2_000_000_000_000n, // 2000 gwei — handles mainnet spikes
         });
 
         await publicClient.waitForTransactionReceipt({ hash: txHash });

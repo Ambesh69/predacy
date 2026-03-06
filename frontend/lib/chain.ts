@@ -22,8 +22,8 @@ export const ACTIVE_CHAIN_NAME = IS_MAINNET ? "Polygon" : "Polygon Amoy";
 /** EIP-1559 gas params — Polygon Amoy requires min 25 gwei priority fee */
 export const CHAIN_GAS = IS_MAINNET
   ? {
-      maxPriorityFeePerGas:  50_000_000_000n, // 50 gwei
-      maxFeePerGas:         300_000_000_000n, // 300 gwei — mainnet base fee spikes to 100+ gwei
+      maxPriorityFeePerGas:  100_000_000_000n, // 100 gwei
+      maxFeePerGas:         2_000_000_000_000n, // 2000 gwei — mainnet base fee can spike to 700+ gwei
     } as const
   : {
       maxPriorityFeePerGas: 30_000_000_000n, // 30 gwei  (> 25 gwei Amoy floor)

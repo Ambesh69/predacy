@@ -20,13 +20,13 @@ export interface RequeueResult {
   errorMessage?:   string;
 }
 
-// Gas params per chain. Mainnet base fee can spike to 100+ gwei so we leave
-// maxFeePerGas headroom; Amoy base fee is ~30 gwei so 35 gwei cap is fine.
+// Gas params per chain. Mainnet base fee can spike to 700+ gwei so we leave
+// generous maxFeePerGas headroom; Amoy base fee is ~30 gwei so 35 gwei cap is fine.
 function chainGas(chainId: number) {
   if (chainId === polygon.id) {
     return {
-      maxPriorityFeePerGas: 50_000_000_000n,  // 50 gwei
-      maxFeePerGas:         300_000_000_000n, // 300 gwei — handles mainnet spikes
+      maxPriorityFeePerGas: 100_000_000_000n,  // 100 gwei
+      maxFeePerGas:         2_000_000_000_000n, // 2000 gwei — handles mainnet spikes
     };
   }
   return {
