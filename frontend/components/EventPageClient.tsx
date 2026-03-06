@@ -848,9 +848,8 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       args: [ephemeralAddress as `0x${string}`, walletAddress as `0x${string}`, balance, 0n, validBefore, transferNonce, v, r, s],
       ...CHAIN_GAS,
     });
-    await publicClient.waitForTransactionReceipt({ hash: txHash });
 
-    // Mark swept in localStorage so the card stops showing the button.
+    // Mark swept immediately — don't block UI on receipt (Polygon can take 30–120s).
     try {
       const key = `predacy:orders:${walletAddress!.toLowerCase()}`;
       const all: Array<Record<string, unknown>> = JSON.parse(localStorage.getItem(key) ?? "[]");
@@ -860,7 +859,12 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     } catch { /* ignore */ }
 
     setBalanceVersion(v => v + 1);
-    pushToast(`${(Number(balance) / 1e6).toFixed(2)} USDC swept back to wallet`, "success");
+    pushToast(`${(Number(balance) / 1e6).toFixed(2)} USDC sweep submitted — tx: ${txHash.slice(0, 10)}…`, "success");
+
+    // Wait for receipt in background to refresh balance once confirmed.
+    publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 180_000 })
+      .then(() => setBalanceVersion(v => v + 1))
+      .catch(() => { /* tx is on-chain, just slow — balance will refresh on next poll */ });
   };
 
   // ── Submit order (ephemeral wallet privacy pattern) ───────────────────────────
