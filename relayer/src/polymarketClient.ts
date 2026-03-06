@@ -432,28 +432,46 @@ export class PolymarketClient {
 
   /**
    * Generate Polymarket CLOB API authentication headers.
-   * Signature = base64( HMAC-SHA256( apiSecret, timestamp + method + path + body ) )
+   * Matches the @polymarket/clob-client createL2Headers format exactly:
+   *   POLY_ADDRESS    — signer's EOA address
+   *   POLY_SIGNATURE  — URL-safe base64 HMAC-SHA256 over (ts + method + path + body)
+   *   POLY_TIMESTAMP  — unix seconds
+   *   POLY_API_KEY    — API key from deriveApiKey
+   *   POLY_PASSPHRASE — passphrase from deriveApiKey
    */
   private _authHeaders(method: string, path: string, body: string): Record<string, string> {
     const timestamp = Math.floor(Date.now() / 1000).toString();
-    return {
-      "POLY-API-KEY":    this.apiKey,
-      "POLY-SIGNATURE":  this._sign(timestamp, method, path, body),
-      "POLY-TIMESTAMP":  timestamp,
-      "POLY-PASSPHRASE": this.apiPassphrase,
+    const headers: Record<string, string> = {
+      "POLY_API_KEY":    this.apiKey,
+      "POLY_SIGNATURE":  this._sign(timestamp, method, path, body),
+      "POLY_TIMESTAMP":  timestamp,
+      "POLY_PASSPHRASE": this.apiPassphrase,
       "Content-Type":    "application/json",
     };
+    // POLY_ADDRESS is required by the CLOB API — the signer's EOA address
+    if (this.account) {
+      headers["POLY_ADDRESS"] = this.account.address;
+    }
+    return headers;
   }
 
   /**
-   * HMAC-SHA256 signature: base64( HMAC-SHA256( apiSecret, msg ) )
-   * where msg = timestamp + method.toUpperCase() + path + body
+   * HMAC-SHA256 signature matching Polymarket's canonical format.
+   *
+   * Key:    apiSecret decoded from base64url → raw binary (Polymarket stores secrets as base64url)
+   * Output: URL-safe base64 (+→-, /→_) — Polymarket's CLOB API requires this encoding
+   * Msg:    timestamp + METHOD.upper() + path + body
    */
   private _sign(timestamp: string, method: string, path: string, body: string): string {
     const message = timestamp + method.toUpperCase() + path + body;
-    return createHmac("sha256", this.apiSecret)
-      .update(message)
-      .digest("base64");
+    // Decode base64url secret to binary before using as HMAC key
+    const secretBinary = Buffer.from(
+      this.apiSecret.replace(/-/g, "+").replace(/_/g, "/"),
+      "base64",
+    );
+    const sig = createHmac("sha256", secretBinary).update(message).digest("base64");
+    // Convert standard base64 → URL-safe base64 (Polymarket requires this)
+    return sig.replace(/\+/g, "-").replace(/\//g, "_");
   }
 }
 
