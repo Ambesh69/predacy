@@ -3,13 +3,18 @@
 # viem generic inference that tsx handles fine at runtime.
 #
 # bb (Barretenberg) is required for real UltraHonk proof generation when
-# USE_REAL_ZK=true. The install script places the binary at ~/.bb/bb.
+# USE_REAL_ZK=true. The install script places bbup at ~/.bb/bbup; we then
+# call bbup with the exact version matching @aztec/bb.js to ensure the native
+# binary proof format is compatible with the deployed HonkVerifier VK.
 # zkProver.ts / zkClaimProver.ts default to BB_PATH=~/.bb/bb.
+#
+# Version MUST match @aztec/bb.js version in package.json (4.0.0-nightly.20260120).
 
 [phases.build]
 cmds = [
   "npm install --no-audit --no-fund",
   "curl -L https://raw.githubusercontent.com/AztecProtocol/aztec-packages/master/barretenberg/cpp/installation/install | bash",
+  "$HOME/.bb/bbup --version 4.0.0-nightly.20260120",
 ]
 
 [start]

@@ -637,6 +637,7 @@ export class BatchProcessor {
     );
 
     // ─── 4b. Order routing ────────────────────────────────────────────────────
+    let polymarketRoutingSucceeded = false;
     if (this.config.polymarket.apiKey && cachedYesToken) {
       try {
         if (fills.netBuyAmount > 0n) {
@@ -652,6 +653,7 @@ export class BatchProcessor {
           // causing their orders to be marked not-filled even though they should
           // have matched. The mid price set in step 4a is the correct clearing price.
           console.log(`[BatchProcessor] → Polymarket BUY order ${orderId} placed (execution limit ${limitPrice}, clearing price unchanged: ${effectiveClearingPrice})`);
+          polymarketRoutingSucceeded = true;
         } else if (fills.netSellYes > 0n) {
           const yesStr = (Number(fills.netSellYes) / 1e6).toFixed(4);
           console.log(`[BatchProcessor] → Routing net SELL YES: ${yesStr} tokens to Polymarket`);
@@ -660,12 +662,42 @@ export class BatchProcessor {
             fills.netSellYes,
           );
           console.log(`[BatchProcessor] → Polymarket SELL order ${orderId} placed (limit ${limitPrice})`);
+          polymarketRoutingSucceeded = true;
         } else {
           console.log(`[BatchProcessor] → No net position to route`);
+          polymarketRoutingSucceeded = true;
         }
       } catch (err) {
         console.warn(`[BatchProcessor] Polymarket routing step failed (non-fatal):`, err);
       }
+    }
+
+    // ─── Mainnet CTF workaround ───────────────────────────────────────────────
+    // The deployed BatchVault calls _executeOnPolymarket → IConditionalTokens.mockBuyYes()
+    // which only exists on MockCTF (testnet). On Polygon mainnet the real Gnosis CTF
+    // (0x4D97...) doesn't have this function — any call with netBuyAmount > 0 reverts.
+    //
+    // When Polymarket CLOB routing is unavailable (no API key or auth failure) and
+    // netBuyAmount > 0 would trigger the on-chain CTF call, override to a price of
+    // 999_999 (99.9999¢) so no buy orders fill.  All buy orders are then "unfilled" —
+    // ephemeral wallets keep their USDC and users can sweep via the frontend.
+    //
+    // This is a temporary workaround until the contract is redeployed with real
+    // Polymarket CTF integration (splitPosition + CLOB exchange).
+    if (this.config.chainId === polygon.id && fills.netBuyAmount > 0n && !polymarketRoutingSucceeded) {
+      const noFillPrice = 999_999n;
+      console.warn(
+        `[BatchProcessor] Mainnet CTF workaround: netBuyAmount=${fills.netBuyAmount} would call ` +
+        `mockBuyYes on real CTF (revert). Polymarket routing unavailable — overriding ` +
+        `clearing price to ${noFillPrice} (99.9999¢) so no orders fill. ` +
+        `Users can sweep USDC from ephemeral wallets via the frontend.`,
+      );
+      effectiveClearingPrice = noFillPrice;
+      fills = computeFillsAtPrice(orders, noFillPrice);
+      console.log(
+        `[BatchProcessor] Recalculated fills: buyVol=${fills.filledBuyVolume}, ` +
+        `netBuy=${fills.netBuyAmount} (expected 0)`,
+      );
     }
 
     // 6. Generate ZK proof (mock in prototype mode; real proof when USE_REAL_ZK=true)
