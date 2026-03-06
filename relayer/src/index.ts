@@ -1060,7 +1060,7 @@ async function getLogsChunked(
   params: Omit<Parameters<typeof publicClient.getLogs>[0], "fromBlock" | "toBlock">,
   fromBlock: bigint,
   toBlock:   bigint,
-  chunkSize  = 3_000n,
+  chunkSize  = 1_500n, // 1500 < Alchemy free-tier 2048-block limit; avoids retries in normal operation
 ) {
   const all: Awaited<ReturnType<typeof publicClient.getLogs>> = [];
   let from = fromBlock;
@@ -1071,8 +1071,9 @@ async function getLogsChunked(
       all.push(...chunk);
     } catch (err: unknown) {
       const msg = String(err);
-      // Halve chunk size on range-too-large errors and retry this window
-      if (chunkSize > 100n && (msg.includes("range") || msg.includes("limit") || msg.includes("exceed"))) {
+      // Halve chunk size on range-too-large errors and retry this window.
+      // Min 10 blocks so we can handle even very restrictive RPC providers.
+      if (chunkSize > 10n && (msg.includes("range") || msg.includes("limit") || msg.includes("exceed") || msg.includes("400"))) {
         console.warn(`[Relayer] getLogs range error, retrying with smaller chunks: ${msg.slice(0, 120)}`);
         const half = await getLogsChunked(params, from, end, chunkSize / 2n);
         all.push(...half);

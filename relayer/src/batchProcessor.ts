@@ -20,11 +20,20 @@ export interface RequeueResult {
   errorMessage?:   string;
 }
 
-// Polygon Amoy requires min 25 gwei priority fee. Apply to every write.
-const AMOY_GAS = {
-  maxPriorityFeePerGas: 30_000_000_000n, // 30 gwei
-  maxFeePerGas:         35_000_000_000n, // 35 gwei
-} as const;
+// Gas params per chain. Mainnet base fee can spike to 100+ gwei so we leave
+// maxFeePerGas headroom; Amoy base fee is ~30 gwei so 35 gwei cap is fine.
+function chainGas(chainId: number) {
+  if (chainId === polygon.id) {
+    return {
+      maxPriorityFeePerGas: 50_000_000_000n,  // 50 gwei
+      maxFeePerGas:         300_000_000_000n, // 300 gwei — handles mainnet spikes
+    };
+  }
+  return {
+    maxPriorityFeePerGas: 30_000_000_000n, // 30 gwei
+    maxFeePerGas:         35_000_000_000n, // 35 gwei — Amoy
+  };
+}
 
 // Zero TransferAuth — passed for sell orders and unfilled buy orders in settleBatch.
 // The contract only calls transferWithAuthorization when isBuy && orderFills, so
@@ -354,7 +363,7 @@ export class BatchProcessor {
       abi: BATCH_VAULT_ABI,
       functionName: "commitOrderFor",
       args: [commitment, order.amount, signer, nonce, deadline, signature, this.config.marketId],
-      ...AMOY_GAS,
+      ...chainGas(this.config.chainId),
     });
 
     await this.publicClient.waitForTransactionReceipt({ hash });
@@ -401,7 +410,7 @@ export class BatchProcessor {
       abi: BATCH_VAULT_ABI,
       functionName: "commitSellOrderFor",
       args: [commitment, order.amount, signer, nonce, deadline, signature, this.config.marketId],
-      ...AMOY_GAS,
+      ...chainGas(this.config.chainId),
     });
 
     await this.publicClient.waitForTransactionReceipt({ hash });
@@ -441,7 +450,7 @@ export class BatchProcessor {
       abi: BATCH_VAULT_ABI,
       functionName: "openBatch",
       args: [marketId],
-      ...AMOY_GAS,
+      ...chainGas(this.config.chainId),
     });
 
     await this.publicClient.waitForTransactionReceipt({ hash });
@@ -464,7 +473,7 @@ export class BatchProcessor {
       abi: BATCH_VAULT_ABI,
       functionName: "closeBatch",
       args: [this.config.marketId],
-      ...AMOY_GAS,
+      ...chainGas(this.config.chainId),
     });
     await this.publicClient.waitForTransactionReceipt({ hash });
     console.log(`[BatchProcessor] closeBatch tx: ${hash} (market: ${this.config.marketId})`);
@@ -678,7 +687,7 @@ export class BatchProcessor {
         abi: ADAPTER_ABI,
         functionName: "setPendingOrderCount",
         args: [BigInt(orders.length)],
-        ...AMOY_GAS,
+        ...chainGas(this.config.chainId),
       });
       await this.publicClient.waitForTransactionReceipt({ hash: adapterHash });
       console.log(`[BatchProcessor] PublicInputAdapter ready (tx: ${adapterHash})`);
@@ -741,7 +750,7 @@ export class BatchProcessor {
         fills.netSellYes,
         proof as `0x${string}`,
       ],
-      ...AMOY_GAS,
+      ...chainGas(this.config.chainId),
     });
 
     await this.publicClient.waitForTransactionReceipt({ hash: settleHash });
@@ -802,7 +811,7 @@ export class BatchProcessor {
             requeueAuth.signature,
             this.config.marketId,
           ],
-          ...AMOY_GAS,
+          ...chainGas(this.config.chainId),
         });
 
         await this.publicClient.waitForTransactionReceipt({ hash });
