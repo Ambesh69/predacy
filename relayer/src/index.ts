@@ -43,9 +43,6 @@ const baseConfig = {
   usdcAddress: process.env.USDC_ADDRESS
     ? (process.env.USDC_ADDRESS as `0x${string}`)
     : undefined,
-  ctfAddress: process.env.CTF_ADDRESS
-    ? (process.env.CTF_ADDRESS as `0x${string}`)
-    : "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045" as `0x${string}`, // Polymarket CTF (Polygon mainnet)
 };
 
 const PORT = parseInt(process.env.PORT ?? "3001");

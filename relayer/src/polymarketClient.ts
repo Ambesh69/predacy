@@ -1,5 +1,7 @@
 import axios from "axios";
 import { createHmac } from "node:crypto";
+import { createPublicClient, http, decodeFunctionData, hashTypedData, parseAbiItem } from "viem";
+import { polygon } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 import type { PolymarketMarket } from "./types.js";
 
@@ -49,6 +51,108 @@ const SIDE_BUY  = 0;
 const SIDE_SELL = 1;
 const SIG_TYPE_EOA = 0;  // normal ECDSA from EOA
 const TAKER_ZERO = "0x0000000000000000000000000000000000000000" as `0x${string}`;
+
+// ─── On-chain scanning constants (v7.2 vault-as-taker) ──────────────────────
+
+/** How many Polygon blocks back to scan for CTFExchange fills (~1 hour at 2s/block) */
+const SCAN_BLOCKS = 2000n;
+
+/** ABI for decoding CTFExchange fillOrders / fillOrder calldata */
+const FILL_ORDERS_ABI = [
+  {
+    name: "fillOrders",
+    type: "function",
+    inputs: [
+      {
+        name: "makerOrders",
+        type: "tuple[]",
+        components: [
+          { name: "salt",          type: "uint256" },
+          { name: "maker",         type: "address" },
+          { name: "signer",        type: "address" },
+          { name: "taker",         type: "address" },
+          { name: "tokenId",       type: "uint256" },
+          { name: "makerAmount",   type: "uint256" },
+          { name: "takerAmount",   type: "uint256" },
+          { name: "expiration",    type: "uint256" },
+          { name: "nonce",         type: "uint256" },
+          { name: "feeRateBps",    type: "uint256" },
+          { name: "side",          type: "uint8"   },
+          { name: "signatureType", type: "uint8"   },
+          { name: "signature",     type: "bytes"   },
+        ],
+      },
+      { name: "fillAmounts", type: "uint256[]" },
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+  {
+    name: "fillOrder",
+    type: "function",
+    inputs: [
+      {
+        name: "makerOrder",
+        type: "tuple",
+        components: [
+          { name: "salt",          type: "uint256" },
+          { name: "maker",         type: "address" },
+          { name: "signer",        type: "address" },
+          { name: "taker",         type: "address" },
+          { name: "tokenId",       type: "uint256" },
+          { name: "makerAmount",   type: "uint256" },
+          { name: "takerAmount",   type: "uint256" },
+          { name: "expiration",    type: "uint256" },
+          { name: "nonce",         type: "uint256" },
+          { name: "feeRateBps",    type: "uint256" },
+          { name: "side",          type: "uint8"   },
+          { name: "signatureType", type: "uint8"   },
+          { name: "signature",     type: "bytes"   },
+        ],
+      },
+      { name: "fillAmount", type: "uint256" },
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+] as const;
+
+/** ABI for CTFExchange.getOrderStatus */
+const ORDER_STATUS_ABI = [
+  {
+    name: "getOrderStatus",
+    type: "function",
+    inputs:  [{ name: "orderHash", type: "bytes32" }],
+    outputs: [
+      { name: "isFilledOrCancelled", type: "bool"    },
+      { name: "remaining",           type: "uint256" },
+    ],
+    stateMutability: "view",
+  },
+] as const;
+
+/** EIP-712 Order struct fields used for hashing (no `signature` field). */
+const ORDER_TYPES_FOR_HASH = {
+  Order: [
+    { name: "salt",          type: "uint256" },
+    { name: "maker",         type: "address" },
+    { name: "signer",        type: "address" },
+    { name: "taker",         type: "address" },
+    { name: "tokenId",       type: "uint256" },
+    { name: "makerAmount",   type: "uint256" },
+    { name: "takerAmount",   type: "uint256" },
+    { name: "expiration",    type: "uint256" },
+    { name: "nonce",         type: "uint256" },
+    { name: "feeRateBps",    type: "uint256" },
+    { name: "side",          type: "uint8"   },
+    { name: "signatureType", type: "uint8"   },
+  ],
+} as const;
+
+/** OrderFilled event ABI for CTFExchange */
+const ORDER_FILLED_EVENT = parseAbiItem(
+  "event OrderFilled(bytes32 indexed orderHash, address indexed maker, address indexed taker, uint256 makerAssetId, uint256 takerAssetId, uint256 makerAmountFilled, uint256 takerAmountFilled, uint256 fee)",
+);
 
 // Gamma API returns some fields as JSON-encoded strings — parse them.
 function normalizeMarket(m: any): PolymarketMarket {
@@ -458,60 +562,206 @@ export class PolymarketClient {
   }
 
   /**
-   * Fetch resting signed maker orders from the Polymarket CLOB for on-chain
-   * CTFExchange.fillOrders (v7.2 vault-as-taker model).
+   * Fetch resting signed maker orders for CTFExchange.fillOrders (v7.2 vault-as-taker).
    *
-   * For NET BUY batches: side="SELL" — makers selling YES for USDC.
-   * For NET SELL batches: side="BUY" — makers buying YES with USDC.
+   * Strategy: scan recent CTFExchange.fillOrders transactions on Polygon mainnet.
+   * Signed maker orders appear in the calldata of each fill. We extract them and
+   * check remaining fill capacity via getOrderStatus. Partially-filled GTC orders
+   * can be reused — CTFExchange tracks fills by EIP-712 order hash.
    *
-   * Returns enough orders (with their EIP-712 signatures) to cover `totalAmount`.
-   * Orders are taken greedily from the best prices first.
+   * For NET BUY batches: side="SELL" — look for makers selling YES for USDC.
+   * For NET SELL batches: side="BUY" — look for makers buying YES with USDC.
+   *
+   * On testnet (chainId != 137) returns empty arrays — vault uses MockCTFExchange
+   * which is a no-op, so fillOrders is never called and the guard in the contract
+   * skips it cleanly.
+   *
+   * @param tokenId     YES token ID (string, large uint256)
+   * @param side        "SELL" for net-buy batches, "BUY" for net-sell batches
+   * @param totalAmount Amount to cover (USDC 6-dec for SELL side; YES units for BUY side)
+   * @param chainId     Relayer chain ID — scanning only happens on mainnet (137)
    */
   async fetchRestingOrders(
     tokenId:     string,
     side:        "BUY" | "SELL",
     totalAmount: bigint,
+    chainId:     number = POLYGON_CHAIN_ID,
   ): Promise<{ orders: ClobOrderForChain[]; fillAmounts: bigint[] }> {
-    const sideNum = side === "SELL" ? 1 : 0;
-    const res = await axios.get(`${CLOB_API}/orders`, {
-      params: { token_id: tokenId, side: sideNum, status: "OPEN" },
-      headers: this._authHeaders("GET", "/orders", ""),
-    });
-    const rawOrders: any[] = Array.isArray(res.data) ? res.data : (res.data?.data ?? []);
+    // Testnet: no real CTFExchange — vault uses MockCTFExchange (no-op).
+    if (chainId !== POLYGON_CHAIN_ID) {
+      console.log("[PolymarketClient] Testnet mode — skipping on-chain order scan (no CTFExchange)");
+      return { orders: [], fillAmounts: [] };
+    }
 
+    const sideNum = side === "SELL" ? 1 : 0;
+    const bigTokenId = BigInt(tokenId);
+    const nowSec = BigInt(Math.floor(Date.now() / 1000));
+
+    // Create a Polygon mainnet public client for on-chain scanning.
+    const client = createPublicClient({ chain: polygon, transport: http() });
+
+    // 1. Get recent OrderFilled events from CTFExchange.
+    const latestBlock = await client.getBlockNumber();
+    const fromBlock = latestBlock > SCAN_BLOCKS ? latestBlock - SCAN_BLOCKS : 0n;
+
+    console.log(`[PolymarketClient] Scanning CTFExchange OrderFilled events ${fromBlock}–${latestBlock}`);
+    const logs = await client.getLogs({
+      address: CTF_EXCHANGE,
+      event:   ORDER_FILLED_EVENT,
+      fromBlock,
+      toBlock: latestBlock,
+    });
+
+    // Filter client-side for our tokenId.
+    // SELL orders (maker sells YES): makerAssetId = tokenId
+    // BUY orders  (maker buys  YES): takerAssetId = tokenId
+    const relevantLogs = logs.filter(log => {
+      if (sideNum === SIDE_SELL) return log.args.makerAssetId === bigTokenId;
+      return log.args.takerAssetId === bigTokenId;
+    });
+
+    console.log(`[PolymarketClient] Found ${relevantLogs.length} relevant OrderFilled events`);
+
+    // 2. Collect unique (txHash, orderHash) pairs to avoid re-fetching the same tx.
+    const seenOrderHashes = new Set<string>();
+    const txHashesOrdered: `0x${string}`[] = [];
+    const txHashSet = new Set<string>();
+    for (const log of relevantLogs) {
+      const oh = log.args.orderHash as string;
+      if (!seenOrderHashes.has(oh)) {
+        seenOrderHashes.add(oh);
+        const th = log.transactionHash as `0x${string}`;
+        if (!txHashSet.has(th)) { txHashSet.add(th); txHashesOrdered.push(th); }
+      }
+    }
+
+    // 3. Fetch transactions in parallel batches and decode calldata.
+    const BATCH = 8;
+    const candidateOrders: ClobOrderForChain[] = [];
+
+    for (let i = 0; i < txHashesOrdered.length && candidateOrders.length < 40; i += BATCH) {
+      const batch = txHashesOrdered.slice(i, i + BATCH);
+      const txs = await Promise.all(batch.map(h => client.getTransaction({ hash: h }).catch(() => null)));
+      for (const tx of txs) {
+        if (!tx?.input || tx.input.length < 10) continue;
+        try {
+          const decoded = decodeFunctionData({ abi: FILL_ORDERS_ABI, data: tx.input });
+          const rawOrders: any[] = decoded.functionName === "fillOrders"
+            ? (decoded.args[0] as any[])
+            : [decoded.args[0]]; // fillOrder singular
+
+          for (const o of rawOrders) {
+            if (o.tokenId !== bigTokenId) continue;
+            if (Number(o.side) !== sideNum) continue;
+            // Skip expired orders (expiration=0 means no expiry).
+            if (o.expiration !== 0n && o.expiration < nowSec) continue;
+            candidateOrders.push({
+              salt:          o.salt,
+              maker:         o.maker,
+              signer:        o.signer,
+              taker:         o.taker,
+              tokenId:       o.tokenId,
+              makerAmount:   o.makerAmount,
+              takerAmount:   o.takerAmount,
+              expiration:    o.expiration,
+              nonce:         o.nonce,
+              feeRateBps:    o.feeRateBps,
+              side:          Number(o.side),
+              signatureType: Number(o.signatureType),
+              signature:     o.signature,
+            });
+          }
+        } catch { /* non-fillOrders tx — ignore */ }
+      }
+    }
+
+    console.log(`[PolymarketClient] Decoded ${candidateOrders.length} candidate ${side} orders`);
+
+    // 4. Check remaining fill capacity via getOrderStatus and accumulate.
+    // fillAmounts is in makerAmount units:
+    //   SELL orders (side=1): makerAmount = YES → fillAmount in YES
+    //   BUY  orders (side=0): makerAmount = USDC → fillAmount in USDC
+    // totalAmount units:
+    //   SELL side: totalAmount = netBuyAmount (USDC) → convert to YES per order's price
+    //   BUY  side: totalAmount = netSellYes   (YES)  → directly comparable to USDC fill
+    // We track coverage in totalAmount's native units.
     const orders: ClobOrderForChain[] = [];
     const fillAmounts: bigint[] = [];
     let covered = 0n;
 
-    for (const o of rawOrders) {
-      if (covered >= totalAmount) break;
-      const filled    = BigInt(o.size_matched ?? o.filledAmount ?? 0);
-      const size      = BigInt(o.original_size ?? o.size ?? o.makerAmount ?? 0);
-      const remaining = size - filled;
-      if (remaining === 0n) continue;
-
-      const fill = remaining < totalAmount - covered ? remaining : totalAmount - covered;
-      orders.push({
-        salt:          BigInt(o.salt ?? 0),
-        maker:         (o.maker ?? o.owner) as `0x${string}`,
-        signer:        (o.signer ?? o.maker ?? o.owner) as `0x${string}`,
-        taker:         (o.taker ?? "0x0000000000000000000000000000000000000000") as `0x${string}`,
-        tokenId:       BigInt(o.asset_id ?? o.tokenId ?? tokenId),
-        makerAmount:   BigInt(o.price_amount ?? o.makerAmount ?? size),
-        takerAmount:   BigInt(o.size_amount  ?? o.takerAmount ?? size),
-        expiration:    BigInt(o.expiration ?? 0),
-        nonce:         BigInt(o.nonce ?? 0),
-        feeRateBps:    BigInt(o.fee_rate_bps ?? o.feeRateBps ?? 0),
-        side:          Number(o.side ?? sideNum),
-        signatureType: Number(o.signature_type ?? o.signatureType ?? 0),
-        signature:     (o.signature ?? "0x") as `0x${string}`,
+    // Batch the getOrderStatus calls for performance.
+    const statusBatch = candidateOrders.slice(0, 20);
+    const statuses = await Promise.all(statusBatch.map(order => {
+      const orderHash = hashTypedData({
+        domain:      POLYMARKET_DOMAIN,
+        types:       ORDER_TYPES_FOR_HASH,
+        primaryType: "Order",
+        message: {
+          salt:          order.salt,
+          maker:         order.maker,
+          signer:        order.signer,
+          taker:         order.taker,
+          tokenId:       order.tokenId,
+          makerAmount:   order.makerAmount,
+          takerAmount:   order.takerAmount,
+          expiration:    order.expiration,
+          nonce:         order.nonce,
+          feeRateBps:    order.feeRateBps,
+          side:          order.side,
+          signatureType: order.signatureType,
+        },
       });
-      fillAmounts.push(fill);
-      covered += fill;
+      return client.readContract({
+        address: CTF_EXCHANGE,
+        abi:     ORDER_STATUS_ABI,
+        functionName: "getOrderStatus",
+        args: [orderHash as `0x${string}`],
+      }).catch(() => [true, 0n] as [boolean, bigint]);
+    }));
+
+    for (let i = 0; i < statusBatch.length; i++) {
+      if (covered >= totalAmount) break;
+      const order = statusBatch[i];
+      const [filledOrCancelled, remaining] = statuses[i] as [boolean, bigint];
+      if (filledOrCancelled || remaining === 0n) continue;
+
+      let fillAmount: bigint;
+      if (sideNum === SIDE_SELL) {
+        // SELL order: makerAmount=YES, takerAmount=USDC. totalAmount in USDC.
+        // Convert remaining YES → USDC equivalent, then fill proportionally.
+        const remainingUsdc = remaining * order.takerAmount / order.makerAmount;
+        const usdcNeeded = totalAmount - covered;
+        if (remainingUsdc <= usdcNeeded) {
+          fillAmount = remaining; // take all remaining YES
+          covered += remainingUsdc;
+        } else {
+          // Partial fill: convert USDC needed → YES units.
+          fillAmount = usdcNeeded * order.makerAmount / order.takerAmount;
+          covered += usdcNeeded;
+        }
+      } else {
+        // BUY order: makerAmount=USDC, takerAmount=YES. totalAmount in YES.
+        const remainingYes = remaining * order.takerAmount / order.makerAmount;
+        const yesNeeded = totalAmount - covered;
+        if (remainingYes <= yesNeeded) {
+          fillAmount = remaining; // take all remaining USDC from maker
+          covered += remainingYes;
+        } else {
+          fillAmount = yesNeeded * order.makerAmount / order.takerAmount;
+          covered += yesNeeded;
+        }
+      }
+
+      if (fillAmount === 0n) continue;
+      orders.push(order);
+      fillAmounts.push(fillAmount);
     }
 
     if (covered < totalAmount) {
-      throw new Error(`Insufficient CLOB liquidity: need ${totalAmount}, found ${covered}`);
+      throw new Error(
+        `Insufficient CLOB liquidity: need ${totalAmount} (${side}), covered ${covered} ` +
+        `from ${candidateOrders.length} candidate orders in last ${SCAN_BLOCKS} blocks`,
+      );
     }
 
     return { orders, fillAmounts };
