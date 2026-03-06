@@ -675,16 +675,17 @@ export class BatchProcessor {
     // ─── Mainnet CTF workaround ───────────────────────────────────────────────
     // The deployed BatchVault calls _executeOnPolymarket → IConditionalTokens.mockBuyYes()
     // which only exists on MockCTF (testnet). On Polygon mainnet the real Gnosis CTF
-    // (0x4D97...) doesn't have this function — any call with netBuyAmount > 0 reverts.
+    // (0x4D97...) doesn't have this function — any call with netBuyAmount > 0 ALWAYS reverts,
+    // regardless of whether CLOB routing succeeded off-chain.
     //
-    // When Polymarket CLOB routing is unavailable (no API key or auth failure) and
-    // netBuyAmount > 0 would trigger the on-chain CTF call, override to a price of
-    // 999_999 (99.9999¢) so no buy orders fill.  All buy orders are then "unfilled" —
-    // ephemeral wallets keep their USDC and users can sweep via the frontend.
+    // Override to a price of 999_999 (99.9999¢) so no buy orders fill and netBuyAmount=0,
+    // which means _executeOnPolymarket is never called on-chain.
+    // All buy orders are then "unfilled" — ephemeral wallets keep their USDC and users
+    // can sweep via the frontend.
     //
     // This is a temporary workaround until the contract is redeployed with real
     // Polymarket CTF integration (splitPosition + CLOB exchange).
-    if (this.config.chainId === polygon.id && fills.netBuyAmount > 0n && !polymarketRoutingSucceeded) {
+    if (this.config.chainId === polygon.id && fills.netBuyAmount > 0n) {
       const noFillPrice = 999_999n;
       console.warn(
         `[BatchProcessor] Mainnet CTF workaround: netBuyAmount=${fills.netBuyAmount} would call ` +
