@@ -47,7 +47,7 @@ contract ActivateZKAmoy is Script {
 
         vm.stopBroadcast();
 
-        console.log("\n=== Done — BatchVault v6 is now using real ZK verifiers ===");
+        console.log("\n=== Done - BatchVault v6 is now using real ZK verifiers ===");
         console.log("Set in Railway:");
         console.log("  ADAPTER_ADDRESS =", ADAPTER);
         console.log("  USE_REAL_ZK     = true (already set)");
