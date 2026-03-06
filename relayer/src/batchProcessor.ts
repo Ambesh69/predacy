@@ -259,13 +259,30 @@ const ADAPTER_ABI = [
   },
 ] as const;
 
-// Minimal ERC-20 ABI for the USDC approval call in sell-batch pre-funding
-const ERC20_APPROVE_ABI = [
+// Minimal ERC-20 ABI for USDC transfer to vault (sell-batch pre-funding)
+const ERC20_TRANSFER_ABI = [
   {
-    name: "approve",
+    name: "transfer",
     type: "function",
-    inputs: [{ name: "spender", type: "address" }, { name: "amount", type: "uint256" }],
+    inputs: [{ name: "to", type: "address" }, { name: "amount", type: "uint256" }],
     outputs: [{ name: "", type: "bool" }],
+    stateMutability: "nonpayable",
+  },
+] as const;
+
+// Minimal ERC-1155 ABI for CTF YES token transfer to vault (buy-batch pre-funding)
+const ERC1155_TRANSFER_ABI = [
+  {
+    name: "safeTransferFrom",
+    type: "function",
+    inputs: [
+      { name: "from",  type: "address" },
+      { name: "to",    type: "address" },
+      { name: "id",    type: "uint256" },
+      { name: "value", type: "uint256" },
+      { name: "data",  type: "bytes"   },
+    ],
+    outputs: [],
     stateMutability: "nonpayable",
   },
 ] as const;
@@ -279,7 +296,8 @@ export interface RelayerConfig {
   redisUrl?: string;        // Optional — falls back to in-memory if not set
   useRealZk?: boolean;      // true = generate real UltraHonk proofs via bb; default false (mock)
   adapterAddress?: `0x${string}`; // PublicInputAdapter address (required when useRealZk=true)
-  usdcAddress?:   `0x${string}`;  // USDC contract address — required for sell-batch USDC approval
+  usdcAddress?:   `0x${string}`;  // USDC contract address — required for sell-batch USDC transfer
+  ctfAddress?:    `0x${string}`;  // Polymarket CTF (ERC-1155) — required for YES token transfer to vault
   polymarket: {
     apiKey:          string;
     apiSecret:       string;
@@ -671,22 +689,60 @@ export class BatchProcessor {
       `sellYes=${fills.filledSellYes}, netBuy=${fills.netBuyAmount}, netSellYes=${fills.netSellYes}`,
     );
 
-    // ─── 4b. Fetch resting signed CLOB orders for CTFExchange.fillOrders (v7.2) ──
-    // Vault calls fillOrders directly during settleBatch — no relayer capital required.
-    // For net BUY batches: fetch resting SELL orders (makers selling YES for USDC).
-    // For net SELL batches: fetch resting BUY orders (makers buying YES with USDC).
-    let clobOrders: ClobOrderForChain[] = [];
-    let clobFillAmounts: bigint[] = [];
-    if (cachedYesToken && (fills.netBuyAmount > 0n || fills.netSellYes > 0n)) {
-      const side = fills.netBuyAmount > 0n ? "SELL" : "BUY";
-      const amount = fills.netBuyAmount > 0n ? fills.netBuyAmount : fills.netSellYes;
+    // ─── 4b. Pre-buy/pre-fund on Polymarket CLOB, then fund vault directly ────
+    // Polymarket's CLOB API does not expose signed maker orders for CTFExchange.fillOrders,
+    // so clobOrders is always passed as [] and the contract guard skips fillOrders.
+    // Instead: relayer buys/sells on CLOB normally, then transfers tokens to/from vault.
+    //
+    //   NET BUY:  relayer buys YES on CLOB → transfers YES to vault → settleBatch
+    //   NET SELL: relayer sends USDC to vault → settleBatch → relayer sells vault's YES on CLOB
+    const clobOrders: ClobOrderForChain[] = [];
+    const clobFillAmounts: bigint[] = [];
+
+    if (this.config.polymarket.apiKey && cachedYesToken) {
       try {
-        const result = await this.polymarket.fetchRestingOrders(cachedYesToken, side, amount);
-        clobOrders = result.orders;
-        clobFillAmounts = result.fillAmounts;
-        console.log(`[BatchProcessor] Fetched ${clobOrders.length} resting ${side} orders (total: ${amount})`);
+        if (fills.netBuyAmount > 0n && this.config.ctfAddress) {
+          const usdcStr = (Number(fills.netBuyAmount) / 1e6).toFixed(2);
+          console.log(`[BatchProcessor] Pre-buying YES tokens: $${usdcStr} USDC on Polymarket CLOB`);
+          const { orderId } = await this.polymarket.placeMarketBuy(cachedYesToken, fills.netBuyAmount);
+          console.log(`[BatchProcessor] Buy order ${orderId} placed — waiting 4s for fill...`);
+          await new Promise(r => setTimeout(r, 4_000));
+
+          // Transfer pre-bought YES directly to vault (relayer owns tokens, no approval needed)
+          const expectedYes = (fills.netBuyAmount * 1_000_000n) / effectiveClearingPrice;
+          console.log(`[BatchProcessor] Transferring ~${expectedYes} YES to vault`);
+          const xferHash = await this._write({
+            address: this.config.ctfAddress,
+            abi: ERC1155_TRANSFER_ABI,
+            functionName: "safeTransferFrom",
+            args: [
+              this.walletClient.account!.address,
+              this.config.vaultAddress,
+              BigInt(cachedYesToken),
+              expectedYes,
+              "0x" as `0x${string}`,
+            ],
+            ...chainGas(this.config.chainId),
+          });
+          await this.publicClient.waitForTransactionReceipt({ hash: xferHash });
+          console.log(`[BatchProcessor] YES transferred to vault (tx: ${xferHash})`);
+
+        } else if (fills.netSellYes > 0n && this.config.usdcAddress) {
+          // Sell batch: fund vault with USDC so sellers can claim
+          const usdcNeeded = (fills.netSellYes * effectiveClearingPrice) / 1_000_000n;
+          console.log(`[BatchProcessor] Sending ${usdcNeeded} USDC to vault for sell-batch payouts`);
+          const xferHash = await this._write({
+            address: this.config.usdcAddress,
+            abi: ERC20_TRANSFER_ABI,
+            functionName: "transfer",
+            args: [this.config.vaultAddress, usdcNeeded],
+            ...chainGas(this.config.chainId),
+          });
+          await this.publicClient.waitForTransactionReceipt({ hash: xferHash });
+          console.log(`[BatchProcessor] USDC sent to vault (tx: ${xferHash})`);
+        }
       } catch (err) {
-        console.error(`[BatchProcessor] Failed to fetch CLOB orders — aborting:`, err);
+        console.error(`[BatchProcessor] Pre-funding failed — aborting settleBatch:`, err);
         throw err;
       }
     }
