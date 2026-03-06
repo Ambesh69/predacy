@@ -120,9 +120,11 @@ contract DeployMainnet is Script {
         console.log("VAULT_ADDRESS=", address(vault));
         console.log("ADAPTER_ADDRESS=", address(adapter));
         console.log("CLAIM_VERIFIER=", claimVerifier);
+        console.log("USDC_ADDRESS=", REAL_USDC);
         console.log("CHAIN_ID=137");
         console.log("RPC_URL=https://polygon-rpc.com/");
         console.log("MARKET_ID=", vm.toString(marketId));
         console.log("USE_REAL_ZK=true");
+        console.log("(run scripts/generateClobApiKey.ts to get POLYMARKET_API_KEY/SECRET/PASSPHRASE)");
     }
 }

@@ -192,10 +192,16 @@ contract BatchVaultTest is Test {
         vm.prank(carol);
         usdc.approve(address(vault), type(uint256).max);
 
-        // Fund relayer for gas (USDC no longer paid upfront with EIP-3009 model)
+        // Fund relayer with USDC (needed for sell-batch pre-funding in v7)
         usdc.mint(relayer, 10_000e6);
         vm.prank(relayer);
-        usdc.approve(address(vault), type(uint256).max); // kept for backward compat; not used
+        usdc.approve(address(vault), type(uint256).max);
+
+        // v7 relayer pre-buy model: relayer acquires YES tokens on CLOB before settleBatch.
+        // In tests, pre-mint a large pool of YES tokens to relayer and set CTF approval.
+        ctf.mintYes(address(usdc), MARKET_ID, relayer, 1_000_000e6);
+        vm.prank(relayer);
+        ctf.setApprovalForAll(address(vault), true);
     }
 
     // ─── Helpers ───────────────────────────────────────────────────────────
@@ -1093,6 +1099,9 @@ contract BatchVaultTest is Test {
 
     function test_twoMarketsConcurrent() public {
         bytes32 MARKET_ID_2 = keccak256("polymarket:will-btc-reach-150k-2026");
+
+        // v7: relayer needs YES tokens for MARKET_ID_2 (setUp only mints for MARKET_ID)
+        ctf.mintYes(address(usdc), MARKET_ID_2, relayer, 1_000_000e6);
 
         // Fund bob for market 2 (alice already funded in setUp)
         // Both markets open simultaneously

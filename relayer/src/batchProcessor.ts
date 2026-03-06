@@ -238,6 +238,17 @@ const ADAPTER_ABI = [
   },
 ] as const;
 
+// Minimal ERC-20 ABI for the USDC approval call in sell-batch pre-funding
+const ERC20_APPROVE_ABI = [
+  {
+    name: "approve",
+    type: "function",
+    inputs: [{ name: "spender", type: "address" }, { name: "amount", type: "uint256" }],
+    outputs: [{ name: "", type: "bool" }],
+    stateMutability: "nonpayable",
+  },
+] as const;
+
 export interface RelayerConfig {
   rpcUrl: string;
   chainId: number;          // 137 = Polygon mainnet, 80002 = Polygon Amoy
@@ -247,6 +258,7 @@ export interface RelayerConfig {
   redisUrl?: string;        // Optional — falls back to in-memory if not set
   useRealZk?: boolean;      // true = generate real UltraHonk proofs via bb; default false (mock)
   adapterAddress?: `0x${string}`; // PublicInputAdapter address (required when useRealZk=true)
+  usdcAddress?:   `0x${string}`;  // USDC contract address — required for sell-batch USDC approval
   polymarket: {
     apiKey:          string;
     apiSecret:       string;
@@ -638,69 +650,45 @@ export class BatchProcessor {
       `sellYes=${fills.filledSellYes}, netBuy=${fills.netBuyAmount}, netSellYes=${fills.netSellYes}`,
     );
 
-    // ─── 4b. Order routing ────────────────────────────────────────────────────
-    let polymarketRoutingSucceeded = false;
+    // ─── 4b. Pre-buy/pre-fund on Polymarket CLOB (before settleBatch) ──────────
+    // v7 contract model: relayer pre-buys YES tokens, then settleBatch atomically
+    // pulls YES from relayer and reimburses USDC. For sell batches, relayer pre-approves
+    // USDC so the vault can pull it, then relayer sells YES on CLOB after settlement.
     if (this.config.polymarket.apiKey && cachedYesToken) {
       try {
         if (fills.netBuyAmount > 0n) {
           const usdcStr = (Number(fills.netBuyAmount) / 1e6).toFixed(2);
-          console.log(`[BatchProcessor] → Routing net BUY YES: $${usdcStr} USDC to Polymarket`);
-          const { orderId, limitPrice } = await this.polymarket.placeMarketBuy(
+          console.log(`[BatchProcessor] Pre-buying YES tokens: $${usdcStr} USDC on Polymarket CLOB`);
+          const { orderId } = await this.polymarket.placeMarketBuy(
             cachedYesToken,
             fills.netBuyAmount,
           );
-          // NOTE: do NOT refine effectiveClearingPrice from limitPrice here.
-          // limitPrice = mid * 1.01 (1% execution slippage) — using it as the
-          // clearing price would push it above users' typical 0.5% limit,
-          // causing their orders to be marked not-filled even though they should
-          // have matched. The mid price set in step 4a is the correct clearing price.
-          console.log(`[BatchProcessor] → Polymarket BUY order ${orderId} placed (execution limit ${limitPrice}, clearing price unchanged: ${effectiveClearingPrice})`);
-          polymarketRoutingSucceeded = true;
-        } else if (fills.netSellYes > 0n) {
-          const yesStr = (Number(fills.netSellYes) / 1e6).toFixed(4);
-          console.log(`[BatchProcessor] → Routing net SELL YES: ${yesStr} tokens to Polymarket`);
-          const { orderId, limitPrice } = await this.polymarket.placeMarketSell(
-            cachedYesToken,
-            fills.netSellYes,
-          );
-          console.log(`[BatchProcessor] → Polymarket SELL order ${orderId} placed (limit ${limitPrice})`);
-          polymarketRoutingSucceeded = true;
+          console.log(`[BatchProcessor] Buy order ${orderId} placed — waiting 4s for fill...`);
+          // Taker market orders on liquid markets fill in <2s; 4s is a safe buffer.
+          await new Promise(r => setTimeout(r, 4_000));
+          console.log(`[BatchProcessor] Proceeding to settleBatch with pre-bought YES tokens`);
+        } else if (fills.netSellYes > 0n && this.config.usdcAddress) {
+          // Approve vault to pull USDC from relayer (relayer will be reimbursed via CLOB sell)
+          const usdcNeeded = (fills.netSellYes * effectiveClearingPrice) / 1_000_000n;
+          console.log(`[BatchProcessor] Approving vault to pull ${usdcNeeded} USDC (sell-batch pre-fund)`);
+          const approveHash = await this._write({
+            address: this.config.usdcAddress,
+            abi: ERC20_APPROVE_ABI,
+            functionName: "approve",
+            args: [this.config.vaultAddress, usdcNeeded],
+            ...chainGas(this.config.chainId),
+          });
+          await this.publicClient.waitForTransactionReceipt({ hash: approveHash });
+          console.log(`[BatchProcessor] USDC approval confirmed (tx: ${approveHash})`);
         } else {
-          console.log(`[BatchProcessor] → No net position to route`);
-          polymarketRoutingSucceeded = true;
+          console.log(`[BatchProcessor] No net position to route`);
         }
       } catch (err) {
-        console.warn(`[BatchProcessor] Polymarket routing step failed (non-fatal):`, err);
+        // Abort — do not call settleBatch without the pre-buy having succeeded.
+        // (vault would try safeTransferFrom YES tokens that relayer doesn't have)
+        console.error(`[BatchProcessor] CLOB pre-routing failed — aborting settleBatch:`, err);
+        throw err;
       }
-    }
-
-    // ─── Mainnet CTF workaround ───────────────────────────────────────────────
-    // The deployed BatchVault calls _executeOnPolymarket → IConditionalTokens.mockBuyYes()
-    // which only exists on MockCTF (testnet). On Polygon mainnet the real Gnosis CTF
-    // (0x4D97...) doesn't have this function — any call with netBuyAmount > 0 ALWAYS reverts,
-    // regardless of whether CLOB routing succeeded off-chain.
-    //
-    // Override to a price of 999_999 (99.9999¢) so no buy orders fill and netBuyAmount=0,
-    // which means _executeOnPolymarket is never called on-chain.
-    // All buy orders are then "unfilled" — ephemeral wallets keep their USDC and users
-    // can sweep via the frontend.
-    //
-    // This is a temporary workaround until the contract is redeployed with real
-    // Polymarket CTF integration (splitPosition + CLOB exchange).
-    if (this.config.chainId === polygon.id && fills.netBuyAmount > 0n) {
-      const noFillPrice = 999_999n;
-      console.warn(
-        `[BatchProcessor] Mainnet CTF workaround: netBuyAmount=${fills.netBuyAmount} would call ` +
-        `mockBuyYes on real CTF (revert). Polymarket routing unavailable — overriding ` +
-        `clearing price to ${noFillPrice} (99.9999¢) so no orders fill. ` +
-        `Users can sweep USDC from ephemeral wallets via the frontend.`,
-      );
-      effectiveClearingPrice = noFillPrice;
-      fills = computeFillsAtPrice(orders, noFillPrice);
-      console.log(
-        `[BatchProcessor] Recalculated fills: buyVol=${fills.filledBuyVolume}, ` +
-        `netBuy=${fills.netBuyAmount} (expected 0)`,
-      );
     }
 
     // 6. Generate ZK proof (mock in prototype mode; real proof when USE_REAL_ZK=true)
@@ -790,6 +778,19 @@ export class BatchProcessor {
 
     await this.publicClient.waitForTransactionReceipt({ hash: settleHash });
     console.log(`[BatchProcessor] Batch ${batchId} settled! tx: ${settleHash}`);
+
+    // Post-settle: sell YES tokens on CLOB (for net sell batches only)
+    // Vault sent YES tokens to relayer during settleBatch; now relayer sells them to recover USDC.
+    if (fills.netSellYes > 0n && cachedYesToken && this.config.polymarket.apiKey) {
+      try {
+        const yesStr = (Number(fills.netSellYes) / 1e6).toFixed(4);
+        console.log(`[BatchProcessor] Post-settle: selling ${yesStr} YES tokens on Polymarket CLOB`);
+        const { orderId } = await this.polymarket.placeMarketSell(cachedYesToken, fills.netSellYes);
+        console.log(`[BatchProcessor] Sell order ${orderId} placed — relayer will recover USDC`);
+      } catch (err) {
+        console.warn(`[BatchProcessor] Post-settle CLOB sell failed (non-fatal — relayer holds YES tokens):`, err);
+      }
+    }
 
     // Clean up order store
     await this.store.delete(batchId.toString());

@@ -6,6 +6,7 @@ import "./interfaces/IConditionalTokens.sol";
 
 interface IERC20 {
     function transfer(address to, uint256 amount) external returns (bool);
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
     function approve(address spender, uint256 amount) external returns (bool);
     function balanceOf(address account) external view returns (uint256);
 }
@@ -805,12 +806,21 @@ contract BatchVault {
     }
 
     function _executeOnPolymarket(bytes32 conditionId, uint256 usdcAmount, uint256 clearingPrice) internal returns (uint256 yesTokens) {
-        IERC20(usdc).approve(ctf, usdcAmount);
-        yesTokens = IConditionalTokens(ctf).mockBuyYes(usdc, conditionId, usdcAmount, clearingPrice);
+        uint256 yesTokenId = _getYesTokenId(conditionId);
+        yesTokens = (usdcAmount * PRICE_DECIMALS) / clearingPrice;
+        // Pull YES tokens from relayer wallet — relayer pre-bought on Polymarket CLOB
+        IConditionalTokens(ctf).safeTransferFrom(msg.sender, address(this), yesTokenId, yesTokens, "");
+        // Reimburse relayer for the USDC it spent acquiring the YES tokens
+        IERC20(usdc).transfer(msg.sender, usdcAmount);
     }
 
     function _executeSellOnPolymarket(bytes32 conditionId, uint256 yesAmount, uint256 clearingPrice) internal {
-        IConditionalTokens(ctf).mockSellYes(usdc, conditionId, yesAmount, clearingPrice);
+        uint256 yesTokenId = _getYesTokenId(conditionId);
+        uint256 usdcPayment = (yesAmount * clearingPrice) / PRICE_DECIMALS;
+        // Send YES tokens to relayer — relayer will sell them on Polymarket CLOB
+        IConditionalTokens(ctf).safeTransferFrom(address(this), msg.sender, yesTokenId, yesAmount, "");
+        // Pull USDC from relayer (relayer pre-approved this allowance)
+        IERC20(usdc).transferFrom(msg.sender, address(this), usdcPayment);
     }
 
     function _getYesTokenId(bytes32 conditionId) internal view returns (uint256) {

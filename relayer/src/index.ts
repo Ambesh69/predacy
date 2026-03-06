@@ -40,6 +40,9 @@ const baseConfig = {
   adapterAddress: process.env.ADAPTER_ADDRESS
     ? (process.env.ADAPTER_ADDRESS as `0x${string}`)
     : undefined,
+  usdcAddress: process.env.USDC_ADDRESS
+    ? (process.env.USDC_ADDRESS as `0x${string}`)
+    : undefined,
 };
 
 const PORT = parseInt(process.env.PORT ?? "3001");
