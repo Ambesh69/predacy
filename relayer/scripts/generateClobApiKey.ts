@@ -35,7 +35,8 @@ const walletClient = createWalletClient({
 });
 
 const client = new ClobClient("https://clob.polymarket.com", 137, walletClient);
-const creds = await client.createApiKey(0);
+// deriveApiKey retrieves existing key; createApiKey fails if one already exists
+const creds = await client.deriveApiKey(0);
 
 console.log("Success! Set these in Railway:\n");
 console.log(`POLYMARKET_API_KEY=${creds.key}`);
