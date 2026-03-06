@@ -38,6 +38,8 @@ interface HistoricalPosition {
   ephemeralAddress?: string;
   /** USDC amount that remains in the ephemeral wallet (for unfilled buys) */
   unfilledAmount?: bigint;
+  /** True if the USDC was already swept back to wallet (persisted in localStorage) */
+  swept?: boolean;
 }
 
 interface PositionsPanelProps {
@@ -257,7 +259,7 @@ function ActivityRow({
           ? "border-accent/30 text-accent bg-accent/5"
           : "border-danger/30 text-danger bg-danger/5",
       )}>
-        {isBuy ? "BUY" : "SELL"}
+        {isBuy ? "BUY YES" : "SELL YES"}
       </span>
 
       {/* Market + batch */}
@@ -293,7 +295,7 @@ function UnfilledCard({ hp, onSweep }: {
 }) {
   const [copied,   setCopied]   = useState(false);
   const [sweeping, setSweeping] = useState(false);
-  const [swept,    setSwept]    = useState(false);
+  const [swept,    setSwept]    = useState(hp.swept === true);
   const [sweepErr, setSweepErr] = useState<string | null>(null);
 
   const copyKey = async () => {
@@ -480,7 +482,7 @@ export default function PositionsPanel({
     let storedOrders: Array<{
       commitment: string; batchId: string; salt?: string; claimed?: boolean;
       isBuy: boolean; isSell?: boolean; amount: string; marketQuestion?: string; timestamp?: number;
-      marketId?: string; ephemeralKey?: string; ephemeralAddress?: string;
+      marketId?: string; ephemeralKey?: string; ephemeralAddress?: string; swept?: boolean;
     }> = [];
     const storageKey = `predacy:orders:${walletAddress.toLowerCase()}`;
     try {
@@ -549,6 +551,7 @@ export default function PositionsPanel({
                 ephemeralKey:     order.isBuy ? order.ephemeralKey     : undefined,
                 ephemeralAddress: order.isBuy ? order.ephemeralAddress : undefined,
                 unfilledAmount:   order.isBuy ? BigInt(order.amount)   : undefined,
+                swept:            order.swept === true,
               });
             }
             return;
@@ -823,7 +826,7 @@ export default function PositionsPanel({
                 hp.settling ? (
                   <div key={hp.batchId.toString()} className="px-4 py-3 border-b border-border/40">
                     <div className="flex items-center gap-2 mb-1">
-                      <DirectionBadge isBuy={hp.position.isBuy} />
+                      <DirectionBadge isBuy={hp.position.isBuy} isSell={hp.isSell} />
                       <span className="w-2 h-2 border border-blue/60 border-t-transparent rounded-full animate-spin flex-shrink-0" />
                       <span className="text-[10px] text-blue/70 tracking-wide uppercase">Settling</span>
                       <span className="text-[9px] text-muted-dim ml-auto">#{hp.batchId.toString()}</span>
