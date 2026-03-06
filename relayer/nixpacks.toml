@@ -1,9 +1,16 @@
 # Skip tsc (build) — tsx executes TypeScript directly at runtime.
 # Nixpacks would otherwise run `npm run build` which fails on strict
 # viem generic inference that tsx handles fine at runtime.
+#
+# bb (Barretenberg) is required for real UltraHonk proof generation when
+# USE_REAL_ZK=true. The install script places the binary at ~/.bb/bb.
+# zkProver.ts / zkClaimProver.ts default to BB_PATH=~/.bb/bb.
 
 [phases.build]
-cmds = ["npm install --no-audit --no-fund"]
+cmds = [
+  "npm install --no-audit --no-fund",
+  "curl -L https://raw.githubusercontent.com/AztecProtocol/aztec-packages/master/barretenberg/cpp/installation/install | bash",
+]
 
 [start]
-cmd = "npm start"
+cmd = "BB_PATH=$HOME/.bb/bb npm start"
