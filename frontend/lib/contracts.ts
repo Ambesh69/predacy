@@ -3,9 +3,9 @@ import { polygon, polygonAmoy } from "viem/chains";
 // ── Contract Addresses ────────────────────────────────────────────────────────
 
 export const CONTRACTS = {
-  // Polygon mainnet (live Polymarket) — BatchVault pending mainnet deploy
+  // Polygon mainnet (live Polymarket)
   [polygon.id]: {
-    batchVault: "0x0000000000000000000000000000000000000000" as `0x${string}`, // TODO: mainnet deploy
+    batchVault: "0x97e8Fef900E6e4844568617c3cc3afb668Bb2Dad" as `0x${string}`,
     usdc: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174" as `0x${string}`,
     ctf:  "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045" as `0x${string}`,
   },
