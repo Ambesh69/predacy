@@ -441,7 +441,7 @@ export default function PositionsPanel({
           commitment: string; batchId: string; isBuy?: boolean; isSell?: boolean;
           ephemeralKey?: string; ephemeralAddress?: string; amount?: string; swept?: boolean;
         }> = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
-        const myOrder = stored.find((o) => o.batchId === currentBatchId.toString());
+        const myOrder = stored.find((o) => o.batchId === currentBatchId.toString() && !!o.commitment);
         if (!myOrder) return;
 
         const contracts = getContracts(ACTIVE_CHAIN.id);
@@ -498,7 +498,8 @@ export default function PositionsPanel({
 
     const historicalOrders = storedOrders
       .filter((o) => !marketId || o.marketId === marketId)
-      .filter((o) => o.batchId !== currentBatchId.toString());
+      .filter((o) => o.batchId !== currentBatchId.toString())
+      .filter((o) => !!o.commitment); // skip draft entries saved before relayer confirmation
 
     // Keep raw order list for Activity tab (enriched below)
     const rawActivity: typeof allStoredOrders = historicalOrders.map((o) => ({

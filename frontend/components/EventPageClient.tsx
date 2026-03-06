@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useCallback, use } from "react";
 import Link from "next/link";
 import { clsx } from "clsx";
 import {
-  createPublicClient, createWalletClient, custom, http, parseAbiItem,
+  createPublicClient, createWalletClient, custom, http, parseAbiItem, pad, toHex,
 } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
@@ -29,6 +29,15 @@ import {
   ACTIVE_CHAIN, ACTIVE_CHAIN_ID_HEX, ACTIVE_CHAIN_NAME,
   CHAIN_GAS, IS_MAINNET,
 } from "@/lib/chain";
+
+// USDC.e on Polygon mainnet uses EIP712Domain with `salt` (bytes32 chainId) instead
+// of `chainId` (uint256). Testnet MockUSDC uses the standard chainId domain.
+// Confirmed by computing domain separator against on-chain DOMAIN_SEPARATOR().
+function usdcDomain(verifyingContract: `0x${string}`) {
+  return IS_MAINNET
+    ? { name: "USD Coin (PoS)", version: "1", verifyingContract, salt: pad(toHex(BigInt(ACTIVE_CHAIN.id)), { size: 32 }) }
+    : { name: "USD Coin (Test)", version: "1", chainId: BigInt(ACTIVE_CHAIN.id), verifyingContract };
+}
 
 // ── Viem public client ────────────────────────────────────────────────────────
 const publicClient = createPublicClient({
@@ -815,7 +824,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
 
     const sig = await ephemeralWalletClient.signTypedData({
       account: ephemeralAccount,
-      domain: { name: "USD Coin (Test)", version: "1", chainId: BigInt(ACTIVE_CHAIN.id), verifyingContract: contracts.usdc },
+      domain: usdcDomain(contracts.usdc),
       types: {
         TransferWithAuthorization: [
           { name: "from",        type: "address" }, { name: "to",          type: "address" },
@@ -880,6 +889,30 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         args: [ephemeralAddress, params.amount], ...CHAIN_GAS,
       });
       await publicClient.waitForTransactionReceipt({ hash: fundTx });
+
+      // Persist ephemeral key immediately after funding so USDC can always be swept
+      // back even if the relayer submission fails and the order is never saved below.
+      if (walletAddress) {
+        try {
+          const recoveryKey = `predacy:orders:${walletAddress.toLowerCase()}`;
+          const existing: unknown[] = JSON.parse(localStorage.getItem(recoveryKey) ?? "[]");
+          existing.unshift({
+            commitment:     null,   // filled in after relayer confirms
+            salt:           null,
+            amount:         params.amount.toString(),
+            isBuy:          true,
+            limitPrice:     params.limitPrice.toString(),
+            batchId:        "0",
+            marketId:       selectedMarket.conditionId,
+            marketQuestion: selectedMarket.question ?? null,
+            timestamp:      Date.now(),
+            ephemeralKey:   ephemeralPrivateKey,
+            ephemeralAddress,
+            pending:        true,   // draft — no on-chain commitment yet
+          });
+          localStorage.setItem(recoveryKey, JSON.stringify(existing.slice(0, 200)));
+        } catch { /* ignore */ }
+      }
 
       const ephemeralWalletClient = createWalletClient({
         account: ephemeralAccount, chain: ACTIVE_CHAIN, transport: http(),
@@ -961,7 +994,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
 
         const chunkTransferSig = await ephemeralWalletClient.signTypedData({
           account: ephemeralAccount,
-          domain: { name: "USD Coin (Test)", version: "1", chainId: BigInt(ACTIVE_CHAIN.id), verifyingContract: contracts.usdc },
+          domain: usdcDomain(contracts.usdc),
           types: {
             TransferWithAuthorization: [
               { name: "from", type: "address" }, { name: "to",          type: "address" },
@@ -1026,10 +1059,9 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
           setBatch((prev) => ({ ...prev, commitmentCount: prev.commitmentCount + 1, totalDeposited: prev.totalDeposited + chunk.chunkAmount }));
           try {
             const key = `predacy:orders:${walletAddress.toLowerCase()}`;
-            const existing: unknown[] = JSON.parse(localStorage.getItem(key) ?? "[]");
-            // Persist order preimage for ZK claim proof at claim time.
-            // ephemeralKey stored for USDC recovery: if settlement ever fails, import it
-            // into MetaMask (Account → Import account → Private key) to sweep USDC back.
+            // Remove the draft entry saved at funding time — replace it with the real committed entry.
+            const existing: unknown[] = (JSON.parse(localStorage.getItem(key) ?? "[]") as Array<Record<string, unknown>>)
+              .filter((o) => !(o.pending && o.ephemeralAddress === ephemeralAddress));
             existing.unshift({
               commitment:       chunk.chunkCommitment,
               salt:             chunk.chunkSalt,
@@ -1040,7 +1072,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
               marketId:         selectedMarket.conditionId,
               marketQuestion:   selectedMarket.question ?? null,
               timestamp:        Date.now(),
-              ephemeralKey:     ephemeralPrivateKey,   // recovery: import into MetaMask if stuck
+              ephemeralKey:     ephemeralPrivateKey,
               ephemeralAddress,
             });
             localStorage.setItem(key, JSON.stringify(existing.slice(0, 200)));
