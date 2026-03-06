@@ -372,7 +372,9 @@ export class PolymarketClient {
     // Use current timestamp as salt — unique per order, no pre-image concerns
     const salt = BigInt(Date.now());
 
-    const makerAddress = (this.proxyWallet ?? account.address) as `0x${string}`;
+    // signatureType=0 (EOA) requires maker == signer.
+    // The relayer trades directly — no proxy wallet, maker = signer = EOA.
+    const makerAddress = account.address;
     const orderMessage = {
       salt,
       maker:         makerAddress,
