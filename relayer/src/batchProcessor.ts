@@ -6,7 +6,7 @@ import { ZKProver } from "./zkProver.js";
 import { PolymarketClient, type ClobOrderForChain } from "./polymarketClient.js";
 export type { ClobOrderForChain };
 import { createOrderStore, type OrderStore } from "./orderStore.js";
-import { OrderSide } from "./types.js";
+import { OrderSide, BatchStatus } from "./types.js";
 import type { Order, Commitment, BatchInfo, TransferAuth, RequeueAuth } from "./types.js";
 
 /** Result for one excluded order from requeueExcludedOrders(). */
@@ -850,18 +850,39 @@ export class BatchProcessor {
     const remYesDemand   = yesBuyersNeedTokens - directYesMatch;
     const remNoDemand    = noBuyersNeedTokens  - directNoMatch;
     const splitQty       = remYesDemand < remNoDemand ? remYesDemand : remNoDemand;
-    const yesGap         = remYesDemand - splitQty;  // YES tokens relayer must acquire via CLOB
-    const noGap          = remNoDemand  - splitQty;  // NO tokens relayer must acquire via CLOB
+    let yesGap         = remYesDemand - splitQty;  // YES tokens relayer must acquire via CLOB
+    let noGap          = remNoDemand  - splitQty;  // NO tokens relayer must acquire via CLOB
     const excessYes      = fills.filledYesSellQty - directYesMatch;
     const excessNo       = fills.filledNoSellQty  - directNoMatch;
     const mergeQty       = excessYes < excessNo ? excessYes : excessNo;
-    const finalExcessYes = excessYes - mergeQty;  // YES vault sends to relayer; relayer sells on CLOB
-    const finalExcessNo  = excessNo  - mergeQty;  // NO vault sends to relayer; relayer sells on CLOB
+    let finalExcessYes = excessYes - mergeQty;  // YES vault sends to relayer; relayer sells on CLOB
+    let finalExcessNo  = excessNo  - mergeQty;  // NO vault sends to relayer; relayer sells on CLOB
 
     console.log(
       `[BatchProcessor] Settlement geometry: split=${splitQty}, merge=${mergeQty}, ` +
       `yesGap=${yesGap}, noGap=${noGap}, finalExcessYes=${finalExcessYes}, finalExcessNo=${finalExcessNo}`,
     );
+
+    // ── LOCKED-batch resume ────────────────────────────────────────────────────
+    // If the batch is already LOCKED (a previous processBatch run succeeded at Phase 1
+    // but failed at CLOB buy / settleBatch), override locally-computed values with the
+    // on-chain state so the regenerated ZK proof is consistent with what lockFunds stored.
+    const alreadyLocked = batchInfo.status === BatchStatus.LOCKED;
+    if (alreadyLocked) {
+      console.log(
+        `[BatchProcessor] Batch ${batchId} already LOCKED — resuming CLOB + settleBatch ` +
+        `(on-chain: clearingPrice=${batchInfo.clearingPrice}, yesGap=${batchInfo.yesGap}, noGap=${batchInfo.noGap})`,
+      );
+      effectiveClearingPrice  = batchInfo.clearingPrice;
+      fills.filledYesBuyVol   = batchInfo.filledYesBuyVol;
+      fills.filledNoBuyVol    = batchInfo.filledNoBuyVol;
+      fills.filledYesSellQty  = batchInfo.filledYesSellQty;
+      fills.filledNoSellQty   = batchInfo.filledNoSellQty;
+      yesGap         = batchInfo.yesGap;
+      noGap          = batchInfo.noGap;
+      finalExcessYes = batchInfo.finalExcessYes;
+      finalExcessNo  = batchInfo.finalExcessNo;
+    }
 
     // 5. Generate ZK proof (can be done before lockFunds — inputs are already known)
     const { proof } = await this.zkProver.generateProof({
@@ -925,38 +946,43 @@ export class BatchProcessor {
     // ─── Phase 1: lockFunds ──────────────────────────────────────────────────
     // Pull user USDC via EIP-3009; split/merge via CTF; send gap USDC + excess
     // tokens to relayer wallet.  After this tx the batch status = LOCKED.
-    console.log(`[BatchProcessor] Phase 1: calling lockFunds for batch ${batchId}`);
-    const lockHash = await this._write({
-      address: this.config.vaultAddress,
-      abi: BATCH_VAULT_ABI,
-      functionName: "lockFunds",
-      args: [
-        batchId,
-        orders.map((o) => ({
-          side:       o.side,       // uint8 OrderSide enum
-          amount:     o.amount,
-          limitPrice: o.limitPrice,
-          salt:       o.salt,
-        })),
-        auths.map((a) => ({
-          from:        a.from,
-          validAfter:  a.validAfter,
-          validBefore: a.validBefore,
-          nonce:       a.nonce,
-          v:           a.v,
-          r:           a.r,
-          s:           a.s,
-        })),
-        effectiveClearingPrice,
-        fills.filledYesBuyVol,
-        fills.filledNoBuyVol,
-        fills.filledYesSellQty,
-        fills.filledNoSellQty,
-      ],
-      ...chainGas(this.config.chainId),
-    });
-    await this.publicClient.waitForTransactionReceipt({ hash: lockHash });
-    console.log(`[BatchProcessor] lockFunds tx: ${lockHash} — batch ${batchId} is LOCKED`);
+    // Skipped if the batch is already LOCKED (CLOB retry path).
+    if (!alreadyLocked) {
+      console.log(`[BatchProcessor] Phase 1: calling lockFunds for batch ${batchId}`);
+      const lockHash = await this._write({
+        address: this.config.vaultAddress,
+        abi: BATCH_VAULT_ABI,
+        functionName: "lockFunds",
+        args: [
+          batchId,
+          orders.map((o) => ({
+            side:       o.side,       // uint8 OrderSide enum
+            amount:     o.amount,
+            limitPrice: o.limitPrice,
+            salt:       o.salt,
+          })),
+          auths.map((a) => ({
+            from:        a.from,
+            validAfter:  a.validAfter,
+            validBefore: a.validBefore,
+            nonce:       a.nonce,
+            v:           a.v,
+            r:           a.r,
+            s:           a.s,
+          })),
+          effectiveClearingPrice,
+          fills.filledYesBuyVol,
+          fills.filledNoBuyVol,
+          fills.filledYesSellQty,
+          fills.filledNoSellQty,
+        ],
+        ...chainGas(this.config.chainId),
+      });
+      await this.publicClient.waitForTransactionReceipt({ hash: lockHash });
+      console.log(`[BatchProcessor] lockFunds tx: ${lockHash} — batch ${batchId} is LOCKED`);
+    } else {
+      console.log(`[BatchProcessor] Phase 1: skipped (batch ${batchId} already LOCKED)`);
+    }
 
     // ─── Between phases: CLOB operations (vault-funded, zero relayer capital) ─
     //

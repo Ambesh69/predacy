@@ -65,12 +65,22 @@ export interface BatchInfo {
   commitmentCount: bigint;
   commitmentRoot: `0x${string}`;
   claimMerkleRoot: `0x${string}`;
+  // v9 two-phase settlement state (set by lockFunds, consumed by settleBatch)
+  filledYesBuyVol:  bigint;
+  filledNoBuyVol:   bigint;
+  filledYesSellQty: bigint;
+  filledNoSellQty:  bigint;
+  yesGap:           bigint;  // YES tokens relayer must deliver in settleBatch
+  noGap:            bigint;  // NO  tokens relayer must deliver in settleBatch
+  finalExcessYes:   bigint;  // YES sent to relayer; relayer returns USDC proceeds
+  finalExcessNo:    bigint;  // NO  sent to relayer; relayer returns USDC proceeds
 }
 
 export enum BatchStatus {
-  OPEN = 0,
+  OPEN     = 0,
   SETTLING = 1,
-  SETTLED = 2,
+  LOCKED   = 2,  // Between lockFunds and settleBatch (v9 two-phase)
+  SETTLED  = 3,
 }
 
 export interface ClearingResult {

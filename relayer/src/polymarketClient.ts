@@ -400,9 +400,11 @@ export class PolymarketClient {
     // Accept up to 1% above mid — ensures fill without excess slippage
     const limitPrice = parseFloat(Math.min(0.999, mid * 1.01).toFixed(4));
 
-    // makerAmount = USDC to spend; takerAmount = tokens to receive
-    const makerAmount = usdcAmount;
-    const takerAmount = BigInt(Math.round(Number(usdcAmount) / limitPrice));
+    // makerAmount = USDC to spend (must be multiple of 10000 — 0.01 USDC precision)
+    // takerAmount = tokens to receive (must be multiple of 10 — 0.00001 token precision)
+    const makerAmount = (usdcAmount / 10000n) * 10000n;
+    const takerAmountRaw = BigInt(Math.round(Number(makerAmount) / limitPrice));
+    const takerAmount   = (takerAmountRaw / 10n) * 10n;
 
     const { body, orderId } = await this._buildSignedOrder(
       tokenId, makerAmount, takerAmount, SIDE_BUY, limitPrice, "FOK",
@@ -432,9 +434,11 @@ export class PolymarketClient {
     // Accept up to 1% below mid — ensures fill without excess slippage
     const limitPrice = parseFloat(Math.max(0.001, mid * 0.99).toFixed(4));
 
-    // For SELL: makerAmount = tokens to sell; takerAmount = USDC to receive
-    const makerAmount = yesAmount;
-    const takerAmount = BigInt(Math.round(Number(yesAmount) * limitPrice));
+    // For SELL: makerAmount = tokens to sell (must be multiple of 10 — 0.00001 token precision)
+    //           takerAmount = USDC to receive (must be multiple of 10000 — 0.01 USDC precision)
+    const makerAmount = (yesAmount / 10n) * 10n;
+    const takerAmountRaw = BigInt(Math.round(Number(makerAmount) * limitPrice));
+    const takerAmount   = (takerAmountRaw / 10000n) * 10000n;
 
     const { body, orderId } = await this._buildSignedOrder(
       tokenId, makerAmount, takerAmount, SIDE_SELL, limitPrice, "FOK",
@@ -462,8 +466,9 @@ export class PolymarketClient {
   ): Promise<{ orderId: string; limitPrice: number }> {
     this._requireSigner();
 
-    const makerAmount = usdcAmount;
-    const takerAmount = BigInt(Math.round(Number(usdcAmount) / limitPrice));
+    const makerAmount = (usdcAmount / 10000n) * 10000n;
+    const takerAmountRaw = BigInt(Math.round(Number(makerAmount) / limitPrice));
+    const takerAmount   = (takerAmountRaw / 10n) * 10n;
 
     const { body, orderId } = await this._buildSignedOrder(
       tokenId, makerAmount, takerAmount, SIDE_BUY, limitPrice, "GTC",
@@ -535,12 +540,37 @@ export class PolymarketClient {
     const deficit = yesNeeded - preBuyBalance;
     console.log(`[PolymarketClient] Need ${yesNeeded} YES, have ${preBuyBalance}, deficit=${deficit}`);
 
-    // Place FOK market buy — spend usdcToSpend to get at least deficit YES tokens.
-    // The clearing price ≥ CLOB ask price (protocol invariant), so spending all
-    // netBuyAmount USDC at the CLOB ask should yield ≥ yesNeeded tokens.
-    console.log(`[PolymarketClient] Placing FOK buy: ${usdcToSpend} USDC for YES token ${tokenId.slice(0, 10)}…`);
-    const { orderId, limitPrice } = await this.placeMarketBuy(tokenId, usdcToSpend);
-    console.log(`[PolymarketClient] FOK order placed: orderId=${orderId}, limitPrice=${limitPrice}`);
+    // Build a FOK BUY order for exactly 'deficit' YES tokens (rounded up to CLOB token precision).
+    // CLOB precision requirements:
+    //   makerAmount (USDC):  must be a multiple of 10000 (= 0.01 USDC)
+    //   takerAmount (token): must be a multiple of 10    (= 0.00001 token)
+    // We ask for ceil(deficit / 10) * 10 tokens and pay ceil(takerAmount * limitPrice / 10000) * 10000 USDC.
+    // This may slightly exceed usdcToSpend (by at most 9999 ≈ $0.01 — relayer fronts the difference).
+    // The protocol invariant (clearing_price ≥ CLOB ask) guarantees the order fills.
+    const mid = await this.getMidPrice(tokenId);
+    const limitPrice = parseFloat(Math.min(0.999, mid * 1.01).toFixed(4));
+
+    const TOKEN_PREC = 10n;
+    const USDC_PREC  = 10000n;
+    // Round UP deficit to nearest token precision
+    const takerAmount = deficit % TOKEN_PREC === 0n
+      ? deficit
+      : deficit + (TOKEN_PREC - deficit % TOKEN_PREC);
+    // Round UP makerAmount to nearest USDC precision
+    const makerAmountRaw = BigInt(Math.ceil(Number(takerAmount) * limitPrice));
+    const makerAmount    = makerAmountRaw % USDC_PREC === 0n
+      ? makerAmountRaw
+      : makerAmountRaw + (USDC_PREC - makerAmountRaw % USDC_PREC);
+
+    console.log(`[PolymarketClient] Placing FOK buy: ${usdcToSpend} USDC available, ordering ${takerAmount} YES tokens (${makerAmount} USDC) for YES token ${tokenId.slice(0, 10)}…`);
+
+    const { body, orderId } = await this._buildSignedOrder(
+      tokenId, makerAmount, takerAmount, SIDE_BUY, limitPrice, "FOK",
+    );
+    const res = await axios.post(`${CLOB_API}/order`, body, {
+      headers: this._authHeaders("POST", "/order", body),
+    });
+    console.log(`[PolymarketClient] FOK order placed: orderId=${(res.data.orderID ?? res.data.orderId ?? orderId)}, limitPrice=${limitPrice}`);
 
     // Poll for YES tokens to arrive (Polygon block time ~2s, allow up to 30s)
     const POLL_MS = 2500;

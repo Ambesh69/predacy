@@ -1268,7 +1268,7 @@ async function getLogsChunked(
 
 async function recoverSettlingBatches() {
   if (missingVars.length > 0) return;
-  console.log("[Relayer] Scanning for SETTLING batches to recover...");
+  console.log("[Relayer] Scanning for SETTLING/LOCKED batches to recover...");
   try {
     const toBlock  = await publicClient.getBlockNumber();
     // ~50 000 blocks ≈ 70 h on Amoy (5 s/block) / 28 h on Polygon mainnet (2 s/block)
@@ -1291,7 +1291,7 @@ async function recoverSettlingBatches() {
       .sort((a, b) => ((b.args.batchId as bigint) > (a.args.batchId as bigint) ? 1 : -1));
 
     if (unsettled.length === 0) {
-      console.log("[Relayer] No SETTLING batches found — clean startup");
+      console.log("[Relayer] No SETTLING/LOCKED batches found — clean startup");
       return;
     }
     console.log(`[Relayer] Found ${unsettled.length} SETTLING batch(es) to recover`);
@@ -1312,8 +1312,11 @@ async function recoverSettlingBatches() {
           args:         [batchId],
         }) as { marketId: `0x${string}`; status: number };
 
-        if (batchInfo.status !== 1 /* SETTLING */) {
-          console.log(`[Relayer] Batch ${batchId} status=${batchInfo.status} (not SETTLING) — skipping`);
+        // Accept both SETTLING (1) and LOCKED (2) — processBatch handles both.
+        // LOCKED means lockFunds succeeded but CLOB/settleBatch failed; processBatch
+        // will skip Phase 1 and retry the CLOB buy + settleBatch.
+        if (batchInfo.status !== 1 /* SETTLING */ && batchInfo.status !== 2 /* LOCKED */) {
+          console.log(`[Relayer] Batch ${batchId} status=${batchInfo.status} (not SETTLING/LOCKED) — skipping`);
           continue;
         }
 
@@ -1327,7 +1330,8 @@ async function recoverSettlingBatches() {
         state.processingBatch = true;
         activeMarkets.set(key, state);
         batchToMarket.set(batchId.toString(), key);
-        console.log(`[Relayer] Recovering SETTLING batch ${batchId} for market ${marketId}`);
+        const phaseLabel = batchInfo.status === 2 ? "LOCKED (CLOB retry)" : "SETTLING";
+        console.log(`[Relayer] Recovering ${phaseLabel} batch ${batchId} for market ${marketId}`);
 
         // Trigger settlement immediately in background
         state.processor.processBatch(batchId)
