@@ -22,7 +22,7 @@ import {
 } from "@/lib/marketUtils";
 import {
   BATCH_VAULT_ABI, CTF_ABI, ERC20_ABI, MOCK_USDC_ABI, TRANSFER_WITH_AUTH_ABI,
-  BatchStatus, getContracts,
+  PROXY_WALLET_FACTORY_ABI, BatchStatus, getContracts,
 } from "@/lib/contracts";
 import { computeCommitment } from "@/lib/commitmentHash";
 import {
@@ -731,14 +731,10 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     try {
       if (!walletAddress) throw new Error("Wallet not connected");
       const storageKey = `predacy:orders:${walletAddress.toLowerCase()}`;
-      // Read payout address from profile settings (set once on profile page)
-      const recipient = (
-        localStorage.getItem(`predacy:claim-recipient:${walletAddress.toLowerCase()}`) || walletAddress
-      ) as `0x${string}`;
       const storedOrders: Array<{
         commitment: string; salt: string; side?: number; isBuy?: boolean;
-        amount: string; limitPrice: string; batchId: string;
-        marketId: string;
+        amount: string; limitPrice: string; batchId: string; marketId: string;
+        ephemeralKey?: string; ephemeralAddress?: string;
       }> = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
       const myOrder = storedOrders.find((o) => o.batchId === batchId.toString());
       if (!myOrder) throw new Error("Order preimage not found in local storage — cannot claim");
@@ -747,11 +743,39 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       // Support legacy localStorage entries that used isBuy (v7.x) instead of side (v8)
       const orderSide = myOrder.side ?? (myOrder.isBuy ? 0 : 1);
 
+      // ── Determine recipient ───────────────────────────────────────────────
+      // Privacy flow: if the order was placed via an ephemeral wallet (ProxyWallet flow),
+      // route YES/NO tokens to the deterministic ProxyWallet address so they can be
+      // wrapped (ERC-1155→ERC-20) and shielded into Railgun privately.
+      // Legacy flow: use the user-chosen recipient address.
+      let recipient: `0x${string}`;
+      let proxyWalletAddress: `0x${string}` | null = null;
+
+      const proxyFactoryAddress = process.env.NEXT_PUBLIC_PROXY_WALLET_FACTORY as `0x${string}` | undefined;
+
+      if (myOrder.ephemeralAddress && proxyFactoryAddress) {
+        // Compute deterministic ProxyWallet address from ephemeral EOA
+        proxyWalletAddress = await publicClient.readContract({
+          address:      proxyFactoryAddress,
+          abi:          PROXY_WALLET_FACTORY_ABI,
+          functionName: "computeAddress",
+          args:         [myOrder.ephemeralAddress as `0x${string}`],
+        }) as `0x${string}`;
+        recipient = proxyWalletAddress;
+      } else {
+        // Legacy: read payout address from profile settings (set once on profile page)
+        recipient = (
+          localStorage.getItem(`predacy:claim-recipient:${walletAddress.toLowerCase()}`) || walletAddress
+        ) as `0x${string}`;
+      }
+
       const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
       if (!relayerUrl) throw new Error("NEXT_PUBLIC_RELAYER_URL is not set");
 
       // POST order preimage + desired recipient to relayer.
       // Relayer generates ZK proof and submits claimWithProof on-chain (relayer = msg.sender).
+      // When proxyWallet is set, relayer will also submit the post-claim shield batch
+      // (wrap ERC-1155 → ERC-20 → Railgun.shield) once tokens arrive at the proxy wallet.
       const resp = await fetch(`${relayerUrl}/claim-proof`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -762,7 +786,12 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
           amount:     myOrder.amount,
           limitPrice: myOrder.limitPrice,
           salt:       myOrder.salt,
-          recipient,   // chosen by user — visible on-chain, use fresh address for privacy
+          recipient,
+          // ProxyWallet fields — present only when ephemeral key exists
+          ...(proxyWalletAddress ? {
+            proxyWallet:      proxyWalletAddress,
+            ephemeralAddress: myOrder.ephemeralAddress,
+          } : {}),
         }),
       });
 
@@ -778,18 +807,28 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         throw new Error("Claim transaction reverted — the batch may not be fully settled yet. Try again in a few seconds.");
       }
 
-      // Persist claimed=true to localStorage so scanHistory shows CLAIMED ✓
-      // even though claimWithProof only sets usedNullifiers (not positionsByCommitment.claimed).
+      // Persist claimed=true + proxyWalletAddress to localStorage.
+      // proxyWalletAddress lets PositionsPanel show the "Shield to Railgun" prompt.
       try {
         const allOrders: Array<Record<string, unknown>> = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
         const updated = allOrders.map((o) =>
-          o.batchId === batchId.toString() ? { ...o, claimed: true } : o
+          o.batchId === batchId.toString()
+            ? { ...o, claimed: true, ...(proxyWalletAddress ? { proxyWalletAddress } : {}) }
+            : o
         );
         localStorage.setItem(storageKey, JSON.stringify(updated));
       } catch { /* ignore storage errors */ }
 
       setBalanceVersion(v => v + 1);
-      pushToast("Position claimed — payout sent to wallet.", "success");
+
+      if (proxyWalletAddress) {
+        pushToast(
+          "Position claimed — tokens sent to your ProxyWallet. Shield via Railgun to complete privacy.",
+          "success"
+        );
+      } else {
+        pushToast("Position claimed — payout sent to wallet.", "success");
+      }
     } catch (e: any) {
       if (e?.code !== 4001) {
         setChainError(e.message ?? "Claim failed");

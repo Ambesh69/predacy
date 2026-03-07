@@ -408,3 +408,31 @@ export enum BatchStatus {
   LOCKED   = 2, // v9: lockFunds called, awaiting settleBatch
   SETTLED  = 3,
 }
+
+// ── ProxyWalletFactory ABI (deterministic wallet deployment) ─────────────────
+// Address: set NEXT_PUBLIC_PROXY_WALLET_FACTORY in .env after deploying
+
+export const PROXY_WALLET_FACTORY_ABI = [
+  {
+    name: "computeAddress",
+    type: "function",
+    inputs:  [{ name: "owner", type: "address" }],
+    outputs: [{ name: "", type: "address" }],
+    stateMutability: "view",
+  },
+  {
+    name: "walletOf",
+    type: "function",
+    inputs:  [{ name: "owner", type: "address" }],
+    outputs: [{ name: "", type: "address" }],
+    stateMutability: "view",
+  },
+  {
+    name: "deploy",
+    type: "function",
+    inputs:  [{ name: "owner", type: "address" }],
+    outputs: [{ name: "wallet", type: "address" }],
+    stateMutability: "nonpayable",
+  },
+  { name: "AlreadyDeployed", type: "error", inputs: [] },
+] as const;

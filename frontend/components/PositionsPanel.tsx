@@ -53,6 +53,8 @@ interface HistoricalPosition {
   unfilledAmount?: bigint;
   /** True if the USDC was already swept back to wallet (persisted in localStorage) */
   swept?: boolean;
+  /** ProxyWallet address for claimed positions — tokens route here for Railgun shielding */
+  proxyWalletAddress?: `0x${string}`;
 }
 
 interface PositionsPanelProps {
@@ -148,11 +150,13 @@ interface PositionRowProps {
   claimError?:    string;
   isActive:       boolean;  // true = unclaimed settled; false = claimed (holding)
   onClose?:       () => void; // pre-fills SELL form for this position
+  /** Set when tokens were routed to a ProxyWallet for Railgun shielding */
+  proxyWalletAddress?: `0x${string}`;
 }
 
 function PositionRow({
   batchId, position, side, clearingPrice, marketQuestion, shares,
-  onClaim, isClaiming, claimError, isActive, onClose,
+  onClaim, isClaiming, claimError, isActive, onClose, proxyWalletAddress,
 }: PositionRowProps) {
 
   const isSell      = side === YES_SELL || side === NO_SELL;
@@ -233,16 +237,43 @@ function PositionRow({
           )}
         </div>
       ) : (
-        // Buy order, claimed — holding YES tokens, offer CLOSE POSITION
+        // Buy order, claimed — show CLOSE POSITION or Railgun shield prompt
         <div className="space-y-1.5">
-          <span className="text-[9px] text-accent/60 tracking-widest uppercase">CLAIMED ✓</span>
-          {onClose && (
-            <button
-              onClick={onClose}
-              className="w-full py-1.5 border border-border-bright text-muted text-[10px] tracking-widest uppercase hover:border-text/30 hover:text-text transition-colors"
-            >
-              CLOSE POSITION
-            </button>
+          {proxyWalletAddress ? (
+            // Privacy flow: tokens are in ProxyWallet, ready to shield into Railgun
+            <div className="space-y-1">
+              <div className="flex items-center gap-1.5">
+                <span className="text-[9px] text-accent/60 tracking-widest uppercase">CLAIMED ✓</span>
+                <span className="text-[9px] text-accent/40">· Tokens in ProxyWallet</span>
+              </div>
+              <p className="text-[9px] text-muted leading-relaxed">
+                Tokens sent to your ProxyWallet. Shield to Railgun to complete privacy.
+              </p>
+              <a
+                href={`https://app.railgun.org`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="block w-full py-1.5 border border-accent/30 text-accent text-[10px] tracking-widest uppercase text-center hover:border-accent/60 hover:bg-accent/5 transition-colors"
+              >
+                SHIELD VIA RAILGUN ↗
+              </a>
+              <p className="text-[9px] text-muted/60 font-mono break-all">
+                {proxyWalletAddress.slice(0, 10)}…{proxyWalletAddress.slice(-8)}
+              </p>
+            </div>
+          ) : (
+            // Standard flow: tokens in wallet, offer CLOSE POSITION
+            <>
+              <span className="text-[9px] text-accent/60 tracking-widest uppercase">CLAIMED ✓</span>
+              {onClose && (
+                <button
+                  onClick={onClose}
+                  className="w-full py-1.5 border border-border-bright text-muted text-[10px] tracking-widest uppercase hover:border-text/30 hover:text-text transition-colors"
+                >
+                  CLOSE POSITION
+                </button>
+              )}
+            </>
           )}
         </div>
       )}
@@ -511,6 +542,7 @@ export default function PositionsPanel({
       side?: number; isBuy?: boolean; isSell?: boolean;
       amount: string; marketQuestion?: string; timestamp?: number;
       marketId?: string; ephemeralKey?: string; ephemeralAddress?: string; swept?: boolean;
+      proxyWalletAddress?: `0x${string}`;
     }> = [];
     const storageKey = `predacy:orders:${walletAddress.toLowerCase()}`;
     try {
@@ -634,14 +666,15 @@ export default function PositionsPanel({
           }
 
           results.push({
-            batchId:        id,
-            batchMarketId:  batchRaw.marketId,
-            batchStatus:    batchRaw.status as BatchStatus,
+            batchId:           id,
+            batchMarketId:     batchRaw.marketId,
+            batchStatus:       batchRaw.status as BatchStatus,
             clearingPrice,
-            marketQuestion: order.marketQuestion,
-            side:           orderSide,
-            position:       { ...posRaw, claimed },
+            marketQuestion:    order.marketQuestion,
+            side:              orderSide,
+            position:          { ...posRaw, claimed },
             shares,
+            proxyWalletAddress: order.proxyWalletAddress,
           });
         } catch { /* batch doesn't exist or RPC hiccup — skip */ }
       })
@@ -906,8 +939,9 @@ export default function PositionsPanel({
                     isClaiming={claimingBatchId === hp.batchId}
                     claimError={claimErrors[hp.batchId.toString()]}
                     isActive={!hp.position.claimed}
+                    proxyWalletAddress={hp.proxyWalletAddress}
                     onClose={
-                      (hp.side === YES_BUY || hp.side === NO_BUY) && hp.position.claimed && onClosePosition
+                      (hp.side === YES_BUY || hp.side === NO_BUY) && hp.position.claimed && !hp.proxyWalletAddress && onClosePosition
                         ? () => onClosePosition(computeYesAmount(hp.position.filledAmount, hp.clearingPrice), hp.clearingPrice)
                         : undefined
                     }
