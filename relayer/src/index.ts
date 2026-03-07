@@ -229,7 +229,7 @@ const server = createServer((req, res) => {
           send(400, { error: "Missing fields: batchId, side, amount, limitPrice, salt" });
           return;
         }
-        if (!missingVars.length === false) {
+        if (missingVars.length > 0) {
           send(503, { error: "Relayer not configured — set VAULT_ADDRESS and RELAYER_PRIVATE_KEY" });
           return;
         }
@@ -239,6 +239,10 @@ const server = createServer((req, res) => {
         const { processor } = state;
 
         const sideNum = Number(side); // 0=YES_BUY, 1=YES_SELL, 2=NO_BUY, 3=NO_SELL
+        if (sideNum < 0 || sideNum > 3 || !Number.isInteger(sideNum)) {
+          send(400, { error: "Invalid side — must be 0 (YES_BUY), 1 (YES_SELL), 2 (NO_BUY), or 3 (NO_SELL)" });
+          return;
+        }
         const order = {
           trader:     (data.signer ?? data.trader) as `0x${string}`,
           side:       sideNum,

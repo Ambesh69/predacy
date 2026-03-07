@@ -35,8 +35,8 @@ const API_KEY  = process.env.POLYMARKET_API_KEY        || "d28ecdf1-2af2-59df-f6
 const API_SEC  = process.env.POLYMARKET_API_SECRET     || "WcznTJ9bllOuLexliC04d-Yf7DWPZXxw2FtcN1Y00sE=";
 const API_PASS = process.env.POLYMARKET_API_PASSPHRASE || "5fff22f57fc4b25c87701569d31095aab099ad299f159a3a75cdd57c44c6bb08";
 
-// Mainnet BatchVault (must have code deployed for POLY_1271 isValidSignature check)
-const VAULT  = (process.env.VAULT_ADDRESS ?? "0x33073E5EB47394937733237517B760B19F10DF36") as `0x${string}`;
+// Mainnet BatchVault v8 (must have code deployed for POLY_1271 isValidSignature check)
+const VAULT  = (process.env.VAULT_ADDRESS ?? "0x44Ed1EA9b420d3B954b5779Eed6CED1deFd1cf21") as `0x${string}`;
 const ZERO   = "0x0000000000000000000000000000000000000000" as `0x${string}`;
 
 // Active Chelsea EPL YES market (negRisk market)
