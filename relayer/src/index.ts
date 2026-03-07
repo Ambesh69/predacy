@@ -1229,35 +1229,46 @@ const poll = async () => {
 
 // ── Startup recovery: re-process any SETTLING batches from before restart ──────
 /**
- * getLogs in chunks to avoid public-RPC block-range limits (~3 500 blocks on Amoy).
- * Retries with half the chunk size on rate-limit / range errors.
+ * getLogs in chunks to avoid public-RPC block-range limits.
+ * Handles Alchemy free-tier (10-block max) and public RPCs (~2000 blocks) automatically.
+ * On range-too-large errors: halves chunk size down to MIN_CHUNK, then retries with delay.
+ * On 503/transient errors: waits 2s and retries once before throwing.
  */
+const MIN_CHUNK = 10n;
 async function getLogsChunked(
   params: Omit<Parameters<typeof publicClient.getLogs>[0], "fromBlock" | "toBlock">,
   fromBlock: bigint,
   toBlock:   bigint,
-  chunkSize  = 1_500n, // 1500 < Alchemy free-tier 2048-block limit; avoids retries in normal operation
+  chunkSize  = 2_000n, // start generous; auto-halves on range errors down to MIN_CHUNK
 ) {
   const all: Awaited<ReturnType<typeof publicClient.getLogs>> = [];
   let from = fromBlock;
+  let currentChunk = chunkSize;
   while (from <= toBlock) {
-    const end = from + chunkSize - 1n < toBlock ? from + chunkSize - 1n : toBlock;
+    const end = from + currentChunk - 1n < toBlock ? from + currentChunk - 1n : toBlock;
     try {
       const chunk = await publicClient.getLogs({ ...params, fromBlock: from, toBlock: end });
       all.push(...chunk);
+      from = end + 1n;
+      // Brief pause when using small chunks to avoid Alchemy free-tier rate limits
+      if (currentChunk <= MIN_CHUNK) await new Promise(r => setTimeout(r, 60));
     } catch (err: unknown) {
       const msg = String(err);
-      // Halve chunk size on range-too-large errors and retry this window.
-      // Min 10 blocks so we can handle even very restrictive RPC providers.
-      if (chunkSize > 10n && (msg.includes("range") || msg.includes("limit") || msg.includes("exceed") || msg.includes("400"))) {
-        console.warn(`[Relayer] getLogs range error, retrying with smaller chunks: ${msg.slice(0, 120)}`);
-        const half = await getLogsChunked(params, from, end, chunkSize / 2n);
-        all.push(...half);
+      const isRangeErr = msg.includes("range") || msg.includes("limit") || msg.includes("exceed") ||
+                         (msg.includes("400") && !msg.includes("503"));
+      const isTransient = msg.includes("503") || msg.includes("502") || msg.includes("Unable to complete");
+      if (isRangeErr && currentChunk > MIN_CHUNK) {
+        // Halve chunk size and retry this window (don't advance `from`)
+        currentChunk = currentChunk / 2n < MIN_CHUNK ? MIN_CHUNK : currentChunk / 2n;
+        continue;
+      } else if (isTransient) {
+        // Brief backoff for transient gateway errors, then retry same window
+        await new Promise(r => setTimeout(r, 2_000));
+        continue;
       } else {
         throw err;
       }
     }
-    from = end + 1n;
   }
   return all;
 }
@@ -1266,14 +1277,26 @@ async function getLogsChunked(
 // BatchSettled. For each one, reconstructs the MarketState and retriggers
 // processBatch() so users' USDC isn't stuck after a Railway redeploy.
 
+// VAULT_DEPLOYED_BLOCK: optional env var to limit getLogs scans to since-deployment.
+// Without it, scans the last 50 000 blocks (~28 h on mainnet). With it, scans from
+// the deployment block — much fewer RPC calls, critical for Alchemy free-tier users.
+const VAULT_DEPLOYED_BLOCK = process.env.VAULT_DEPLOYED_BLOCK
+  ? BigInt(process.env.VAULT_DEPLOYED_BLOCK)
+  : null;
+
 async function recoverSettlingBatches() {
   if (missingVars.length > 0) return;
   console.log("[Relayer] Scanning for SETTLING/LOCKED batches to recover...");
   try {
     const toBlock  = await publicClient.getBlockNumber();
-    // ~50 000 blocks ≈ 70 h on Amoy (5 s/block) / 28 h on Polygon mainnet (2 s/block)
-    // Scanned in 3 000-block chunks to stay within public-RPC getLogs limits.
-    const scanFrom = toBlock > 50_000n ? toBlock - 50_000n : 0n;
+    // ~50 000 blocks ≈ 28 h on Polygon mainnet (2 s/block).
+    // Set VAULT_DEPLOYED_BLOCK env var to limit scan to since-deployment (much faster
+    // on Alchemy free-tier which allows only 10 blocks per getLogs request).
+    const defaultFrom = toBlock > 50_000n ? toBlock - 50_000n : 0n;
+    const scanFrom    = VAULT_DEPLOYED_BLOCK && VAULT_DEPLOYED_BLOCK > defaultFrom
+      ? VAULT_DEPLOYED_BLOCK
+      : defaultFrom;
+    console.log(`[Relayer] Settling scan: blocks ${scanFrom}→${toBlock} (${toBlock - scanFrom} blocks)`);
 
     const [closedLogs, settledLogs] = await Promise.all([
       getLogsChunked({ address: baseConfig.vaultAddress, event: BATCH_CLOSED_EVENT  }, scanFrom, toBlock),
@@ -1360,8 +1383,12 @@ async function recoverOpenBatches() {
   if (missingVars.length > 0) return;
   console.log("[Relayer] Scanning for OPEN batches to recover...");
   try {
-    const toBlock  = await publicClient.getBlockNumber();
-    const scanFrom = toBlock > 50_000n ? toBlock - 50_000n : 0n;
+    const toBlock     = await publicClient.getBlockNumber();
+    const defaultFrom = toBlock > 50_000n ? toBlock - 50_000n : 0n;
+    const scanFrom    = VAULT_DEPLOYED_BLOCK && VAULT_DEPLOYED_BLOCK > defaultFrom
+      ? VAULT_DEPLOYED_BLOCK
+      : defaultFrom;
+    console.log(`[Relayer] Open scan: blocks ${scanFrom}→${toBlock} (${toBlock - scanFrom} blocks)`);
 
     const [openedLogs, closedLogs] = await Promise.all([
       getLogsChunked({ address: baseConfig.vaultAddress, event: BATCH_OPENED_EVENT }, scanFrom, toBlock),
