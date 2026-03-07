@@ -141,26 +141,7 @@ export const BATCH_VAULT_ABI = [
       { name: "netBuyAmount",  type: "uint256" },
       { name: "netSellYes",    type: "uint256" },
       { name: "proof",         type: "bytes"   },
-      {
-        name: "clobOrders",
-        type: "tuple[]",
-        components: [
-          { name: "salt",          type: "uint256" },
-          { name: "maker",         type: "address" },
-          { name: "signer",        type: "address" },
-          { name: "taker",         type: "address" },
-          { name: "tokenId",       type: "uint256" },
-          { name: "makerAmount",   type: "uint256" },
-          { name: "takerAmount",   type: "uint256" },
-          { name: "expiration",    type: "uint256" },
-          { name: "nonce",         type: "uint256" },
-          { name: "feeRateBps",    type: "uint256" },
-          { name: "side",          type: "uint8"   },
-          { name: "signatureType", type: "uint8"   },
-          { name: "signature",     type: "bytes"   },
-        ],
-      },
-      { name: "clobFillAmounts", type: "uint256[]" },
+      // v7.3: clobOrders and clobFillAmounts removed — relayer-intermediary settlement
     ],
     outputs: [],
     stateMutability: "nonpayable",
@@ -259,6 +240,41 @@ const ADAPTER_ABI = [
   },
 ] as const;
 
+// ConditionalTokens ERC-1155 ABI — minimal subset for relayer approval setup
+const CTF_ABI = [
+  {
+    name: "setApprovalForAll",
+    type: "function",
+    inputs:  [{ name: "operator", type: "address" }, { name: "approved", type: "bool" }],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+  {
+    name: "isApprovedForAll",
+    type: "function",
+    inputs:  [{ name: "account", type: "address" }, { name: "operator", type: "address" }],
+    outputs: [{ name: "", type: "bool" }],
+    stateMutability: "view",
+  },
+] as const;
+
+// ERC-20 ABI — minimal subset for USDC approval + allowance check
+const ERC20_ABI = [
+  {
+    name: "approve",
+    type: "function",
+    inputs:  [{ name: "spender", type: "address" }, { name: "amount", type: "uint256" }],
+    outputs: [{ name: "", type: "bool" }],
+    stateMutability: "nonpayable",
+  },
+  {
+    name: "allowance",
+    type: "function",
+    inputs:  [{ name: "owner", type: "address" }, { name: "spender", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+    stateMutability: "view",
+  },
+] as const;
 
 export interface RelayerConfig {
   rpcUrl: string;
@@ -269,7 +285,8 @@ export interface RelayerConfig {
   redisUrl?: string;        // Optional — falls back to in-memory if not set
   useRealZk?: boolean;      // true = generate real UltraHonk proofs via bb; default false (mock)
   adapterAddress?: `0x${string}`; // PublicInputAdapter address (required when useRealZk=true)
-  usdcAddress?:   `0x${string}`;  // USDC contract address (informational; vault approvals set in constructor)
+  usdcAddress?:   `0x${string}`;  // USDC contract address
+  ctfAddress?:    `0x${string}`;  // ConditionalTokens (ERC-1155) contract address
   polymarket: {
     apiKey:          string;
     apiSecret:       string;
@@ -335,6 +352,77 @@ export class BatchProcessor {
       config.rpcUrl,
     );
     this.store = createOrderStore(config.redisUrl);
+  }
+
+  // ─── Approval setup (v7.3 relayer-intermediary) ────────────────────────────
+
+  /**
+   * One-time setup: grant vault approval to pull YES tokens (ERC-1155) and
+   * USDC (ERC-20) from the relayer wallet.
+   *
+   * Called once at startup (or lazily before first settlement on mainnet).
+   *
+   * NET BUY:  vault.safeTransferFrom(relayer → vault, yesNeeded)
+   *   → requires ctf.isApprovedForAll(relayer, vault) == true
+   *
+   * NET SELL: vault.transferFrom(relayer → vault, usdcFromSell)
+   *   → requires usdc.allowance(relayer, vault) >= usdcFromSell
+   *   → we set max allowance once and it covers all batches
+   */
+  async ensureApprovals(): Promise<void> {
+    if (!this.config.ctfAddress || !this.config.usdcAddress) {
+      console.log("[BatchProcessor] ensureApprovals: ctfAddress or usdcAddress not configured — skipping");
+      return;
+    }
+
+    const relayerAddress = this.walletClient.account!.address;
+
+    // ── CTF: setApprovalForAll(vault, true) ─────────────────────────────────
+    const isCtfApproved = await this.publicClient.readContract({
+      address:      this.config.ctfAddress,
+      abi:          CTF_ABI,
+      functionName: "isApprovedForAll",
+      args:         [relayerAddress, this.config.vaultAddress],
+    }) as boolean;
+
+    if (!isCtfApproved) {
+      console.log("[BatchProcessor] ensureApprovals: setting CTF setApprovalForAll(vault, true)");
+      const hash = await this._write({
+        address:      this.config.ctfAddress,
+        abi:          CTF_ABI,
+        functionName: "setApprovalForAll",
+        args:         [this.config.vaultAddress, true],
+        ...chainGas(this.config.chainId),
+      });
+      await this.publicClient.waitForTransactionReceipt({ hash });
+      console.log(`[BatchProcessor] CTF approval set (tx: ${hash})`);
+    } else {
+      console.log("[BatchProcessor] ensureApprovals: CTF already approved ✓");
+    }
+
+    // ── USDC: approve(vault, max) ────────────────────────────────────────────
+    const currentAllowance = await this.publicClient.readContract({
+      address:      this.config.usdcAddress,
+      abi:          ERC20_ABI,
+      functionName: "allowance",
+      args:         [relayerAddress, this.config.vaultAddress],
+    }) as bigint;
+
+    const HALF_MAX = (2n ** 256n - 1n) / 2n;
+    if (currentAllowance < HALF_MAX) {
+      console.log("[BatchProcessor] ensureApprovals: setting USDC approve(vault, max)");
+      const hash = await this._write({
+        address:      this.config.usdcAddress,
+        abi:          ERC20_ABI,
+        functionName: "approve",
+        args:         [this.config.vaultAddress, 2n ** 256n - 1n],
+        ...chainGas(this.config.chainId),
+      });
+      await this.publicClient.waitForTransactionReceipt({ hash });
+      console.log(`[BatchProcessor] USDC max approval set (tx: ${hash})`);
+    } else {
+      console.log("[BatchProcessor] ensureApprovals: USDC allowance already sufficient ✓");
+    }
   }
 
   // ─── Order intake (called from HTTP /order endpoint) ──────────────────────
@@ -662,26 +750,48 @@ export class BatchProcessor {
       `sellYes=${fills.filledSellYes}, netBuy=${fills.netBuyAmount}, netSellYes=${fills.netSellYes}`,
     );
 
-    // ─── 4b. Fetch resting signed CLOB orders for CTFExchange.fillOrders (v7.2) ──
-    // Vault calls fillOrders directly during settleBatch — no relayer capital required.
-    // For net BUY batches: fetch resting SELL orders (makers selling YES for USDC).
-    // For net SELL batches: fetch resting BUY orders (makers buying YES with USDC).
-    let clobOrders: ClobOrderForChain[] = [];
-    let clobFillAmounts: bigint[] = [];
-    if (cachedYesToken && (fills.netBuyAmount > 0n || fills.netSellYes > 0n)) {
-      const side = fills.netBuyAmount > 0n ? "SELL" : "BUY";
-      const amount = fills.netBuyAmount > 0n ? fills.netBuyAmount : fills.netSellYes;
-      try {
-        const result = await this.polymarket.fetchRestingOrders(
-          cachedYesToken, side, amount, this.config.chainId, this.config.marketId,
-        );
-        clobOrders = result.orders;
-        clobFillAmounts = result.fillAmounts;
-        console.log(`[BatchProcessor] Fetched ${clobOrders.length} resting ${side} orders (total: ${amount})`);
-      } catch (err) {
-        console.error(`[BatchProcessor] Failed to fetch CLOB orders — aborting:`, err);
-        throw err; // don't settleBatch without orders to fill
+    // ─── 4b. Pre-buy YES tokens via CLOB (v7.3 relayer-intermediary) ──────────────
+    //
+    // NET BUY (fills.netBuyAmount > 0):
+    //   Relayer buys YES via CLOB API before calling settleBatch.
+    //   vault.settleBatch pulls YES from relayer wallet and reimburses USDC.
+    //   Requires: ctf.isApprovedForAll(relayer, vault) == true (set by ensureApprovals).
+    //   Only runs on mainnet (chainId 137) where CLOB API is available.
+    //
+    // NET SELL (fills.netSellYes > 0):
+    //   Vault pulls USDC from relayer and sends YES to relayer.
+    //   Relayer then sells YES on CLOB off-chain to recover capital.
+    //   Requires: usdc.allowance(relayer, vault) >= usdcFromSell (set by ensureApprovals).
+    //   Post-settlement: relayer calls placeMarketSell to liquidate received YES.
+    //
+    if (cachedYesToken && fills.netBuyAmount > 0n && this.config.chainId === 137) {
+      const yesNeeded = (fills.netBuyAmount * 1_000_000n) / effectiveClearingPrice;
+      console.log(`[BatchProcessor] Net buy: pre-buying ${yesNeeded} YES tokens via CLOB (${fills.netBuyAmount} USDC)`);
+      if (!this.config.ctfAddress) {
+        throw new Error("[BatchProcessor] ctfAddress not set — cannot poll YES balance. Set CTF_ADDRESS env var.");
       }
+      try {
+        await this.polymarket.buyYesForSettlement(
+          cachedYesToken,
+          yesNeeded,
+          fills.netBuyAmount,
+          this.config.ctfAddress,
+        );
+        console.log(`[BatchProcessor] YES tokens acquired — proceeding to settleBatch`);
+      } catch (err) {
+        console.error(`[BatchProcessor] CLOB buy failed — aborting settlement:`, err);
+        throw err;
+      }
+    } else if (cachedYesToken && fills.netSellYes > 0n) {
+      const usdcFromSell = (fills.netSellYes * effectiveClearingPrice) / 1_000_000n;
+      console.log(
+        `[BatchProcessor] Net sell: vault will pull ${usdcFromSell} USDC from relayer, ` +
+        `send ${fills.netSellYes} YES to relayer. ` +
+        `(Relayer sells YES off-chain after settlement)`,
+      );
+      // USDC allowance was already set to max by ensureApprovals() — no additional tx needed.
+    } else if (fills.netBuyAmount > 0n && this.config.chainId !== 137) {
+      console.log(`[BatchProcessor] Testnet: skipping CLOB pre-buy (relayer must have YES pre-minted)`);
     }
 
     // 6. Generate ZK proof (mock in prototype mode; real proof when USE_REAL_ZK=true)
@@ -765,14 +875,25 @@ export class BatchProcessor {
         fills.netBuyAmount,
         fills.netSellYes,
         proof as `0x${string}`,
-        clobOrders,
-        clobFillAmounts,
+        // v7.3: clobOrders and clobFillAmounts removed — relayer-intermediary settlement
       ],
       ...chainGas(this.config.chainId),
     });
 
     await this.publicClient.waitForTransactionReceipt({ hash: settleHash });
     console.log(`[BatchProcessor] Batch ${batchId} settled! tx: ${settleHash}`);
+
+    // 9. Post-settlement: for net-sell batches, sell received YES tokens on CLOB.
+    //    Vault sent YES tokens to relayer during settleBatch — relayer now liquidates them.
+    if (cachedYesToken && fills.netSellYes > 0n && this.config.chainId === 137) {
+      console.log(`[BatchProcessor] Net sell: liquidating ${fills.netSellYes} YES tokens on CLOB`);
+      try {
+        const { orderId } = await this.polymarket.placeMarketSell(cachedYesToken, fills.netSellYes);
+        console.log(`[BatchProcessor] YES sell order placed: orderId=${orderId}`);
+      } catch (sellErr) {
+        console.warn(`[BatchProcessor] YES sell failed (non-fatal — capital at risk):`, sellErr);
+      }
+    }
 
     // Clean up order store
     await this.store.delete(batchId.toString());

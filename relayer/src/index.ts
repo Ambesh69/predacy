@@ -42,7 +42,14 @@ const baseConfig = {
     : undefined,
   usdcAddress: process.env.USDC_ADDRESS
     ? (process.env.USDC_ADDRESS as `0x${string}`)
-    : undefined,
+    : (chainId === polygon.id
+        ? "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174" // Polygon mainnet USDC.e
+        : undefined),
+  ctfAddress: process.env.CTF_ADDRESS
+    ? (process.env.CTF_ADDRESS as `0x${string}`)
+    : (chainId === polygon.id
+        ? "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045" // Polygon mainnet ConditionalTokens
+        : undefined),
 };
 
 const PORT = parseInt(process.env.PORT ?? "3001");
@@ -1248,6 +1255,17 @@ async function recoverOpenBatches() {
 
   // Load permanently-failed batch IDs from Redis BEFORE scanning for SETTLING batches
   await initFailedBatchesStore();
+
+  // v7.3: ensure CTF setApprovalForAll(vault, true) + USDC approve(vault, max) are set once.
+  // Required for relayer-intermediary settlement (pre-buy YES, provide USDC for net-sell).
+  if (missingVars.length === 0 && baseConfig.chainId === polygon.id) {
+    const tempProcessor = new BatchProcessor({ ...baseConfig, marketId: "0x0000000000000000000000000000000000000000000000000000000000000000" as `0x${string}` });
+    try {
+      await tempProcessor.ensureApprovals();
+    } catch (err: any) {
+      console.warn(`[Relayer] ensureApprovals failed (non-fatal — check CTF/USDC approval manually):`, err.message);
+    }
+  }
 
   await recoverSettlingBatches();
   await recoverOpenBatches();

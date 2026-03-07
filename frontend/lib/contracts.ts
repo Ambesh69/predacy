@@ -5,7 +5,7 @@ import { polygon, polygonAmoy } from "viem/chains";
 export const CONTRACTS = {
   // Polygon mainnet (live Polymarket)
   [polygon.id]: {
-    batchVault: "0xA0FAD97A79ceCce2fa66562026dE735CBF7d37eC" as `0x${string}`, // v7.2: vault-as-taker via CTFExchange.fillOrders (no relayer capital required)
+    batchVault: "0x33073E5EB47394937733237517B760B19F10DF36" as `0x${string}`, // v7.3: relayer-intermediary settlement (pre-buys YES via CLOB, no operator access needed)
     usdc: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174" as `0x${string}`,
     ctf:  "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045" as `0x${string}`,
   },

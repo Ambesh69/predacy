@@ -4,7 +4,6 @@ pragma solidity ^0.8.20;
 import "forge-std/Test.sol";
 import "../src/BatchVault.sol";
 import "../src/MockBatchVerifier.sol";
-import "../src/mocks/MockCTFExchange.sol";
 
 /// @notice Minimal ERC-20 mock for USDC
 contract MockUSDC {
@@ -165,7 +164,6 @@ contract BatchVaultTest is Test {
     MockBatchVerifier public verifier;
     MockUSDC public usdc;
     MockCTF public ctf;
-    MockCTFExchange public ctfExchange;
 
     address public relayer = address(0xBEEF);
     address public alice = address(0xA);
@@ -179,9 +177,8 @@ contract BatchVaultTest is Test {
         usdc = new MockUSDC();
         ctf = new MockCTF();
         verifier = new MockBatchVerifier();
-        ctfExchange = new MockCTFExchange();
-        // 6-arg constructor: usdc, ctf, ctfExchange, relayer, batchVerifier, claimVerifier
-        vault = new BatchVault(address(usdc), address(ctf), address(ctfExchange), relayer, address(verifier), address(verifier));
+        // 5-arg constructor: usdc, ctf, relayer, batchVerifier, claimVerifier (v7.3 — no CTFExchange)
+        vault = new BatchVault(address(usdc), address(ctf), relayer, address(verifier), address(verifier));
 
         // Fund traders with USDC
         usdc.mint(alice, 1000e6);
@@ -196,9 +193,16 @@ contract BatchVaultTest is Test {
         vm.prank(carol);
         usdc.approve(address(vault), type(uint256).max);
 
-        // v7.2: vault receives YES tokens directly from CTFExchange.fillOrders.
-        // In tests, pre-mint YES to the vault (clobOrders is empty, so fillOrders is not called).
-        ctf.mintYes(address(usdc), MARKET_ID, address(vault), 1_000_000e6);
+        // v7.3: relayer pre-buys YES tokens from CLOB before calling settleBatch.
+        // In tests, pre-mint YES to the relayer and approve the vault to pull them.
+        ctf.mintYes(address(usdc), MARKET_ID, relayer, 1_000_000e6);
+        vm.prank(relayer);
+        ctf.setApprovalForAll(address(vault), true);
+
+        // Relayer also needs USDC for net-sell batches (vault pulls from relayer, relayer sells YES off-chain).
+        usdc.mint(relayer, 1_000_000e6);
+        vm.prank(relayer);
+        usdc.approve(address(vault), type(uint256).max);
     }
 
     // ─── Helpers ───────────────────────────────────────────────────────────
@@ -551,7 +555,7 @@ contract BatchVaultTest is Test {
         (uint256 buyVol, uint256 sellVol, uint256 netBuy, uint256 netSell) = _buildSettleParams(orders, clearingPrice);
 
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, auths, clearingPrice, buyVol, sellVol, netBuy, netSell, "", new IPolymarketCTF.Order[](0), new uint256[](0));
+        vault.settleBatch(batchId, orders, auths, clearingPrice, buyVol, sellVol, netBuy, netSell, "");
 
         BatchVault.Batch memory b = vault.getBatch(batchId);
         assertEq(uint256(b.status), uint256(BatchVault.BatchStatus.SETTLED));
@@ -577,7 +581,7 @@ contract BatchVaultTest is Test {
 
         vm.expectRevert(BatchVault.CommitmentMismatch.selector);
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, _buildAuths(orders.length), 650000, 100e6, 0, 100e6, 0, "", new IPolymarketCTF.Order[](0), new uint256[](0));
+        vault.settleBatch(batchId, orders, _buildAuths(orders.length), 650000, 100e6, 0, 100e6, 0, "");
     }
 
     function test_settleBatch_invalidClearingPrice_reverts() public {
@@ -594,7 +598,7 @@ contract BatchVaultTest is Test {
 
         vm.expectRevert(BatchVault.InvalidClearingPrice.selector);
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, _buildAuths(orders.length), 0, 100e6, 0, 100e6, 0, "", new IPolymarketCTF.Order[](0), new uint256[](0));
+        vault.settleBatch(batchId, orders, _buildAuths(orders.length), 0, 100e6, 0, 100e6, 0, "");
     }
 
     // ─── Tests: claim position — buy orders ───────────────────────────────
@@ -623,7 +627,7 @@ contract BatchVaultTest is Test {
         orders[0] = BatchVault.RevealedOrder(true, amount, limitAlice, salt);
 
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, _buildAuths(orders.length), 650000, 0, 0, 0, 0, "", new IPolymarketCTF.Order[](0), new uint256[](0));
+        vault.settleBatch(batchId, orders, _buildAuths(orders.length), 650000, 0, 0, 0, 0, "");
 
         // Alice still has all her USDC (never deposited)
         assertEq(usdc.balanceOf(alice), 1000e6);
@@ -667,7 +671,7 @@ contract BatchVaultTest is Test {
 
         (uint256 buyVol, uint256 sellVol, uint256 netBuy, uint256 netSell) = _buildSettleParams(orders, 650000);
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, auths, 650000, buyVol, sellVol, netBuy, netSell, "", new IPolymarketCTF.Order[](0), new uint256[](0));
+        vault.settleBatch(batchId, orders, auths, 650000, buyVol, sellVol, netBuy, netSell, "");
 
         // Carol claims her USDC from filled sell order
         vm.prank(carol);
@@ -716,7 +720,7 @@ contract BatchVaultTest is Test {
 
         (uint256 buyVol, uint256 sellVol, uint256 netBuy, uint256 netSell) = _buildSettleParams(orders, clearingPrice);
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, auths, clearingPrice, buyVol, sellVol, netBuy, netSell, "", new IPolymarketCTF.Order[](0), new uint256[](0));
+        vault.settleBatch(batchId, orders, auths, clearingPrice, buyVol, sellVol, netBuy, netSell, "");
 
         // Carol's position: filledAmount = 80 * 0.65 = 52 USDC
         BatchVault.Position memory pos = vault.getPosition(batchId, cCarol);
@@ -753,7 +757,7 @@ contract BatchVaultTest is Test {
 
         // Settlement with no buy orders — just need clearing price for the verify
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, _buildAuths(orders.length), 650000, 0, 0, 0, 0, "", new IPolymarketCTF.Order[](0), new uint256[](0));
+        vault.settleBatch(batchId, orders, _buildAuths(orders.length), 650000, 0, 0, 0, 0, "");
 
         // Carol's position: no fill, full refund of YES tokens
         BatchVault.Position memory pos = vault.getPosition(batchId, cCarol);
@@ -805,7 +809,7 @@ contract BatchVaultTest is Test {
 
         (uint256 buyVol, uint256 sellVol, uint256 netBuy, uint256 netSell) = _buildSettleParams(orders, clearingPrice);
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, auths, clearingPrice, buyVol, sellVol, netBuy, netSell, "", new IPolymarketCTF.Order[](0), new uint256[](0));
+        vault.settleBatch(batchId, orders, auths, clearingPrice, buyVol, sellVol, netBuy, netSell, "");
 
         BatchVault.Batch memory b = vault.getBatch(batchId);
         // netBuyAmount = 130 - 80*0.65 = 130 - 52 = 78 USDC
@@ -1018,7 +1022,7 @@ contract BatchVaultTest is Test {
         auths[0] = _buyAuth(dave);
 
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, auths, 650000, amount, 0, amount, 0, "", new IPolymarketCTF.Order[](0), new uint256[](0));
+        vault.settleBatch(batchId, orders, auths, 650000, amount, 0, amount, 0, "");
 
         assertEq(uint256(vault.getBatch(batchId).status), uint256(BatchVault.BatchStatus.SETTLED));
 
@@ -1052,12 +1056,11 @@ contract BatchVaultTest is Test {
         uint256 netSellYes = yesCarol;
         uint256 expectedUSDC = yesCarol * clearingPrice / 1e6; // 32_500_000
 
-        // v7.2: in production, CTFExchange.fillOrders pays the vault USDC.
-        // Pre-mint USDC to vault to simulate CTFExchange payment (unit test, empty clobOrders).
-        usdc.mint(address(vault), expectedUSDC);
+        // v7.3: relayer provides USDC to vault (relayer already has USDC + approval from setUp).
+        // No additional mint needed — relayer has 1_000_000e6 USDC pre-minted in setUp().
 
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, _buildAuths(orders.length), clearingPrice, 0, yesCarol, 0, netSellYes, "", new IPolymarketCTF.Order[](0), new uint256[](0));
+        vault.settleBatch(batchId, orders, _buildAuths(orders.length), clearingPrice, 0, yesCarol, 0, netSellYes, "");
 
         // Carol's filledAmount = 50e6 * 0.65 = 32_500_000 USDC
         BatchVault.Position memory pos = vault.getPosition(batchId, cCarol);
@@ -1092,7 +1095,7 @@ contract BatchVaultTest is Test {
 
         vm.expectRevert(BatchVault.OnlyRelayer.selector);
         vm.prank(alice);
-        vault.settleBatch(batchId, orders, _buildAuths(orders.length), 650000, 100e6, 0, 100e6, 0, "", new IPolymarketCTF.Order[](0), new uint256[](0));
+        vault.settleBatch(batchId, orders, _buildAuths(orders.length), 650000, 100e6, 0, 100e6, 0, "");
     }
 
     // ─── Tests: concurrent multi-market ────────────────────────────────────
@@ -1100,8 +1103,8 @@ contract BatchVaultTest is Test {
     function test_twoMarketsConcurrent() public {
         bytes32 MARKET_ID_2 = keccak256("polymarket:will-btc-reach-150k-2026");
 
-        // v7.2: vault holds YES tokens directly (pre-mint for MARKET_ID_2 as setUp does for MARKET_ID)
-        ctf.mintYes(address(usdc), MARKET_ID_2, address(vault), 1_000_000e6);
+        // v7.3: relayer pre-buys YES tokens — mint MARKET_ID_2 YES to relayer (setUp did MARKET_ID).
+        ctf.mintYes(address(usdc), MARKET_ID_2, relayer, 1_000_000e6);
 
         // Fund bob for market 2 (alice already funded in setUp)
         // Both markets open simultaneously
@@ -1150,7 +1153,7 @@ contract BatchVaultTest is Test {
         auths1[0] = _buyAuth(alice);
 
         vm.prank(relayer);
-        vault.settleBatch(batchId1, orders1, auths1, 650000, amtAlice, 0, amtAlice, 0, "", new IPolymarketCTF.Order[](0), new uint256[](0));
+        vault.settleBatch(batchId1, orders1, auths1, 650000, amtAlice, 0, amtAlice, 0, "");
         assertEq(uint256(vault.getBatch(1).status), uint256(BatchVault.BatchStatus.SETTLED));
 
         // Market 2 batch is still OPEN after market 1 settles
@@ -1167,7 +1170,7 @@ contract BatchVaultTest is Test {
         auths2[0] = _buyAuth(bob);
 
         vm.prank(relayer);
-        vault.settleBatch(batchId2, orders2, auths2, 700000, amtBob, 0, amtBob, 0, "", new IPolymarketCTF.Order[](0), new uint256[](0));
+        vault.settleBatch(batchId2, orders2, auths2, 700000, amtBob, 0, amtBob, 0, "");
         assertEq(uint256(vault.getBatch(2).status), uint256(BatchVault.BatchStatus.SETTLED));
 
         // Each trader's position is in the correct batch (keyed by commitment hash)
@@ -1216,7 +1219,7 @@ contract BatchVaultTest is Test {
 
         uint256 clearingPrice = 650000;
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, auths, clearingPrice, amount, 0, amount, 0, "", new IPolymarketCTF.Order[](0), new uint256[](0));
+        vault.settleBatch(batchId, orders, auths, clearingPrice, amount, 0, amount, 0, "");
 
         // After settlement: claimMerkleRoot is set.
         // For a single-order batch, root = commitment (leaf == root since depth=0 padding).
@@ -1272,7 +1275,7 @@ contract BatchVaultTest is Test {
         auths[0] = _buyAuth(alice);
 
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, auths, 650000, amount, 0, amount, 0, "", new IPolymarketCTF.Order[](0), new uint256[](0));
+        vault.settleBatch(batchId, orders, auths, 650000, amount, 0, amount, 0, "");
 
         BatchVault.Batch memory b = vault.getBatch(batchId);
         bytes32[] memory publicInputs = _buildClaimPublicInputs(
@@ -1327,7 +1330,7 @@ contract BatchVaultTest is Test {
         BatchVault.TransferAuth[] memory auths = new BatchVault.TransferAuth[](1);
         auths[0] = _buyAuth(alice);
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, auths, 650000, amount, 0, amount, 0, "", new IPolymarketCTF.Order[](0), new uint256[](0));
+        vault.settleBatch(batchId, orders, auths, 650000, amount, 0, amount, 0, "");
 
         BatchVault.Batch memory b = vault.getBatch(batchId);
 
@@ -1360,7 +1363,7 @@ contract BatchVaultTest is Test {
         BatchVault.TransferAuth[] memory auths = new BatchVault.TransferAuth[](1);
         auths[0] = _buyAuth(alice);
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, auths, 650000, amount, 0, amount, 0, "", new IPolymarketCTF.Order[](0), new uint256[](0));
+        vault.settleBatch(batchId, orders, auths, 650000, amount, 0, amount, 0, "");
 
         // Pass wrong Merkle root
         bytes32[] memory publicInputs = _buildClaimPublicInputs(
@@ -1408,7 +1411,7 @@ contract BatchVaultTest is Test {
 
         (uint256 buyVol, uint256 sellVol, uint256 netBuy, uint256 netSell) = _buildSettleParams(orders, clearingPrice);
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, auths, clearingPrice, buyVol, sellVol, netBuy, netSell, "", new IPolymarketCTF.Order[](0), new uint256[](0));
+        vault.settleBatch(batchId, orders, auths, clearingPrice, buyVol, sellVol, netBuy, netSell, "");
 
         BatchVault.Batch memory b = vault.getBatch(batchId);
 
@@ -1475,7 +1478,7 @@ contract BatchVaultTest is Test {
 
         (uint256 buyVol, uint256 sellVol, uint256 netBuy, uint256 netSell) = _buildSettleParams(orders, clearingPrice);
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, auths, clearingPrice, buyVol, sellVol, netBuy, netSell, "", new IPolymarketCTF.Order[](0), new uint256[](0));
+        vault.settleBatch(batchId, orders, auths, clearingPrice, buyVol, sellVol, netBuy, netSell, "");
 
         BatchVault.Batch memory b = vault.getBatch(batchId);
         uint256 carolFillUSDC = yesCarol * clearingPrice / 1e6;
@@ -1525,7 +1528,7 @@ contract BatchVaultTest is Test {
 
         (uint256 buyVol, uint256 sellVol, uint256 netBuy, uint256 netSell) = _buildSettleParams(orders, clearingPrice);
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, auths, clearingPrice, buyVol, sellVol, netBuy, netSell, "", new IPolymarketCTF.Order[](0), new uint256[](0));
+        vault.settleBatch(batchId, orders, auths, clearingPrice, buyVol, sellVol, netBuy, netSell, "");
 
         BatchVault.Batch memory b = vault.getBatch(batchId);
 

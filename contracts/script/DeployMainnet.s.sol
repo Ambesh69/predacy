@@ -63,9 +63,8 @@ import "../src/BatchVault.sol";
 /// After deployment, update frontend/lib/contracts.ts and relayer .env with printed addresses.
 contract DeployMainnet is Script {
     // Polygon mainnet — these never change
-    address constant REAL_USDC        = 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174;
-    address constant REAL_CTF         = 0x4D97DCd97eC945f40cF65F87097ACe5EA0476045;
-    address constant REAL_CTF_EXCHANGE = 0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E;
+    address constant REAL_USDC = 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174;
+    address constant REAL_CTF  = 0x4D97DCd97eC945f40cF65F87097ACe5EA0476045;
 
     function run() external {
         uint256 deployerKey = vm.envUint("PRIVATE_KEY");
@@ -97,11 +96,11 @@ contract DeployMainnet is Script {
         console.log("ClaimHonkVerifier (claim):", claimVerifier);
 
         // 4. BatchVault — points to real USDC + Polymarket CTF
+        //    v7.3: no CTFExchange param — relayer-intermediary settlement, no operator access needed.
         //    verifier = adapter (not batchVerifier directly)
         BatchVault vault = new BatchVault(
             REAL_USDC,
             REAL_CTF,
-            REAL_CTF_EXCHANGE,    // Polymarket CTFExchange — vault is taker (v7.2)
             deployer,             // relayer — use a dedicated relayer wallet
             address(adapter),     // batch verifier: PublicInputAdapter wrapping HonkVerifier
             claimVerifier

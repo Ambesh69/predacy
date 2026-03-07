@@ -452,6 +452,95 @@ export class PolymarketClient {
     return { orderId: (res.data.orderID ?? res.data.orderId ?? orderId) as string, limitPrice };
   }
 
+  // ─── Settlement: buy YES tokens via CLOB before calling vault.settleBatch ───
+
+  /**
+   * Buy YES tokens from Polymarket CLOB for batch settlement (v7.3 relayer-intermediary).
+   *
+   * Places a FOK (fill-or-kill) market buy for `usdcToSpend` USDC.
+   * Then polls the maker address's on-chain ERC-1155 balance until it reaches
+   * `yesNeeded`, retrying up to 3 times if the first FOK doesn't deliver enough.
+   *
+   * The YES tokens must land in the maker address (= account.address in EOA mode,
+   * or proxyWallet if set) — which must be the same address that calls settleBatch.
+   *
+   * @param tokenId     YES token ID (decimal string)
+   * @param yesNeeded   Amount of YES tokens vault will pull (bigint, 6-dec)
+   * @param usdcToSpend USDC amount to spend (= netBuyAmount from clearing, bigint, 6-dec)
+   * @param ctfAddress  ConditionalTokens ERC-1155 contract address
+   * @throws            If YES balance is still insufficient after 30s
+   */
+  async buyYesForSettlement(
+    tokenId:    string,
+    yesNeeded:  bigint,
+    usdcToSpend: bigint,
+    ctfAddress: string,
+  ): Promise<void> {
+    this._requireSigner();
+    const makerAddress = this.account!.address;
+
+    // ERC-1155 balanceOf ABI
+    const ERC1155_BALANCE_OF = [{
+      name: "balanceOf",
+      type: "function",
+      inputs:  [{ name: "account", type: "address" }, { name: "id", type: "uint256" }],
+      outputs: [{ name: "", type: "uint256" }],
+      stateMutability: "view",
+    }] as const;
+
+    const client = createPublicClient({
+      chain:     polygon,
+      transport: http(this.rpcUrl),
+    });
+
+    // Helper: read YES balance of maker address
+    const getBalance = () => client.readContract({
+      address:      ctfAddress as `0x${string}`,
+      abi:          ERC1155_BALANCE_OF,
+      functionName: "balanceOf",
+      args:         [makerAddress, BigInt(tokenId)],
+    }) as Promise<bigint>;
+
+    // Check existing balance before buying
+    const preBuyBalance = await getBalance();
+    if (preBuyBalance >= yesNeeded) {
+      console.log(`[PolymarketClient] Relayer already has ${preBuyBalance} YES — no CLOB buy needed`);
+      return;
+    }
+
+    const deficit = yesNeeded - preBuyBalance;
+    console.log(`[PolymarketClient] Need ${yesNeeded} YES, have ${preBuyBalance}, deficit=${deficit}`);
+
+    // Place FOK market buy — spend usdcToSpend to get at least deficit YES tokens.
+    // The clearing price ≥ CLOB ask price (protocol invariant), so spending all
+    // netBuyAmount USDC at the CLOB ask should yield ≥ yesNeeded tokens.
+    console.log(`[PolymarketClient] Placing FOK buy: ${usdcToSpend} USDC for YES token ${tokenId.slice(0, 10)}…`);
+    const { orderId, limitPrice } = await this.placeMarketBuy(tokenId, usdcToSpend);
+    console.log(`[PolymarketClient] FOK order placed: orderId=${orderId}, limitPrice=${limitPrice}`);
+
+    // Poll for YES tokens to arrive (Polygon block time ~2s, allow up to 30s)
+    const POLL_MS = 2500;
+    const MAX_POLLS = 12; // 30s total
+    for (let i = 0; i < MAX_POLLS; i++) {
+      await new Promise(r => setTimeout(r, POLL_MS));
+      const balance = await getBalance();
+      console.log(`[PolymarketClient] YES balance check ${i + 1}/${MAX_POLLS}: ${balance} (need ${yesNeeded})`);
+      if (balance >= yesNeeded) {
+        console.log(`[PolymarketClient] YES tokens received! balance=${balance}`);
+        return;
+      }
+    }
+
+    // Last chance: read balance one more time
+    const finalBalance = await getBalance();
+    if (finalBalance >= yesNeeded) return;
+
+    throw new Error(
+      `[PolymarketClient] Timeout: YES balance ${finalBalance} < needed ${yesNeeded} after 30s. ` +
+      `orderId=${orderId}. Batch settlement aborted.`,
+    );
+  }
+
   // ─── Internal: EIP-712 order building + signing ─────────────────────────────
 
   /**
