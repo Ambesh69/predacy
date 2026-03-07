@@ -38,9 +38,7 @@ import {
   encodeAbiParameters,
   parseAbiParameters,
   concat,
-  pad,
   toBytes,
-  toHex,
 } from "viem";
 
 // ── Railgun mainnet address (Polygon) ────────────────────────────────────────
@@ -172,7 +170,42 @@ export interface BatchPayload {
   payloads: Hex[];
 }
 
-// ── Core function ─────────────────────────────────────────────────────────────
+// ── Core functions ────────────────────────────────────────────────────────────
+
+/**
+ * Build the 2-call WRAP batch (no Railgun shield) that the ProxyWallet will execute to:
+ *   1. setApprovalForAll(wrappedToken, true) on CTF (allows wrappedToken to pull ERC-1155)
+ *   2. wrap(amount) on WrappedCTFToken (ERC-1155 → ERC-20)
+ *
+ * Used after claimWithProof when Alice has tokens in ProxyWallet but is not yet ready
+ * to shield to Railgun (e.g., doesn't have Railgun NPK/ciphertext at claim time).
+ * The resulting ERC-20 sits in the ProxyWallet until Alice manually shields via app.railgun.org.
+ */
+export function buildWrapBatch(
+  ctfAddress:   Address,
+  wrappedToken: Address,
+  amount:       bigint,
+): BatchPayload {
+  // 1. CTF.setApprovalForAll(wrappedToken, true)
+  const ctfApprovalCalldata = encodeFunctionData({
+    abi:          CTF_ABI,
+    functionName: "setApprovalForAll",
+    args:         [wrappedToken, true],
+  });
+
+  // 2. WrappedCTFToken.wrap(amount)
+  const wrapCalldata = encodeFunctionData({
+    abi:          WRAPPED_CTF_ABI,
+    functionName: "wrap",
+    args:         [amount],
+  });
+
+  return {
+    targets:  [ctfAddress, wrappedToken],
+    values:   [0n, 0n],
+    payloads: [ctfApprovalCalldata, wrapCalldata],
+  };
+}
 
 /**
  * Build the batch of calls that the ProxyWallet will execute to:
@@ -251,13 +284,16 @@ export function buildShieldBatch(params: ShieldParams): BatchPayload {
 
 /**
  * Build the digest that Alice's ephemeral EOA must sign for batchExecuteWithSig.
- * Mirrors ProxyWallet._batchMetaTxDigest + _recoverEthSign exactly.
+ * Mirrors ProxyWallet._batchMetaTxDigest exactly.
  *
  * @param nonce         Current ProxyWallet nonce.
  * @param chainId       Chain ID (137 for Polygon mainnet).
  * @param proxyWallet   ProxyWallet address.
- * @param batch         Batch payload from buildShieldBatch().
- * @returns             The eth_sign digest to sign with the ephemeral EOA key.
+ * @param batch         Batch payload from buildShieldBatch() or buildWrapBatch().
+ * @returns             The raw inner digest. Caller must sign with:
+ *                        account.signMessage({ message: { raw: digest } })
+ *                      which applies the "\x19Ethereum Signed Message:\n32" prefix
+ *                      that ProxyWallet._recoverEthSign() expects.
  */
 export function buildBatchMetaTxDigest(
   nonce:       bigint,
@@ -265,23 +301,17 @@ export function buildBatchMetaTxDigest(
   proxyWallet: Address,
   batch:       BatchPayload,
 ): Hex {
-  // Hash each payload element (mirrors _hashBytesArray)
+  // Hash each payload element (mirrors _hashBytesArray in ProxyWallet.sol)
   const payloadHashes = batch.payloads.map(p => keccak256(p));
   const payloadsHash  = keccak256(concat(payloadHashes.map(h => toBytes(h))));
 
-  // Build inner digest
-  const innerDigest = keccak256(encodeAbiParameters(
+  // Inner digest = keccak256(abi.encode(nonce, chainId, proxyWallet, targets, values, payloadsHash))
+  // The contract's _recoverEthSign() applies "\x19Ethereum Signed Message:\n32" + innerDigest
+  // before ecrecover — which is exactly what viem's signMessage({ raw: innerDigest }) produces.
+  return keccak256(encodeAbiParameters(
     parseAbiParameters("uint256, uint256, address, address[], uint256[], bytes32"),
     [nonce, BigInt(chainId), proxyWallet, batch.targets, batch.values, payloadsHash],
   ));
-
-  // eth_sign prefix: "\x19Ethereum Signed Message:\n32" + innerDigest
-  const prefixed = keccak256(concat([
-    toBytes("\x19Ethereum Signed Message:\n32"),
-    toBytes(innerDigest),
-  ]));
-
-  return prefixed;
 }
 
 // ── Convenience: full payload for submitShield ────────────────────────────────

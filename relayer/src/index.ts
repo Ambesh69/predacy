@@ -6,6 +6,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { createWalletClient } from "viem";
 import { BatchProcessor, BATCH_VAULT_ABI, type RelayerConfig, type RequeueResult } from "./batchProcessor.js";
 import { ZKClaimProver } from "./zkClaimProver.js";
+import { ProxyWalletManager } from "./proxyWalletManager.js";
 
 // ── Environment ───────────────────────────────────────────────────────────────
 const missingVars = ["VAULT_ADDRESS", "RELAYER_PRIVATE_KEY"].filter((v) => !process.env[v]);
@@ -388,9 +389,19 @@ const server = createServer((req, res) => {
   // ZK claim: user sends their order preimage; relayer builds Merkle path,
   // generates ZK proof, calls claimWithProof() on-chain, and returns txHash.
   //
-  // Body: { batchId, marketId, side, amount, limitPrice, salt, recipient }
-  //   side: 0=YES_BUY, 1=YES_SELL, 2=NO_BUY, 3=NO_SELL (v8, replaces isBuy bool)
-  // Response: { ok: true, txHash }
+  // Body: { batchId, marketId, side, amount, limitPrice, salt, recipient,
+  //         proxyWallet?, ctfTokenId? }
+  //   side: 0=YES_BUY, 1=YES_SELL, 2=NO_BUY, 3=NO_SELL (v8)
+  //   proxyWallet: if set, tokens go to this ProxyWallet address
+  //   ctfTokenId:  CTF ERC-1155 tokenId for the YES or NO outcome (decimal string)
+  //                Required when proxyWallet is set; used to deploy wrapper + build wrap digest.
+  //
+  // Response: { ok: true, txHash, wrapDigest?, wrappedToken?, ctfAddress?, tokenAmount? }
+  //   When proxyWallet + ctfTokenId are provided, the response also includes:
+  //     wrapDigest:  inner digest for the 2-call wrap batch (sign with signMessage({ raw: ... }))
+  //     wrappedToken: WrappedCTFToken ERC-20 address
+  //     ctfAddress:  CTF ERC-1155 address
+  //     tokenAmount: token balance of ProxyWallet after claim (string, bigint-safe)
   //
   // Privacy: the relayer submits claimWithProof() as msg.sender — neither the
   // user's address nor which specific order is being claimed appears on-chain.
@@ -401,7 +412,8 @@ const server = createServer((req, res) => {
     req.on("end", async () => {
       try {
         const data = JSON.parse(body);
-        const { batchId, marketId, side, amount, limitPrice, salt, recipient } = data;
+        const { batchId, marketId, side, amount, limitPrice, salt, recipient,
+                proxyWallet, ctfTokenId } = data;
 
         if (!batchId || !marketId || side === undefined || !amount || !limitPrice || !salt || !recipient) {
           send(400, { error: "Missing fields: batchId, marketId, side, amount, limitPrice, salt, recipient" });
@@ -429,7 +441,8 @@ const server = createServer((req, res) => {
           commitmentCount: bigint;
         };
 
-        if (batchRaw.status !== 2 /* SETTLED */) {
+        // v9 BatchStatus: OPEN=0, SETTLING=1, LOCKED=2, SETTLED=3
+        if (batchRaw.status !== 3 /* SETTLED */) {
           send(400, { error: `Batch ${batchId} is not yet settled (status=${batchRaw.status})` });
           return;
         }
@@ -464,12 +477,8 @@ const server = createServer((req, res) => {
         });
 
         // 4. Submit claimWithProof() on-chain (relayer is msg.sender — no trader address leaked)
-        const account     = privateKeyToAccount(baseConfig.relayerPrivateKey);
-        const chain       = baseConfig.chainId === polygon.id ? polygon : polygonAmoy;
-        const walletClient = createWalletClient({ chain, transport: http(baseConfig.rpcUrl), account });
-
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const txHash = await (walletClient.writeContract as (p: any) => Promise<`0x${string}`>)({
+        const txHash = await (walletClientGlobal.writeContract as (p: any) => Promise<`0x${string}`>)({
           address:      baseConfig.vaultAddress,
           abi:          BATCH_VAULT_ABI,
           functionName: "claimWithProof",
@@ -481,10 +490,113 @@ const server = createServer((req, res) => {
         await publicClient.waitForTransactionReceipt({ hash: txHash });
         console.log(`[Relayer] claimWithProof tx: ${txHash} (batch ${batchId}, recipient ${recipient})`);
 
+        // 5. If ProxyWallet + CTF token ID provided, build wrap digest for the frontend to sign.
+        //    Relayer deploys WrappedCTFToken if not already deployed (relayer pays gas).
+        //    The actual wrap is executed via POST /wrap-execute after the frontend signs.
+        const pwm = getProxyWalletManager();
+        if (proxyWallet && ctfTokenId && pwm && baseConfig.ctfAddress) {
+          try {
+            const ctfTokenIdBig = BigInt(ctfTokenId);
+            const sideNum = Number(side);
+
+            // Ensure ProxyWallet is deployed (deploying it here is fine since tokens
+            // were sent to it by claimWithProof — they'd be stuck if wallet not deployed).
+            await pwm.ensureDeployed(proxyWallet as `0x${string}`);
+
+            // Deploy WrappedCTFToken wrapper for this positionId if needed.
+            const tokenName   = (sideNum === 0) ? "wYES" : "wNO";
+            const tokenSymbol = tokenName;
+            const wrappedToken = await pwm.ensureWrapper(ctfTokenIdBig, tokenName, tokenSymbol);
+
+            // Read ProxyWallet's actual token balance (exact amount received from claim).
+            const tokenBalance = await publicClient.readContract({
+              address:      baseConfig.ctfAddress,
+              abi:          CTF_BALANCE_ABI,
+              functionName: "balanceOf",
+              args:         [proxyWallet as `0x${string}`, ctfTokenIdBig],
+            }) as bigint;
+
+            if (tokenBalance === 0n) {
+              // Order wasn't filled (limit below clearing price) — no tokens to wrap.
+              console.log(`[Relayer] ProxyWallet ${proxyWallet} has 0 tokens — skip wrap digest`);
+              send(200, { ok: true, txHash });
+              return;
+            }
+
+            // Build the 2-call wrap batch digest for the frontend to sign.
+            const wrapDigest = await pwm.buildWrapDigest(
+              proxyWallet  as `0x${string}`,
+              baseConfig.ctfAddress,
+              wrappedToken,
+              tokenBalance,
+            );
+
+            console.log(`[Relayer] wrap digest ready for proxy ${proxyWallet}: ${tokenBalance} tokens`);
+            send(200, {
+              ok:           true,
+              txHash,
+              wrapDigest,
+              wrappedToken,
+              ctfAddress:   baseConfig.ctfAddress,
+              tokenAmount:  tokenBalance.toString(),
+            });
+          } catch (wrapErr: any) {
+            // Non-fatal: claim succeeded, wrap setup failed. Frontend can retry /wrap-execute later.
+            console.error("[Relayer] wrap digest setup failed (claim OK):", wrapErr?.message ?? wrapErr);
+            send(200, { ok: true, txHash, wrapError: wrapErr?.message ?? "Wrap setup failed" });
+          }
+          return;
+        }
+
         send(200, { ok: true, txHash });
       } catch (e: any) {
         console.error("[Relayer] /claim-proof error:", e?.message ?? e);
         send(400, { error: e?.message ?? "Claim proof failed" });
+      }
+    });
+    return;
+  }
+
+  // POST /wrap-execute
+  //
+  // Execute the 2-call wrap batch (CTF.setApprovalForAll + WrappedCTFToken.wrap) on behalf
+  // of a ProxyWallet. Alice signs the wrap digest returned by /claim-proof; the relayer
+  // submits the batchExecuteWithSig tx (pays MATIC — Alice never needs gas).
+  //
+  // Body: { proxyWallet, wrappedToken, ctfAddress, tokenAmount, wrapSig }
+  // Response: { ok: true, wrapTxHash }
+  if (req.method === "POST" && req.url === "/wrap-execute") {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", async () => {
+      try {
+        const data = JSON.parse(body);
+        const { proxyWallet, wrappedToken, ctfAddress, tokenAmount, wrapSig } = data;
+
+        if (!proxyWallet || !wrappedToken || !ctfAddress || !tokenAmount || !wrapSig) {
+          send(400, { error: "Missing fields: proxyWallet, wrappedToken, ctfAddress, tokenAmount, wrapSig" });
+          return;
+        }
+
+        const pwm = getProxyWalletManager();
+        if (!pwm) {
+          send(503, { error: "ProxyWalletManager not configured — set PROXY_WALLET_FACTORY and WRAPPED_CTF_FACTORY" });
+          return;
+        }
+
+        const wrapTxHash = await pwm.submitWrapBatch(
+          proxyWallet  as `0x${string}`,
+          ctfAddress   as `0x${string}`,
+          wrappedToken as `0x${string}`,
+          BigInt(tokenAmount),
+          wrapSig      as `0x${string}`,
+        );
+
+        console.log(`[Relayer] wrap batch tx: ${wrapTxHash} (proxy ${proxyWallet})`);
+        send(200, { ok: true, wrapTxHash });
+      } catch (e: any) {
+        console.error("[Relayer] /wrap-execute error:", e?.message ?? e);
+        send(400, { error: e?.message ?? "Wrap execution failed" });
       }
     });
     return;
@@ -679,6 +791,44 @@ const publicClient = createPublicClient({
   chain,
   transport: http(baseConfig.rpcUrl, { retryCount: 3 }),
 });
+
+// Global wallet client — shared by /claim-proof and /wrap-execute endpoints.
+const relayerAccount = privateKeyToAccount(baseConfig.relayerPrivateKey);
+const walletClientGlobal = createWalletClient({
+  chain,
+  transport: http(baseConfig.rpcUrl),
+  account:   relayerAccount,
+});
+
+// CTF ABI fragment for balanceOf — used to read ProxyWallet token balance after claim.
+const CTF_BALANCE_ABI = [{
+  name:            "balanceOf",
+  type:            "function" as const,
+  inputs:          [{ name: "account", type: "address" }, { name: "id", type: "uint256" }],
+  outputs:         [{ name: "", type: "uint256" }],
+  stateMutability: "view",
+}] as const;
+
+// Lazy singleton ProxyWalletManager — initialised on first use if env vars are present.
+let _proxyWalletManager: ProxyWalletManager | null = null;
+function getProxyWalletManager(): ProxyWalletManager | null {
+  const factoryAddress  = process.env.PROXY_WALLET_FACTORY  as `0x${string}` | undefined;
+  const wrappedCtfFactory = process.env.WRAPPED_CTF_FACTORY as `0x${string}` | undefined;
+  const ctfAddress      = baseConfig.ctfAddress;
+  if (!factoryAddress || !wrappedCtfFactory || !ctfAddress) return null;
+  if (!_proxyWalletManager) {
+    _proxyWalletManager = new ProxyWalletManager({
+      factoryAddress,
+      wrappedCtfFactory,
+      ctfAddress,
+      walletClient: walletClientGlobal,
+      publicClient,
+      chainId: baseConfig.chainId,
+    });
+    console.log("[Relayer] ProxyWalletManager initialised");
+  }
+  return _proxyWalletManager;
+}
 
 const BATCH_OPENED_EVENT = parseAbiItem(
   "event BatchOpened(uint256 indexed batchId, bytes32 indexed marketId, uint256 openedAt)",

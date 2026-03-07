@@ -37,6 +37,7 @@ import {
 import { polygon, polygonAmoy } from "viem/chains";
 import {
   buildShieldBatch,
+  buildWrapBatch,
   buildBatchMetaTxDigest,
   RAILGUN_SMART_WALLET,
   type ShieldParams,
@@ -297,12 +298,78 @@ export class ProxyWalletManager {
     return hash;
   }
 
-  // ── Digest (for Alice to sign client-side before claim) ───────────────────
+  // ── Wrap batch (ERC-1155 → ERC-20, no Railgun shield) ────────────────────
 
   /**
-   * Build the batch meta-tx digest Alice's ephemeral key must sign.
-   * Called by the frontend when Alice requests a claim — the frontend signs
-   * this digest and includes it in the /claim-proof request.
+   * Build the 2-call wrap batch digest Alice's ephemeral key must sign.
+   * Returns the inner digest — caller signs with:
+   *   account.signMessage({ message: { raw: digest } })
+   *
+   * @param proxyWallet  ProxyWallet address.
+   * @param ctfAddress   CTF (ERC-1155) contract address.
+   * @param wrappedToken WrappedCTFToken ERC-20 address (wYES or wNO).
+   * @param amount       Amount of CTF tokens to wrap (same units as ERC-1155).
+   */
+  async buildWrapDigest(
+    proxyWallet:  Address,
+    ctfAddress:   Address,
+    wrappedToken: Address,
+    amount:       bigint,
+  ): Promise<Hex> {
+    const nonce = await this.cfg.publicClient.readContract({
+      address:      proxyWallet,
+      abi:          PROXY_WALLET_ABI,
+      functionName: "nonce",
+    }) as bigint;
+
+    const batch = buildWrapBatch(ctfAddress, wrappedToken, amount);
+    return buildBatchMetaTxDigest(nonce, this.cfg.chainId, proxyWallet, batch);
+  }
+
+  /**
+   * Submit the 2-call wrap batch on behalf of the ProxyWallet owner.
+   * Alice signs buildWrapDigest() client-side; relayer submits (pays MATIC).
+   *
+   * @param proxyWallet  ProxyWallet address.
+   * @param ctfAddress   CTF (ERC-1155) contract address.
+   * @param wrappedToken WrappedCTFToken ERC-20 address.
+   * @param amount       Amount of tokens to wrap.
+   * @param sig          Alice's ephemeral EOA signature over the wrap digest.
+   */
+  async submitWrapBatch(
+    proxyWallet:  Address,
+    ctfAddress:   Address,
+    wrappedToken: Address,
+    amount:       bigint,
+    sig:          Hex,
+  ): Promise<Hex> {
+    const batch = buildWrapBatch(ctfAddress, wrappedToken, amount);
+
+    console.log(
+      `[ProxyWalletManager] submitting wrap batch for proxy ${proxyWallet}: ` +
+      `${amount} of token → ${wrappedToken} (ERC-20)`
+    );
+
+    const { request } = await this.cfg.publicClient.simulateContract({
+      address:      proxyWallet,
+      abi:          PROXY_WALLET_ABI,
+      functionName: "batchExecuteWithSig",
+      args:         [batch.targets, batch.values, batch.payloads, sig],
+      account:      this.cfg.walletClient.account,
+    });
+    const hash = await this.cfg.walletClient.writeContract(request as any);
+    await this.cfg.publicClient.waitForTransactionReceipt({ hash });
+
+    console.log(`[ProxyWalletManager] wrap batch confirmed: ${hash}`);
+    return hash;
+  }
+
+  // ── Digest (for Alice to sign client-side before shield) ──────────────────
+
+  /**
+   * Build the full 4-call shield batch meta-tx digest Alice's ephemeral key must sign.
+   * Called by the frontend when Alice requests a full Railgun shield — provides NPK,
+   * encryptedBundle, shieldKey from her Railgun wallet.
    */
   async buildShieldDigest(
     proxyWallet:  Address,

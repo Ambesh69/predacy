@@ -734,7 +734,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       const storedOrders: Array<{
         commitment: string; salt: string; side?: number; isBuy?: boolean;
         amount: string; limitPrice: string; batchId: string; marketId: string;
-        ephemeralKey?: string; ephemeralAddress?: string;
+        ephemeralKey?: string; ephemeralAddress?: string; ctfTokenId?: string | null;
       }> = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
       const myOrder = storedOrders.find((o) => o.batchId === batchId.toString());
       if (!myOrder) throw new Error("Order preimage not found in local storage — cannot claim");
@@ -774,8 +774,8 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
 
       // POST order preimage + desired recipient to relayer.
       // Relayer generates ZK proof and submits claimWithProof on-chain (relayer = msg.sender).
-      // When proxyWallet is set, relayer will also submit the post-claim shield batch
-      // (wrap ERC-1155 → ERC-20 → Railgun.shield) once tokens arrive at the proxy wallet.
+      // When proxyWallet + ctfTokenId are set, relayer also deploys the wrapper and returns
+      // a wrapDigest for Alice to sign (wrap ERC-1155 → ERC-20 in the ProxyWallet).
       const resp = await fetch(`${relayerUrl}/claim-proof`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -791,6 +791,8 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
           ...(proxyWalletAddress ? {
             proxyWallet:      proxyWalletAddress,
             ephemeralAddress: myOrder.ephemeralAddress,
+            // CTF tokenId lets relayer deploy wrapper + build wrap digest
+            ctfTokenId:       myOrder.ctfTokenId ?? undefined,
           } : {}),
         }),
       });
@@ -800,20 +802,64 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         throw new Error(err.error ?? `Claim request failed (${resp.status})`);
       }
 
-      const { txHash } = await resp.json();
+      const claimResult = await resp.json();
+      const { txHash, wrapDigest, wrappedToken, ctfAddress: wrapCtfAddress, tokenAmount } = claimResult;
 
       const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash as `0x${string}` });
       if (receipt.status === "reverted") {
         throw new Error("Claim transaction reverted — the batch may not be fully settled yet. Try again in a few seconds.");
       }
 
-      // Persist claimed=true + proxyWalletAddress to localStorage.
-      // proxyWalletAddress lets PositionsPanel show the "Shield to Railgun" prompt.
+      // If relayer returned a wrapDigest, sign it with the ephemeral key and call /wrap-execute.
+      // This wraps the CTF ERC-1155 tokens to ERC-20 inside the ProxyWallet (relayer pays gas).
+      let wrapTxHash: string | null = null;
+      if (wrapDigest && wrappedToken && wrapCtfAddress && tokenAmount && proxyWalletAddress && myOrder.ephemeralKey) {
+        try {
+          const ephemeralAccount = privateKeyToAccount(myOrder.ephemeralKey as `0x${string}`);
+          // Sign with signMessage — viem applies the eth_sign prefix that ProxyWallet expects.
+          const wrapSig = await ephemeralAccount.signMessage({
+            message: { raw: wrapDigest as `0x${string}` },
+          });
+
+          const wrapResp = await fetch(`${relayerUrl}/wrap-execute`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              proxyWallet: proxyWalletAddress,
+              wrappedToken,
+              ctfAddress:  wrapCtfAddress,
+              tokenAmount,
+              wrapSig,
+            }),
+          });
+
+          if (wrapResp.ok) {
+            const wrapResult = await wrapResp.json();
+            wrapTxHash = wrapResult.wrapTxHash ?? null;
+            console.log("[Predacy] Wrap batch confirmed:", wrapTxHash);
+          } else {
+            const wrapErr = await wrapResp.json().catch(() => ({}));
+            console.warn("[Predacy] Wrap batch failed:", wrapErr.error ?? wrapResp.status);
+            // Non-fatal — claim succeeded, tokens are in ProxyWallet as ERC-1155.
+            // User can retry wrapping manually via app.railgun.org or future UI.
+          }
+        } catch (wrapErr: any) {
+          console.warn("[Predacy] Wrap batch error (tokens still in ProxyWallet):", wrapErr?.message);
+          // Non-fatal.
+        }
+      }
+
+      // Persist claimed=true + proxyWalletAddress (and wrappedToken if wrap succeeded).
       try {
         const allOrders: Array<Record<string, unknown>> = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
         const updated = allOrders.map((o) =>
           o.batchId === batchId.toString()
-            ? { ...o, claimed: true, ...(proxyWalletAddress ? { proxyWalletAddress } : {}) }
+            ? {
+                ...o,
+                claimed: true,
+                ...(proxyWalletAddress ? { proxyWalletAddress } : {}),
+                ...(wrapTxHash && wrappedToken ? { wrappedToken, wrapTxHash } : {}),
+              }
             : o
         );
         localStorage.setItem(storageKey, JSON.stringify(updated));
@@ -821,9 +867,14 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
 
       setBalanceVersion(v => v + 1);
 
-      if (proxyWalletAddress) {
+      if (proxyWalletAddress && wrapTxHash) {
         pushToast(
-          "Position claimed — tokens sent to your ProxyWallet. Shield via Railgun to complete privacy.",
+          "Position claimed + tokens wrapped to ERC-20. Visit app.railgun.org to shield into Railgun.",
+          "success"
+        );
+      } else if (proxyWalletAddress) {
+        pushToast(
+          "Position claimed — tokens in ProxyWallet. Shield via Railgun to complete privacy.",
           "success"
         );
       } else {
@@ -1126,6 +1177,11 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
               timestamp:        Date.now(),
               ephemeralKey:     ephemeralPrivateKey,
               ephemeralAddress,
+              // CTF ERC-1155 tokenId for the outcome token — used for wrap-after-claim.
+              // side=0 (YES_BUY) receives YES tokens; side=2 (NO_BUY) receives NO tokens.
+              ctfTokenId: params.side === 0
+                ? (selectedMarket.tokens?.[0]?.token_id ?? null)
+                : (selectedMarket.tokens?.[1]?.token_id ?? null),
             });
             localStorage.setItem(key, JSON.stringify(existing.slice(0, 200)));
           } catch { /* ignore */ }
