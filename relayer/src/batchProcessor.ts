@@ -462,28 +462,62 @@ export class BatchProcessor {
       console.log("[BatchProcessor] ensureApprovals: CTF already approved ✓");
     }
 
-    // ── USDC: approve(vault, max) ────────────────────────────────────────────
-    const currentAllowance = await this.publicClient.readContract({
+    // ── USDC: approve(vault, max) — vault pulls USDC from relayer in settleBatch ──
+    const HALF_MAX = (2n ** 256n - 1n) / 2n;
+    const MAX_UINT = 2n ** 256n - 1n;
+
+    const vaultAllowance = await this.publicClient.readContract({
       address:      this.config.usdcAddress,
       abi:          ERC20_ABI,
       functionName: "allowance",
       args:         [relayerAddress, this.config.vaultAddress],
     }) as bigint;
 
-    const HALF_MAX = (2n ** 256n - 1n) / 2n;
-    if (currentAllowance < HALF_MAX) {
+    if (vaultAllowance < HALF_MAX) {
       console.log("[BatchProcessor] ensureApprovals: setting USDC approve(vault, max)");
       const hash = await this._write({
         address:      this.config.usdcAddress,
         abi:          ERC20_ABI,
         functionName: "approve",
-        args:         [this.config.vaultAddress, 2n ** 256n - 1n],
+        args:         [this.config.vaultAddress, MAX_UINT],
         ...chainGas(this.config.chainId),
       });
       await this.publicClient.waitForTransactionReceipt({ hash });
-      console.log(`[BatchProcessor] USDC max approval set (tx: ${hash})`);
+      console.log(`[BatchProcessor] USDC max approval set for vault (tx: ${hash})`);
     } else {
       console.log("[BatchProcessor] ensureApprovals: USDC allowance already sufficient ✓");
+    }
+
+    // ── USDC: approve(CTFExchange + NegRiskExchange, max) ───────────────────
+    // When the relayer places a CLOB BUY order (to acquire gap YES/NO tokens),
+    // Polymarket's exchange contracts pull USDC from the relayer's wallet.
+    // Both the standard CTFExchange and the NegRisk exchange need approval.
+    const CTF_EXCHANGE      = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E" as const;
+    const NEG_RISK_EXCHANGE = "0xC5d563A36AE78145C45a50134d48A1215220f80a" as const;
+
+    for (const exchange of [CTF_EXCHANGE, NEG_RISK_EXCHANGE] as const) {
+      const label = exchange === CTF_EXCHANGE ? "CTFExchange" : "NegRiskExchange";
+      const exchAllowance = await this.publicClient.readContract({
+        address:      this.config.usdcAddress,
+        abi:          ERC20_ABI,
+        functionName: "allowance",
+        args:         [relayerAddress, exchange],
+      }) as bigint;
+
+      if (exchAllowance < HALF_MAX) {
+        console.log(`[BatchProcessor] ensureApprovals: setting USDC approve(${label}, max)`);
+        const hash = await this._write({
+          address:      this.config.usdcAddress,
+          abi:          ERC20_ABI,
+          functionName: "approve",
+          args:         [exchange, MAX_UINT],
+          ...chainGas(this.config.chainId),
+        });
+        await this.publicClient.waitForTransactionReceipt({ hash });
+        console.log(`[BatchProcessor] USDC max approval set for ${label} (tx: ${hash})`);
+      } else {
+        console.log(`[BatchProcessor] ensureApprovals: USDC allowance for ${label} already sufficient ✓`);
+      }
     }
   }
 
