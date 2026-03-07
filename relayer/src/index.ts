@@ -1085,7 +1085,7 @@ const poll = async () => {
           args:    [state.currentBatchId],
         }) as { status: number; openedAt: bigint; commitmentCount: bigint };
 
-        const OPEN = 0, SETTLING = 1, SETTLED = 2;
+        const OPEN = 0, SETTLING = 1, LOCKED = 2, SETTLED = 3;
 
         if (batchInfo.status === OPEN) {
           const nowSec    = Math.floor(Date.now() / 1000);
@@ -1125,6 +1125,10 @@ const poll = async () => {
             })
             .catch((err) => onSettleFail(state, marketKey, settlingId, err))
             .finally(() => { state.processingBatch = false; state.settlingBatchId = null; });
+        } else if (batchInfo.status === LOCKED) {
+          // LOCKED = between lockFunds() and settleBatch() — two-phase settlement in progress.
+          // The event-driven path (BatchProcessor) is handling it; nothing to do here.
+          void LOCKED; // suppress unused-var warning
         } else if (batchInfo.status === SETTLED && !state.openingBatch) {
           // Batch settled but event was missed — open next batch directly
           state.openingBatch = true;
