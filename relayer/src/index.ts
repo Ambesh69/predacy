@@ -1257,13 +1257,15 @@ async function getLogsChunked(
       const isRangeErr = msg.includes("range") || msg.includes("limit") || msg.includes("exceed") ||
                          (msg.includes("400") && !msg.includes("503"));
       const isTransient = msg.includes("503") || msg.includes("502") || msg.includes("Unable to complete");
+      const isRateLimit = msg.includes("429") || msg.includes("rate") || msg.includes("too many");
       if (isRangeErr && currentChunk > MIN_CHUNK) {
         // Halve chunk size and retry this window (don't advance `from`)
         currentChunk = currentChunk / 2n < MIN_CHUNK ? MIN_CHUNK : currentChunk / 2n;
         continue;
-      } else if (isTransient) {
-        // Brief backoff for transient gateway errors, then retry same window
-        await new Promise(r => setTimeout(r, 2_000));
+      } else if (isTransient || isRateLimit) {
+        // Brief backoff for transient gateway errors or rate limits, then retry same window
+        const delay = isRateLimit ? 5_000 : 2_000;
+        await new Promise(r => setTimeout(r, delay));
         continue;
       } else {
         throw err;
