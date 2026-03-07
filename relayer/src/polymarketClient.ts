@@ -579,13 +579,72 @@ export class PolymarketClient {
 
     console.log(`[PolymarketClient] Placing FOK buy: ${usdcToSpend} USDC available, ordering ${takerAmount} YES tokens (${makerAmount} USDC) for YES token ${tokenId.slice(0, 10)}…`);
 
+    // ── CLOB balance/allowance diagnostic + refresh ────────────────────────────
+    // Polymarket's CLOB caches on-chain balance/allowance state. A new maker address
+    // (never traded before) may have a stale/missing cache entry showing 0 USDC,
+    // causing "not enough balance / allowance" even when on-chain state is fine.
+    // Calling /balance-allowance/update tells Polymarket to re-read from the chain.
+    try {
+      const ba = await this.checkClobBalance("COLLATERAL");
+      const clobBal = BigInt(ba.balance || "0");
+      if (clobBal < makerAmount) {
+        console.log(
+          `[PolymarketClient] CLOB cached USDC balance (${clobBal}) < makerAmount (${makerAmount}) ` +
+          `— triggering balance-allowance refresh before order`,
+        );
+        await this.updateClobBalance("COLLATERAL");
+        // Small delay to allow Polymarket's backend to propagate the refresh.
+        await new Promise(r => setTimeout(r, 2_000));
+      }
+    } catch (diagErr) {
+      console.warn(`[PolymarketClient] Balance-allowance check/update failed (non-fatal):`, diagErr);
+    }
+
+    // Submit order with one automatic retry if "not enough balance / allowance" is returned.
+    // On the first attempt the cache may still be stale; after the update above it should clear.
     const { body, orderId } = await this._buildSignedOrder(
       tokenId, makerAmount, takerAmount, SIDE_BUY, limitPrice, "FOK",
     );
-    const res = await axios.post(`${CLOB_API}/order`, body, {
-      headers: this._authHeaders("POST", "/order", body),
-    });
-    console.log(`[PolymarketClient] FOK order placed: orderId=${(res.data.orderID ?? res.data.orderId ?? orderId)}, limitPrice=${limitPrice}`);
+
+    let orderRes: any;
+    try {
+      orderRes = await axios.post(`${CLOB_API}/order`, body, {
+        headers: this._authHeaders("POST", "/order", body),
+      });
+    } catch (e: any) {
+      const errBody   = e?.response?.data ?? {};
+      const errMsg    = JSON.stringify(errBody);
+      const isBalance = errMsg.includes("balance") || errMsg.includes("allowance");
+      if (isBalance && e?.response?.status === 400) {
+        // One final refresh + retry
+        console.warn(
+          `[PolymarketClient] FOK order rejected (not enough balance/allowance) — ` +
+          `refreshing CLOB cache and retrying once…`,
+        );
+        try {
+          await this.updateClobBalance("COLLATERAL");
+          const ba2 = await this.checkClobBalance("COLLATERAL");
+          console.log(`[PolymarketClient] After refresh: CLOB USDC balance=${ba2.balance}, allowance=${ba2.allowance}`);
+          await new Promise(r => setTimeout(r, 3_000));
+        } catch (refreshErr) {
+          console.warn(`[PolymarketClient] Refresh failed:`, refreshErr);
+        }
+        // Rebuild with fresh salt (new timestamp) so the order hash differs from the failed one.
+        const { body: body2, orderId: orderId2 } = await this._buildSignedOrder(
+          tokenId, makerAmount, takerAmount, SIDE_BUY, limitPrice, "FOK",
+        );
+        orderRes = await axios.post(`${CLOB_API}/order`, body2, {
+          headers: this._authHeaders("POST", "/order", body2),
+        });
+        console.log(
+          `[PolymarketClient] Retry succeeded: orderId=${(orderRes.data.orderID ?? orderRes.data.orderId ?? orderId2)}`,
+        );
+      } else {
+        throw e;
+      }
+    }
+
+    console.log(`[PolymarketClient] FOK order placed: orderId=${(orderRes.data.orderID ?? orderRes.data.orderId ?? orderId)}, limitPrice=${limitPrice}`);
 
     // Poll for YES tokens to arrive (Polygon block time ~2s, allow up to 30s)
     const POLL_MS = 2500;
@@ -719,6 +778,74 @@ export class PolymarketClient {
     };
 
     return { body: JSON.stringify(payload), orderId: `local-${salt}` };
+  }
+
+  // ─── CLOB balance/allowance diagnostics ─────────────────────────────────────
+
+  /**
+   * Query Polymarket's CLOB balance-allowance cache for the maker address.
+   *
+   * Polymarket's CLOB maintains an off-chain ledger (cache) of each maker's
+   * on-chain token balance and exchange allowance. A new address that has never
+   * traded on Polymarket may have a cache entry showing 0, even if the on-chain
+   * balance is fine — causing "not enough balance / allowance" errors.
+   *
+   * @param assetType  "COLLATERAL" (USDC) or "CONDITIONAL" (YES/NO token)
+   * @param tokenId    Required for CONDITIONAL type
+   * @returns { balance, allowance } as decimal strings
+   */
+  async checkClobBalance(
+    assetType: "COLLATERAL" | "CONDITIONAL",
+    tokenId?: string,
+  ): Promise<{ balance: string; allowance: string }> {
+    const path   = "/balance-allowance";
+    // NOTE: query params are NOT included in the HMAC message (matches official clob-client).
+    const params: Record<string, string> = {
+      asset_type:     assetType,
+      signature_type: "0",   // EOA
+    };
+    if (tokenId) params.token_id = tokenId;
+    const res = await axios.get(`${CLOB_API}${path}`, {
+      headers: this._authHeaders("GET", path, ""),
+      params,
+    });
+    const { balance = "unknown", allowance = "unknown" } = res.data ?? {};
+    console.log(
+      `[PolymarketClient] CLOB balance-allowance (${assetType}` +
+      `${tokenId ? " token=" + tokenId.slice(0, 10) + "…" : ""}): ` +
+      `balance=${balance}, allowance=${allowance}`,
+    );
+    return { balance: String(balance), allowance: String(allowance) };
+  }
+
+  /**
+   * Force Polymarket's CLOB to refresh its cached balance/allowance from on-chain.
+   *
+   * Call this when the maker has sufficient on-chain balance but the CLOB rejects
+   * with "not enough balance / allowance" — the CLOB may have a stale entry from
+   * before the USDC approval/deposit was made.
+   *
+   * @param assetType  "COLLATERAL" (USDC) or "CONDITIONAL" (YES/NO token)
+   * @param tokenId    Required for CONDITIONAL type
+   */
+  async updateClobBalance(
+    assetType: "COLLATERAL" | "CONDITIONAL",
+    tokenId?: string,
+  ): Promise<void> {
+    const path   = "/balance-allowance/update";
+    const params: Record<string, string> = {
+      asset_type:     assetType,
+      signature_type: "0",   // EOA
+    };
+    if (tokenId) params.token_id = tokenId;
+    const res = await axios.get(`${CLOB_API}${path}`, {
+      headers: this._authHeaders("GET", path, ""),
+      params,
+    });
+    console.log(
+      `[PolymarketClient] CLOB balance-allowance update (${assetType}): ` +
+      JSON.stringify(res.data),
+    );
   }
 
   private _requireSigner(): void {
