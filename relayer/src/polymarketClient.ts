@@ -1,6 +1,6 @@
 import axios from "axios";
 import { createHmac } from "node:crypto";
-import { createPublicClient, http, decodeFunctionData, hashTypedData, parseAbiItem } from "viem";
+import { createPublicClient, http, decodeFunctionData, hashTypedData } from "viem";
 import { polygon } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 import type { PolymarketMarket } from "./types.js";
@@ -52,17 +52,7 @@ const SIDE_SELL = 1;
 const SIG_TYPE_EOA = 0;  // normal ECDSA from EOA
 const TAKER_ZERO = "0x0000000000000000000000000000000000000000" as `0x${string}`;
 
-// ─── On-chain scanning constants (v7.2 vault-as-taker) ──────────────────────
-
-/** How many Polygon blocks back to scan for CTFExchange fills (~1 hour at 2s/block) */
-const SCAN_BLOCKS = 2000n;
-
-/**
- * Public Polygon RPC used exclusively for read-only historical getLogs scans.
- * Ankr's public endpoint supports up to 10 000-block ranges without auth.
- * We keep the Alchemy key (this.rpcUrl) for write operations / low-latency calls.
- */
-const POLYGON_SCAN_RPC = "https://rpc.ankr.com/polygon";
+// ─── On-chain decoding constants (v7.2 vault-as-taker) ───────────────────────
 
 /** ABI for decoding CTFExchange fillOrders / fillOrder calldata */
 const FILL_ORDERS_ABI = [
@@ -155,11 +145,6 @@ const ORDER_TYPES_FOR_HASH = {
     { name: "signatureType", type: "uint8"   },
   ],
 } as const;
-
-/** OrderFilled event ABI for CTFExchange */
-const ORDER_FILLED_EVENT = parseAbiItem(
-  "event OrderFilled(bytes32 indexed orderHash, address indexed maker, address indexed taker, uint256 makerAssetId, uint256 takerAssetId, uint256 makerAmountFilled, uint256 takerAmountFilled, uint256 fee)",
-);
 
 // Gamma API returns some fields as JSON-encoded strings — parse them.
 function normalizeMarket(m: any): PolymarketMarket {
@@ -583,20 +568,24 @@ export class PolymarketClient {
    * For NET BUY batches: side="SELL" — look for makers selling YES for USDC.
    * For NET SELL batches: side="BUY" — look for makers buying YES with USDC.
    *
-   * On testnet (chainId != 137) returns empty arrays — vault uses MockCTFExchange
-   * which is a no-op, so fillOrders is never called and the guard in the contract
-   * skips it cleanly.
+   * Uses data-api.polymarket.com/trades (market-scoped) to get recent txHashes, then
+   * eth_getTransactionByHash to decode signed orders from calldata. No eth_getLogs needed
+   * — avoids all block-range limits on free Alchemy tier.
    *
-   * @param tokenId     YES token ID (string, large uint256)
+   * On testnet (chainId != 137) returns empty arrays (vault uses MockCTFExchange no-op).
+   *
+   * @param tokenId     YES token ID (large uint256 decimal string)
    * @param side        "SELL" for net-buy batches, "BUY" for net-sell batches
    * @param totalAmount Amount to cover (USDC 6-dec for SELL side; YES units for BUY side)
    * @param chainId     Relayer chain ID — scanning only happens on mainnet (137)
+   * @param marketId    Condition ID (bytes32 hex) — used to scope data API query
    */
   async fetchRestingOrders(
     tokenId:     string,
     side:        "BUY" | "SELL",
     totalAmount: bigint,
     chainId:     number = POLYGON_CHAIN_ID,
+    marketId?:   string,
   ): Promise<{ orders: ClobOrderForChain[]; fillAmounts: bigint[] }> {
     // Testnet: no real CTFExchange — vault uses MockCTFExchange (no-op).
     if (chainId !== POLYGON_CHAIN_ID) {
@@ -604,70 +593,68 @@ export class PolymarketClient {
       return { orders: [], fillAmounts: [] };
     }
 
-    const sideNum = side === "SELL" ? 1 : 0;
+    const sideNum    = side === "SELL" ? 1 : 0;
     const bigTokenId = BigInt(tokenId);
-    const nowSec = BigInt(Math.floor(Date.now() / 1000));
+    const nowSec     = BigInt(Math.floor(Date.now() / 1000));
 
-    // Create a Polygon mainnet public client for on-chain scanning.
-    // Use the dedicated scan RPC (Ankr public) — supports 10 000-block getLogs ranges for free.
-    // The Alchemy key (this.rpcUrl) is intentionally NOT used here: Alchemy free tier caps
-    // eth_getLogs at 10 blocks per request, which is insufficient for our 2000-block scan window.
-    const client = createPublicClient({ chain: polygon, transport: http(POLYGON_SCAN_RPC) });
+    // ── 1. Get recent trade txHashes from Polymarket data API (market-scoped) ──────
+    // This replaces eth_getLogs: data API is market-specific so we never scan all
+    // CTFExchange events.  CTFExchange is too active (thousands of events/block) for
+    // free-tier getLogs on any public RPC.
+    const params: Record<string, string | number> = { limit: 100 };
+    if (marketId) params.market = marketId;
 
-    // 1. Get recent OrderFilled events from CTFExchange.
-    const latestBlock = await client.getBlockNumber();
-    const fromBlock = latestBlock > SCAN_BLOCKS ? latestBlock - SCAN_BLOCKS : 0n;
+    const tradeRes = await axios.get("https://data-api.polymarket.com/trades", { params });
+    const trades: Array<{ transactionHash: string; asset: string }> =
+      Array.isArray(tradeRes.data) ? tradeRes.data : [];
 
-    console.log(`[PolymarketClient] Scanning CTFExchange OrderFilled events ${fromBlock}–${latestBlock}`);
-    const logs = await client.getLogs({
-      address: CTF_EXCHANGE,
-      event:   ORDER_FILLED_EVENT,
-      fromBlock,
-      toBlock: latestBlock,
-    });
+    // Filter to trades for our specific YES token (asset field = decimal tokenId string).
+    const relevantTxHashes = [
+      ...new Set(
+        trades
+          .filter(t => t.asset === tokenId)
+          .map(t => t.transactionHash as `0x${string}`),
+      ),
+    ];
 
-    // Filter client-side for our tokenId.
-    // SELL orders (maker sells YES): makerAssetId = tokenId
-    // BUY orders  (maker buys  YES): takerAssetId = tokenId
-    const relevantLogs = logs.filter(log => {
-      if (sideNum === SIDE_SELL) return log.args.makerAssetId === bigTokenId;
-      return log.args.takerAssetId === bigTokenId;
-    });
+    console.log(
+      `[PolymarketClient] data-api: ${trades.length} trades total, ` +
+      `${relevantTxHashes.length} unique txs for token ${tokenId.slice(0, 8)}…`,
+    );
 
-    console.log(`[PolymarketClient] Found ${relevantLogs.length} relevant OrderFilled events`);
-
-    // 2. Collect unique (txHash, orderHash) pairs to avoid re-fetching the same tx.
-    const seenOrderHashes = new Set<string>();
-    const txHashesOrdered: `0x${string}`[] = [];
-    const txHashSet = new Set<string>();
-    for (const log of relevantLogs) {
-      const oh = log.args.orderHash as string;
-      if (!seenOrderHashes.has(oh)) {
-        seenOrderHashes.add(oh);
-        const th = log.transactionHash as `0x${string}`;
-        if (!txHashSet.has(th)) { txHashSet.add(th); txHashesOrdered.push(th); }
-      }
+    if (relevantTxHashes.length === 0) {
+      console.log("[PolymarketClient] No recent trades for this token — 0 orders");
+      // Fall through to getOrderStatus block with empty candidateOrders;
+      // covered=0 < totalAmount → throws "Insufficient CLOB liquidity".
     }
 
-    // 3. Fetch transactions in parallel batches and decode calldata.
+    // ── 2. Fetch transactions & decode calldata (eth_getTransactionByHash — no block range) ──
+    // Uses this.rpcUrl (Alchemy) — getTransactionByHash costs 17 CUs, no block-range limit.
+    // We skip non-CTFExchange txs (e.g. NegRiskExchange at 0xb768891e…) by checking tx.to.
+    const client = createPublicClient({ chain: polygon, transport: http(this.rpcUrl) });
+
     const BATCH = 8;
     const candidateOrders: ClobOrderForChain[] = [];
 
-    for (let i = 0; i < txHashesOrdered.length && candidateOrders.length < 40; i += BATCH) {
-      const batch = txHashesOrdered.slice(i, i + BATCH);
-      const txs = await Promise.all(batch.map(h => client.getTransaction({ hash: h }).catch(() => null)));
+    for (let i = 0; i < relevantTxHashes.length && candidateOrders.length < 40; i += BATCH) {
+      const batch = relevantTxHashes.slice(i, i + BATCH);
+      const txs   = await Promise.all(
+        batch.map(h => client.getTransaction({ hash: h }).catch(() => null)),
+      );
       for (const tx of txs) {
         if (!tx?.input || tx.input.length < 10) continue;
+        // Skip NegRiskExchange and other non-CTFExchange contracts.
+        if (tx.to?.toLowerCase() !== CTF_EXCHANGE.toLowerCase()) continue;
         try {
           const decoded = decodeFunctionData({ abi: FILL_ORDERS_ABI, data: tx.input });
           const rawOrders: any[] = decoded.functionName === "fillOrders"
             ? (decoded.args[0] as any[])
-            : [decoded.args[0]]; // fillOrder singular
+            : [decoded.args[0]];
 
           for (const o of rawOrders) {
             if (o.tokenId !== bigTokenId) continue;
             if (Number(o.side) !== sideNum) continue;
-            // Skip expired orders (expiration=0 means no expiry).
+            // Skip expired orders (expiration=0 means no expiry / GTC).
             if (o.expiration !== 0n && o.expiration < nowSec) continue;
             candidateOrders.push({
               salt:          o.salt,
@@ -685,7 +672,7 @@ export class PolymarketClient {
               signature:     o.signature,
             });
           }
-        } catch { /* non-fillOrders tx — ignore */ }
+        } catch { /* non-fillOrders selector or wrong ABI — skip */ }
       }
     }
 
@@ -774,7 +761,7 @@ export class PolymarketClient {
     if (covered < totalAmount) {
       throw new Error(
         `Insufficient CLOB liquidity: need ${totalAmount} (${side}), covered ${covered} ` +
-        `from ${candidateOrders.length} candidate orders in last ${SCAN_BLOCKS} blocks`,
+        `from ${candidateOrders.length} candidate orders (data-api last 100 trades)`,
       );
     }
 

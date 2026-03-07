@@ -672,7 +672,9 @@ export class BatchProcessor {
       const side = fills.netBuyAmount > 0n ? "SELL" : "BUY";
       const amount = fills.netBuyAmount > 0n ? fills.netBuyAmount : fills.netSellYes;
       try {
-        const result = await this.polymarket.fetchRestingOrders(cachedYesToken, side, amount, this.config.chainId);
+        const result = await this.polymarket.fetchRestingOrders(
+          cachedYesToken, side, amount, this.config.chainId, this.config.marketId,
+        );
         clobOrders = result.orders;
         clobFillAmounts = result.fillAmounts;
         console.log(`[BatchProcessor] Fetched ${clobOrders.length} resting ${side} orders (total: ${amount})`);
