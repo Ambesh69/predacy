@@ -488,15 +488,17 @@ export class BatchProcessor {
       console.log("[BatchProcessor] ensureApprovals: USDC allowance already sufficient ✓");
     }
 
-    // ── USDC: approve(CTFExchange + NegRiskExchange, max) ───────────────────
+    // ── USDC: approve(CTFExchange + NegRiskExchange + NegRiskAdapter, max) ──
     // When the relayer places a CLOB BUY order (to acquire gap YES/NO tokens),
     // Polymarket's exchange contracts pull USDC from the relayer's wallet.
-    // Both the standard CTFExchange and the NegRisk exchange need approval.
-    const CTF_EXCHANGE      = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E" as const;
-    const NEG_RISK_EXCHANGE = "0xC5d563A36AE78145C45a50134d48A1215220f80a" as const;
+    // NegRisk markets route through NegRiskAdapter AND NegRiskExchange — both need approval.
+    const EXCHANGE_APPROVALS = [
+      ["0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E", "CTFExchange"     ],
+      ["0xC5d563A36AE78145C45a50134d48A1215220f80a", "NegRiskExchange"  ],
+      ["0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296", "NegRiskAdapter"   ],
+    ] as const satisfies readonly (readonly [`0x${string}`, string])[];
 
-    for (const exchange of [CTF_EXCHANGE, NEG_RISK_EXCHANGE] as const) {
-      const label = exchange === CTF_EXCHANGE ? "CTFExchange" : "NegRiskExchange";
+    for (const [exchange, label] of EXCHANGE_APPROVALS) {
       const exchAllowance = await this.publicClient.readContract({
         address:      this.config.usdcAddress,
         abi:          ERC20_ABI,
