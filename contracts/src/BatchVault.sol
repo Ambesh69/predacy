@@ -541,8 +541,14 @@ contract BatchVault {
         //    Zero relayer capital: the USDC comes from user deposits, not the relayer wallet.
         //
         //    Polymarket CLOB requires makerAmount to be a multiple of 10000 (= $0.01 precision).
-        //    We round UP to the nearest 10000 so the relayer always has a valid makerAmount
-        //    without needing any USDC of its own (avoids "not enough balance" 400 errors).
+        //    We round UP to the nearest 10000 so the relayer always has a valid makerAmount.
+        //
+        //    Design note: the relayer's CLOB order uses limitPrice = bestAsk × 1.002, so
+        //    makerAmount may exceed vault-provided USDC by up to ~$0.01 per batch (due to the
+        //    0.2% price buffer and $0.01 USDC rounding). The relayer must maintain a small
+        //    USDC.e working capital buffer (~$5) to cover this gap. It cannot come from the
+        //    vault because in a pure buy-only batch the vault has exactly (clearingPrice × yesGap)
+        //    USDC from user deposits — no surplus to draw from.
         uint256 CLOB_USDC_PREC = 10000; // $0.01 in 6-decimal USDC
         if (yesGap > 0) {
             uint256 usdcForYesGapRaw = (yesGap * clearingPrice) / PRICE_DECIMALS;
