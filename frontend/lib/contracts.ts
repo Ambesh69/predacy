@@ -5,7 +5,7 @@ import { polygon, polygonAmoy } from "viem/chains";
 export const CONTRACTS = {
   // Polygon mainnet (live Polymarket)
   [polygon.id]: {
-    batchVault: "0x44Ed1EA9b420d3B954b5779Eed6CED1deFd1cf21" as `0x${string}`, // v8: 4-sided orders (YES_BUY/YES_SELL/NO_BUY/NO_SELL)
+    batchVault: "0xAC019a03130BA4c44B9652C91ba5fDDa8f30ee94" as `0x${string}`, // v9: two-phase zero-capital settlement (lockFunds + settleBatch)
     usdc: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174" as `0x${string}`,
     ctf:  "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045" as `0x${string}`,
   },
@@ -80,7 +80,7 @@ export const CTF_ABI = [
   },
 ] as const;
 
-// ── BatchVault ABI (subset needed by frontend) — v8: 4 order sides ───────────
+// ── BatchVault ABI (subset needed by frontend) — v9: two-phase settlement ────
 
 export const BATCH_VAULT_ABI = [
   // ── YES BUY: pay USDC → receive YES tokens (EIP-3009 deferred) ──────────
@@ -224,10 +224,19 @@ export const BATCH_VAULT_ABI = [
           { name: "totalDepositedNo",type: "uint256" }, // USDC from NO buyers
           { name: "totalSellYes",    type: "uint256" }, // YES tokens from YES sellers
           { name: "totalSellNo",     type: "uint256" }, // NO tokens from NO sellers
-          { name: "clearingPrice",   type: "uint256" }, // 6-decimal fixed point
-          { name: "commitmentCount", type: "uint256" },
-          { name: "commitmentRoot",  type: "bytes32" },
-          { name: "claimMerkleRoot", type: "bytes32" },
+          { name: "clearingPrice",    type: "uint256" }, // 6-decimal fixed point
+          { name: "commitmentCount",  type: "uint256" },
+          { name: "commitmentRoot",   type: "bytes32" },
+          { name: "claimMerkleRoot",  type: "bytes32" },
+          // v9 two-phase settlement state
+          { name: "filledYesBuyVol",  type: "uint256" },
+          { name: "filledNoBuyVol",   type: "uint256" },
+          { name: "filledYesSellQty", type: "uint256" },
+          { name: "filledNoSellQty",  type: "uint256" },
+          { name: "yesGap",           type: "uint256" },
+          { name: "noGap",            type: "uint256" },
+          { name: "finalExcessYes",   type: "uint256" },
+          { name: "finalExcessNo",    type: "uint256" },
         ],
       },
     ],
@@ -309,8 +318,8 @@ export const BATCH_VAULT_ABI = [
       { name: "filledNoBuyVol",   type: "uint256", indexed: false },
       { name: "filledYesSellQty", type: "uint256", indexed: false },
       { name: "filledNoSellQty",  type: "uint256", indexed: false },
-      { name: "splitQty",         type: "uint256", indexed: false },
-      { name: "mergeQty",         type: "uint256", indexed: false },
+      { name: "yesGap",           type: "uint256", indexed: false },
+      { name: "noGap",            type: "uint256", indexed: false },
     ],
   },
 ] as const;
@@ -396,5 +405,6 @@ export const MOCK_USDC_ABI = [
 export enum BatchStatus {
   OPEN     = 0,
   SETTLING = 1,
-  SETTLED  = 2,
+  LOCKED   = 2, // v9: lockFunds called, awaiting settleBatch
+  SETTLED  = 3,
 }

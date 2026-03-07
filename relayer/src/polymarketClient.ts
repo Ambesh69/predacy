@@ -210,6 +210,11 @@ export class PolymarketClient {
   /** Alchemy/custom RPC URL for on-chain scanning (uses default polygon RPC if unset) */
   private rpcUrl: string | undefined;
 
+  /** Builder API credentials (optional) — adds POLY_BUILDER_* headers for order attribution */
+  private builderKey:        string | null;
+  private builderSecret:     string | null;
+  private builderPassphrase: string | null;
+
   constructor(
     apiKey:        string,
     apiSecret:     string,
@@ -217,6 +222,9 @@ export class PolymarketClient {
     signerPrivateKey?: `0x${string}`,
     proxyWallet?:  string,
     rpcUrl?:       string,
+    builderKey?:        string,
+    builderSecret?:     string,
+    builderPassphrase?: string,
   ) {
     this.apiKey        = apiKey;
     this.apiSecret     = apiSecret;
@@ -224,6 +232,9 @@ export class PolymarketClient {
     this.account       = signerPrivateKey ? privateKeyToAccount(signerPrivateKey) : null;
     this.proxyWallet   = proxyWallet ?? null;
     this.rpcUrl        = rpcUrl;
+    this.builderKey        = builderKey        ?? null;
+    this.builderSecret     = builderSecret     ?? null;
+    this.builderPassphrase = builderPassphrase ?? null;
   }
 
   // ─── Market data (no auth required) ────────────────────────────────────────
@@ -698,6 +709,14 @@ export class PolymarketClient {
     if (this.account) {
       headers["POLY_ADDRESS"] = this.account.address;
     }
+    // Builder attribution headers (optional) — credits volume to Predacy's builder profile.
+    // Same HMAC format as CLOB auth but with POLY_BUILDER_* header names.
+    if (this.builderKey && this.builderSecret && this.builderPassphrase) {
+      headers["POLY_BUILDER_API_KEY"]    = this.builderKey;
+      headers["POLY_BUILDER_SIGNATURE"]  = this._sign(timestamp, method, path, body, this.builderSecret);
+      headers["POLY_BUILDER_TIMESTAMP"]  = timestamp;
+      headers["POLY_BUILDER_PASSPHRASE"] = this.builderPassphrase;
+    }
     return headers;
   }
 
@@ -919,13 +938,11 @@ export class PolymarketClient {
    * Output: URL-safe base64 (+→-, /→_) — Polymarket's CLOB API requires this encoding
    * Msg:    timestamp + METHOD.upper() + path + body
    */
-  private _sign(timestamp: string, method: string, path: string, body: string): string {
+  private _sign(timestamp: string, method: string, path: string, body: string, secret?: string): string {
     const message = timestamp + method.toUpperCase() + path + body;
+    const s = secret ?? this.apiSecret;
     // Decode base64url secret to binary before using as HMAC key
-    const secretBinary = Buffer.from(
-      this.apiSecret.replace(/-/g, "+").replace(/_/g, "/"),
-      "base64",
-    );
+    const secretBinary = Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64");
     const sig = createHmac("sha256", secretBinary).update(message).digest("base64");
     // Convert standard base64 → URL-safe base64 (Polymarket requires this)
     return sig.replace(/\+/g, "-").replace(/\//g, "_");

@@ -26,7 +26,7 @@ interface IUSDC {
     ) external;
 }
 
-/// @title BatchVault v8
+/// @title BatchVault v9
 /// @notice Private prediction market layer — supports all 4 Polymarket order types.
 ///
 /// Order types (mirrors Polymarket CLOB exactly):
@@ -35,17 +35,27 @@ interface IUSDC {
 ///   NO_BUY   — pay USDC, receive NO tokens   (EIP-3009 deferred)
 ///   NO_SELL  — deposit NO tokens, receive USDC
 ///
-/// Settlement (zero relayer capital for balanced batches):
-///   1. Pull USDC from YES/NO buyers via EIP-3009
-///   2. Direct-match YES buyers ↔ YES sellers (token swap, no CTF needed)
-///   3. Direct-match NO buyers ↔ NO sellers
-///   4. Cross-match remaining YES+NO buyers → CTF.splitPosition (vault's USDC)
-///   5. Cross-match excess YES+NO sellers → CTF.mergePositions (returns USDC)
-///   6. Any residual gap → relayer-intermediary (small edge case only)
+/// Two-phase settlement (ZERO relayer capital):
+///   Phase 1 — lockFunds():
+///     1. Pull USDC from YES/NO buyers via EIP-3009
+///     2. Direct-match YES buyers ↔ YES sellers (internal swap)
+///     3. Direct-match NO buyers ↔ NO sellers
+///     4. Remaining YES + NO demand → CTF.splitPosition (vault's own USDC)
+///     5. Excess YES + NO supply → CTF.mergePositions (returns USDC to vault)
+///     6. Send gap USDC to relayer (vault-funded; relayer buys tokens from CLOB)
+///     7. Send finalExcess tokens to relayer (relayer sells on CLOB for USDC)
+///     8. Assign per-commitment positions; compute commitmentRoot
+///   Phase 2 — settleBatch():
+///     1. Verify ZK proof using stored public inputs
+///     2. Pull gap tokens from relayer (bought with vault-provided USDC)
+///     3. Pull USDC from relayer (from selling vault-provided excess tokens)
+///     4. Build Merkle root; finalize batch
+///
+/// Net result: relayer never uses its own USDC capital.
 ///
 /// Privacy model:
 ///   - Commitment = keccak256(marketId, side, amount, limitPrice, salt) — no trader address
-///   - EIP-3009: USDC pulled from ephemeral wallet at settlement (not upfront)
+///   - EIP-3009: USDC pulled from ephemeral wallet at lockFunds (not upfront)
 ///   - claimWithProof: relayer submits ZK proof, payout to chosen recipient
 contract BatchVault {
     // ═══════════════════════════════════════════════════════════════════════
@@ -62,7 +72,8 @@ contract BatchVault {
 
     enum BatchStatus {
         OPEN,     // Accepting commitments
-        SETTLING, // Batch closed, awaiting ZK proof
+        SETTLING, // Batch closed (closeBatch called), awaiting lockFunds
+        LOCKED,   // lockFunds called — gap USDC/tokens sent to relayer; awaiting settleBatch
         SETTLED   // Clearing price finalized, positions claimable
     }
 
@@ -76,11 +87,20 @@ contract BatchVault {
         uint256 totalDepositedNo; // USDC authorized by NO buyers
         uint256 totalSellYes;     // YES tokens deposited by YES sellers
         uint256 totalSellNo;      // NO tokens deposited by NO sellers
-        // Settlement results (set at settleBatch, read at claim time)
+        // Settlement results (set at lockFunds, read at settleBatch + claim time)
         uint256 clearingPrice;    // 6-decimal fixed point (e.g. 650000 = $0.65)
         uint256 commitmentCount;
         bytes32 commitmentRoot;   // Sequential hash chain (for batch clearing ZK)
         bytes32 claimMerkleRoot;  // Binary Merkle root (for ZK claim proofs)
+        // Two-phase settlement state (set by lockFunds, consumed by settleBatch)
+        uint256 filledYesBuyVol;   // USDC from filled YES buyers (ZK public input)
+        uint256 filledNoBuyVol;    // USDC from filled NO buyers (ZK public input)
+        uint256 filledYesSellQty;  // YES tokens from filled YES sellers (ZK public input)
+        uint256 filledNoSellQty;   // NO tokens from filled NO sellers (ZK public input)
+        uint256 yesGap;            // YES tokens relayer must deliver in settleBatch
+        uint256 noGap;             // NO tokens relayer must deliver in settleBatch
+        uint256 finalExcessYes;    // YES tokens sent to relayer; relayer returns USDC in settleBatch
+        uint256 finalExcessNo;     // NO tokens sent to relayer; relayer returns USDC in settleBatch
     }
 
     /// @notice Stored commitment — only hash and amount, no trader address.
@@ -110,7 +130,7 @@ contract BatchVault {
         bytes32 s;
     }
 
-    /// @notice Per-commitment position stored at settlement.
+    /// @notice Per-commitment position stored at lockFunds.
     struct Position {
         uint256  filledAmount;  // BUY: USDC filled. SELL: token qty filled.
         uint256  refundAmount;  // Unfilled SELL: token qty to refund. BUY: 0.
@@ -168,6 +188,16 @@ contract BatchVault {
     event BatchOpened(uint256 indexed batchId, bytes32 indexed marketId, uint256 openedAt);
     event OrderCommitted(uint256 indexed batchId, bytes32 indexed commitment);
     event BatchClosed(uint256 indexed batchId, uint256 commitmentCount);
+    event FundsLocked(
+        uint256 indexed batchId,
+        uint256 clearingPrice,
+        uint256 splitQty,
+        uint256 mergeQty,
+        uint256 yesGap,
+        uint256 noGap,
+        uint256 finalExcessYes,
+        uint256 finalExcessNo
+    );
     event BatchSettled(
         uint256 indexed batchId,
         uint256 clearingPrice,
@@ -175,8 +205,8 @@ contract BatchVault {
         uint256 filledNoBuyVol,
         uint256 filledYesSellQty,
         uint256 filledNoSellQty,
-        uint256 splitQty,
-        uint256 mergeQty
+        uint256 yesGap,
+        uint256 noGap
     );
     event PositionClaimed(uint256 indexed batchId, address indexed claimer, uint256 yesShares, uint256 noShares, uint256 usdcPayout, uint256 refund);
     event VerifierUpdated(address newVerifier);
@@ -189,6 +219,7 @@ contract BatchVault {
     error BatchNotOpen();
     error BatchWindowNotClosed();
     error BatchNotSettling();
+    error BatchNotLocked();
     error BatchNotSettled();
     error DuplicateCommitment();
     error InvalidCommitment();
@@ -260,7 +291,15 @@ contract BatchVault {
             clearingPrice:   0,
             commitmentCount: 0,
             commitmentRoot:  bytes32(0),
-            claimMerkleRoot: bytes32(0)
+            claimMerkleRoot: bytes32(0),
+            filledYesBuyVol:  0,
+            filledNoBuyVol:   0,
+            filledYesSellQty: 0,
+            filledNoSellQty:  0,
+            yesGap:          0,
+            noGap:           0,
+            finalExcessYes:  0,
+            finalExcessNo:   0
         });
 
         emit BatchOpened(batchId, marketId, block.timestamp);
@@ -389,25 +428,24 @@ contract BatchVault {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // Settlement — 4-sided clearing with CTF split/merge
+    // Phase 1: lockFunds — pull USDC, split/merge, send gap to relayer
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// @notice Settle a batch using the 4-sided clearing mechanism.
+    /// @notice Phase 1 of two-phase zero-capital settlement.
     ///
-    /// Settlement flow:
-    ///   1. Pull USDC from filled YES/NO buyers via EIP-3009
-    ///   2. Direct-match YES buyers ↔ YES sellers (internal swap)
-    ///   3. Direct-match NO buyers ↔ NO sellers (internal swap)
-    ///   4. Remaining YES + NO demand → CTF.splitPosition (vault's own USDC)
-    ///   5. Excess YES + NO supply → CTF.mergePositions (returns USDC to vault)
-    ///   6. Residual gap → relayer-intermediary (pre-bought from CLOB, reimbursed here)
-    ///   7. Route excess tokens (after merge) to relayer for CLOB sale; pull USDC for sellers
+    /// Pulls user USDC via EIP-3009, performs internal matching and CTF split/merge,
+    /// then sends gap USDC to the relayer (so relayer can buy tokens from CLOB using
+    /// vault's own USDC — no relayer capital required). Also sends finalExcess tokens
+    /// to relayer for CLOB liquidation (relayer returns USDC in settleBatch).
+    ///
+    /// After this call, batch status = LOCKED. Call settleBatch() once the relayer
+    /// has acquired the gap tokens (and sold the excess tokens) on the CLOB.
     ///
     /// @param filledYesBuyVol  Total USDC from filled YES buyers
     /// @param filledNoBuyVol   Total USDC from filled NO buyers
     /// @param filledYesSellQty Total YES tokens from filled YES sellers (already in vault)
     /// @param filledNoSellQty  Total NO tokens from filled NO sellers (already in vault)
-    function settleBatch(
+    function lockFunds(
         uint256 batchId,
         RevealedOrder[] calldata orders,
         TransferAuth[] calldata auths,
@@ -415,8 +453,7 @@ contract BatchVault {
         uint256 filledYesBuyVol,
         uint256 filledNoBuyVol,
         uint256 filledYesSellQty,
-        uint256 filledNoSellQty,
-        bytes calldata proof
+        uint256 filledNoSellQty
     ) external {
         if (msg.sender != relayer) revert OnlyRelayer();
 
@@ -429,18 +466,7 @@ contract BatchVault {
         // 1. Verify all revealed orders match their on-chain commitment hashes
         _verifyCommitments(batchId, batch.marketId, orders);
 
-        // 2. Build ZK proof public inputs and verify
-        bytes32 commitmentRoot = _computeCommitmentRoot(batchId, orders.length);
-        bytes32[] memory publicInputs = new bytes32[](6);
-        publicInputs[0] = commitmentRoot;
-        publicInputs[1] = bytes32(clearingPrice);
-        publicInputs[2] = bytes32(filledYesBuyVol);
-        publicInputs[3] = bytes32(filledNoBuyVol);
-        publicInputs[4] = bytes32(filledYesSellQty);
-        publicInputs[5] = bytes32(filledNoSellQty);
-        if (!verifier.verify(proof, publicInputs)) revert ZKProofInvalid();
-
-        // 3. Pull USDC from filled YES/NO buyers via EIP-3009
+        // 2. Pull USDC from filled YES/NO buyers via EIP-3009
         uint256 noPrice = PRICE_DECIMALS - clearingPrice;
         for (uint256 i = 0; i < orders.length; i++) {
             RevealedOrder calldata o = orders[i];
@@ -465,23 +491,21 @@ contract BatchVault {
             }
         }
 
-        // 4. Compute target token quantities at clearing price
+        // 3. Compute target token quantities at clearing price
         uint256 yesBuyersNeed = (filledYesBuyVol * PRICE_DECIMALS) / clearingPrice;
         uint256 noBuyersNeed  = (filledNoBuyVol  * PRICE_DECIMALS) / noPrice;
 
-        // 5. Direct matches (no CTF needed — just track for distribution)
+        // 4. Direct matches (internal token swaps — no CTF needed)
         uint256 directYesMatch = yesBuyersNeed < filledYesSellQty ? yesBuyersNeed : filledYesSellQty;
         uint256 directNoMatch  = noBuyersNeed  < filledNoSellQty  ? noBuyersNeed  : filledNoSellQty;
 
-        // 6. Cross-match via CTF split (remaining YES + NO demand)
+        // 5. Cross-match via CTF split (remaining YES + NO demand → vault's USDC)
         uint256 remainingYesDemand = yesBuyersNeed - directYesMatch;
         uint256 remainingNoDemand  = noBuyersNeed  - directNoMatch;
         uint256 splitQty = remainingYesDemand < remainingNoDemand
             ? remainingYesDemand : remainingNoDemand;
 
         if (splitQty > 0) {
-            // CTF pulls splitQty USDC from vault (pre-approved in constructor)
-            // Vault receives splitQty YES + splitQty NO tokens
             uint256[] memory partition = new uint256[](2);
             partition[0] = 1; // YES = indexSet 1
             partition[1] = 2; // NO  = indexSet 2
@@ -490,32 +514,12 @@ contract BatchVault {
             );
         }
 
-        // 7. Relayer-intermediary gap fill (edge case — only when YES or NO demand exceeds split)
-        uint256 yesGap = remainingYesDemand - splitQty;
-        uint256 noGap  = remainingNoDemand  - splitQty;
-        uint256 yesTokenId = _getYesTokenId(batch.marketId);
-        uint256 noTokenId  = _getNoTokenId(batch.marketId);
-
-        if (yesGap > 0) {
-            // Relayer pre-bought yesGap YES from CLOB. Pull them here; reimburse USDC.
-            uint256 usdcForYesGap = (yesGap * clearingPrice) / PRICE_DECIMALS;
-            IConditionalTokens(ctf).safeTransferFrom(msg.sender, address(this), yesTokenId, yesGap, "");
-            IERC20(usdc).transfer(msg.sender, usdcForYesGap);
-        }
-        if (noGap > 0) {
-            // Relayer pre-bought noGap NO from CLOB. Pull them here; reimburse USDC.
-            uint256 usdcForNoGap = (noGap * noPrice) / PRICE_DECIMALS;
-            IConditionalTokens(ctf).safeTransferFrom(msg.sender, address(this), noTokenId, noGap, "");
-            IERC20(usdc).transfer(msg.sender, usdcForNoGap);
-        }
-
-        // 8. Cross-match via CTF merge (excess tokens from over-supplied sides)
+        // 6. Cross-match excess sellers via CTF merge (excess YES + NO → USDC returned to vault)
         uint256 excessYes = filledYesSellQty - directYesMatch;
         uint256 excessNo  = filledNoSellQty  - directNoMatch;
         uint256 mergeQty  = excessYes < excessNo ? excessYes : excessNo;
 
         if (mergeQty > 0) {
-            // Vault burns mergeQty YES + mergeQty NO → receives mergeQty USDC
             uint256[] memory partition = new uint256[](2);
             partition[0] = 1;
             partition[1] = 2;
@@ -524,40 +528,124 @@ contract BatchVault {
             );
         }
 
-        // 9. Route finalExcess tokens to relayer for CLOB sale;
-        //    pull USDC from relayer to fund those sellers' claims.
+        // 7. Compute gap and final excess
+        uint256 yesGap        = remainingYesDemand - splitQty;
+        uint256 noGap         = remainingNoDemand  - splitQty;
         uint256 finalExcessYes = excessYes - mergeQty;
         uint256 finalExcessNo  = excessNo  - mergeQty;
 
+        uint256 yesTokenId = _getYesTokenId(batch.marketId);
+        uint256 noTokenId  = _getNoTokenId(batch.marketId);
+
+        // 8. Send gap USDC to relayer — relayer buys tokens from CLOB using vault's USDC.
+        //    Zero relayer capital: the USDC comes from user deposits, not the relayer wallet.
+        if (yesGap > 0) {
+            uint256 usdcForYesGap = (yesGap * clearingPrice) / PRICE_DECIMALS;
+            IERC20(usdc).transfer(relayer, usdcForYesGap);
+        }
+        if (noGap > 0) {
+            uint256 usdcForNoGap = (noGap * noPrice) / PRICE_DECIMALS;
+            IERC20(usdc).transfer(relayer, usdcForNoGap);
+        }
+
+        // 9. Send finalExcess tokens to relayer for CLOB liquidation.
+        //    Relayer sells them and returns the USDC in settleBatch.
         if (finalExcessYes > 0) {
-            // Vault sends YES to relayer (they sell on CLOB). Vault pulls USDC from relayer for sellers.
-            uint256 usdcNeeded = (finalExcessYes * clearingPrice) / PRICE_DECIMALS;
-            IConditionalTokens(ctf).safeTransferFrom(address(this), msg.sender, yesTokenId, finalExcessYes, "");
-            IERC20(usdc).transferFrom(msg.sender, address(this), usdcNeeded);
+            IConditionalTokens(ctf).safeTransferFrom(address(this), relayer, yesTokenId, finalExcessYes, "");
         }
         if (finalExcessNo > 0) {
-            uint256 usdcNeeded = (finalExcessNo * noPrice) / PRICE_DECIMALS;
-            IConditionalTokens(ctf).safeTransferFrom(address(this), msg.sender, noTokenId, finalExcessNo, "");
-            IERC20(usdc).transferFrom(msg.sender, address(this), usdcNeeded);
+            IConditionalTokens(ctf).safeTransferFrom(address(this), relayer, noTokenId, finalExcessNo, "");
         }
 
         // 10. Assign per-commitment positions (keyed by commitment hash)
         _assignPositions(batchId, orders, clearingPrice);
 
-        // 11. Build Merkle root for ZK claim proofs
-        bytes32 claimMerkleRoot = _buildMerkleRoot(batchId, orders.length);
+        // 11. Compute and store commitment root (ZK public input)
+        bytes32 commitmentRoot = _computeCommitmentRoot(batchId, orders.length);
 
-        // 12. Finalize batch
-        batch.status          = BatchStatus.SETTLED;
+        // 12. Persist settlement geometry for settleBatch
+        batch.status          = BatchStatus.LOCKED;
         batch.clearingPrice   = clearingPrice;
         batch.commitmentRoot  = commitmentRoot;
+        batch.filledYesBuyVol  = filledYesBuyVol;
+        batch.filledNoBuyVol   = filledNoBuyVol;
+        batch.filledYesSellQty = filledYesSellQty;
+        batch.filledNoSellQty  = filledNoSellQty;
+        batch.yesGap           = yesGap;
+        batch.noGap            = noGap;
+        batch.finalExcessYes   = finalExcessYes;
+        batch.finalExcessNo    = finalExcessNo;
+
+        emit FundsLocked(batchId, clearingPrice, splitQty, mergeQty, yesGap, noGap, finalExcessYes, finalExcessNo);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Phase 2: settleBatch — verify ZK proof, pull from relayer, finalize
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// @notice Phase 2 of two-phase zero-capital settlement.
+    ///
+    /// Must be called after lockFunds() once the relayer has:
+    ///   - Acquired yesGap YES tokens from CLOB (using vault-provided USDC)
+    ///   - Acquired noGap NO tokens from CLOB (using vault-provided USDC)
+    ///   - Sold finalExcessYes YES tokens on CLOB (and holds the USDC proceeds)
+    ///   - Sold finalExcessNo NO tokens on CLOB (and holds the USDC proceeds)
+    ///
+    /// Verifies the ZK proof using public inputs stored at lockFunds, pulls the
+    /// gap tokens and excess USDC from the relayer, and finalizes the batch.
+    ///
+    /// Requires: ctf.isApprovedForAll(relayer, vault) == true
+    ///           usdc.allowance(relayer, vault) >= finalExcess USDC owed
+    function settleBatch(uint256 batchId, bytes calldata proof) external {
+        if (msg.sender != relayer) revert OnlyRelayer();
+
+        Batch storage batch = batches[batchId];
+        if (batch.status != BatchStatus.LOCKED) revert BatchNotLocked();
+
+        uint256 noPrice    = PRICE_DECIMALS - batch.clearingPrice;
+        uint256 yesTokenId = _getYesTokenId(batch.marketId);
+        uint256 noTokenId  = _getNoTokenId(batch.marketId);
+
+        // 1. Build ZK proof public inputs from stored values and verify
+        bytes32[] memory publicInputs = new bytes32[](6);
+        publicInputs[0] = batch.commitmentRoot;
+        publicInputs[1] = bytes32(batch.clearingPrice);
+        publicInputs[2] = bytes32(batch.filledYesBuyVol);
+        publicInputs[3] = bytes32(batch.filledNoBuyVol);
+        publicInputs[4] = bytes32(batch.filledYesSellQty);
+        publicInputs[5] = bytes32(batch.filledNoSellQty);
+        if (!verifier.verify(proof, publicInputs)) revert ZKProofInvalid();
+
+        // 2. Pull gap tokens from relayer (relayer bought using vault-provided USDC — zero own capital)
+        if (batch.yesGap > 0) {
+            IConditionalTokens(ctf).safeTransferFrom(msg.sender, address(this), yesTokenId, batch.yesGap, "");
+        }
+        if (batch.noGap > 0) {
+            IConditionalTokens(ctf).safeTransferFrom(msg.sender, address(this), noTokenId, batch.noGap, "");
+        }
+
+        // 3. Pull USDC from relayer (proceeds from selling vault-provided excess tokens)
+        if (batch.finalExcessYes > 0) {
+            uint256 usdcFromExcessYes = (batch.finalExcessYes * batch.clearingPrice) / PRICE_DECIMALS;
+            IERC20(usdc).transferFrom(msg.sender, address(this), usdcFromExcessYes);
+        }
+        if (batch.finalExcessNo > 0) {
+            uint256 usdcFromExcessNo = (batch.finalExcessNo * noPrice) / PRICE_DECIMALS;
+            IERC20(usdc).transferFrom(msg.sender, address(this), usdcFromExcessNo);
+        }
+
+        // 4. Build Merkle root for ZK claim proofs
+        bytes32 claimMerkleRoot = _buildMerkleRoot(batchId, batch.commitmentCount);
+
+        // 5. Finalize batch
+        batch.status          = BatchStatus.SETTLED;
         batch.claimMerkleRoot = claimMerkleRoot;
 
         emit BatchSettled(
-            batchId, clearingPrice,
-            filledYesBuyVol, filledNoBuyVol,
-            filledYesSellQty, filledNoSellQty,
-            splitQty, mergeQty
+            batchId, batch.clearingPrice,
+            batch.filledYesBuyVol, batch.filledNoBuyVol,
+            batch.filledYesSellQty, batch.filledNoSellQty,
+            batch.yesGap, batch.noGap
         );
     }
 
@@ -648,6 +736,9 @@ contract BatchVault {
     // Emergency rescue for stuck token deposits
     // ═══════════════════════════════════════════════════════════════════════
 
+    /// @notice Emergency rescue for sell orders stuck before lockFunds was called.
+    ///         Only available when batch is in SETTLING status (pre-lockFunds).
+    ///         After 7 days, sellers can reclaim deposited YES/NO tokens.
     function rescueStuckSellOrder(
         uint256   batchId,
         OrderSide side,     // must be YES_SELL or NO_SELL
@@ -701,7 +792,6 @@ contract BatchVault {
     }
 
     /// @dev Commit a BUY order (YES or NO — distinguished by which function called this).
-    ///      Uses a single internal path; the caller updates the correct batch total.
     function _executeCommit(bytes32 commitment, uint256 amount, bytes32 marketId, bool isYesBuy) internal {
         uint256 batchId = currentBatchIdByMarket[marketId];
         Batch storage batch = batches[batchId];

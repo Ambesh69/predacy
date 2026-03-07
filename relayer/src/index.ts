@@ -32,6 +32,11 @@ const baseConfig = {
     // Polymarket proxy wallet (maker address). Visible in polymarket.com → Builder Codes → Address.
     // Must be set for CLOB order placement to work (maker ≠ signer EOA).
     proxyWallet: process.env.POLYMARKET_PROXY_WALLET || undefined,
+    // Builder API credentials — from polymarket.com/settings?tab=builder
+    // Adds POLY_BUILDER_* headers to all CLOB orders for volume attribution + weekly rewards.
+    builderKey:        process.env.POLYMARKET_BUILDER_KEY        || undefined,
+    builderSecret:     process.env.POLYMARKET_BUILDER_SECRET     || undefined,
+    builderPassphrase: process.env.POLYMARKET_BUILDER_PASSPHRASE || undefined,
   },
   batchWindowMs:  parseInt(process.env.BATCH_WINDOW_MS ?? "30000"),
   useRealZk:      process.env.USE_REAL_ZK === "true",

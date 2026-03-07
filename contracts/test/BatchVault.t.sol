@@ -154,7 +154,7 @@ contract MockCTF {
         balanceOf[to][_noId(collateral, conditionId)] += amount;
     }
 
-    /// @notice Stub — not used in v8 tests
+    /// @notice Stub — not used in v9 tests
     function mockBuyYes(address, bytes32, uint256, uint256) external pure returns (uint256) { return 0; }
     function mockSellYes(address, bytes32, uint256, uint256) external pure returns (uint256) { return 0; }
     function payoutNumerators(bytes32, uint256) external pure returns (uint256) { return 0; }
@@ -205,12 +205,13 @@ contract BatchVaultTest is Test {
         vm.prank(carol); usdc.approve(address(vault), type(uint256).max);
         vm.prank(dave);  usdc.approve(address(vault), type(uint256).max);
 
-        // Relayer: pre-minted YES tokens for gap-fill edge cases (like v7.3)
+        // Relayer: pre-minted YES + NO tokens for gap-fill edge cases
         ctf.mintYes(address(usdc), MARKET_ID, relayer, 1_000_000e6);
+        ctf.mintNo(address(usdc),  MARKET_ID, relayer, 1_000_000e6);
         vm.prank(relayer);
         ctf.setApprovalForAll(address(vault), true);
 
-        // Relayer: USDC for excess-NO-seller edge cases
+        // Relayer: USDC approval for vault to pull (finalExcess USDC path)
         usdc.mint(relayer, 1_000_000e6);
         vm.prank(relayer);
         usdc.approve(address(vault), type(uint256).max);
@@ -299,6 +300,21 @@ contract BatchVaultTest is Test {
             else if (o.side == BatchVault.OrderSide.NO_BUY)   filledNoBuyVol   += o.amount;
             else                                                filledNoSellQty  += o.amount;
         }
+    }
+
+    /// @dev Two-phase settlement helper: lockFunds → settleBatch.
+    ///      Equivalent to the old single-tx settleBatch in v8.
+    function _settle(
+        uint256 batchId,
+        BatchVault.RevealedOrder[] memory orders,
+        BatchVault.TransferAuth[] memory auths,
+        uint256 clearingPrice
+    ) internal {
+        (uint256 yb, uint256 nb, uint256 ys, uint256 ns) = _buildSettleParams(orders, clearingPrice);
+        vm.prank(relayer);
+        vault.lockFunds(batchId, orders, auths, clearingPrice, yb, nb, ys, ns);
+        vm.prank(relayer);
+        vault.settleBatch(batchId, "");
     }
 
     function _buildClaimPublicInputs(
@@ -487,16 +503,22 @@ contract BatchVaultTest is Test {
         assertEq(ns, 0);
 
         uint256 ctfSplitBefore = ctf.splitCallCount();
+
+        // Phase 1: lockFunds — pulls USDC, calls CTF.split
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, auths, CLEARING_PRICE, yb, nb, ys, ns, "");
+        vault.lockFunds(batchId, orders, auths, CLEARING_PRICE, yb, nb, ys, ns);
 
-        // CTF.splitPosition was called once (100 USDC → 100 YES + 100 NO)
+        // CTF.splitPosition was called once in lockFunds (100 USDC → 100 YES + 100 NO)
         assertEq(ctf.splitCallCount(), ctfSplitBefore + 1);
-
-        // Vault should now hold 100 YES and 100 NO tokens
+        // Vault holds 100 YES and 100 NO tokens (splitQty = min(100, 100) = 100)
         assertEq(ctf.balanceOf(address(vault), _yesTokenId()), 100e6);
         assertEq(ctf.balanceOf(address(vault), _noTokenId()),  100e6);
         assertEq(usdc.balanceOf(address(vault)), 0); // all USDC went to split
+        assertEq(uint256(vault.getBatch(batchId).status), uint256(BatchVault.BatchStatus.LOCKED));
+
+        // Phase 2: settleBatch — ZK proof + Merkle root
+        vm.prank(relayer);
+        vault.settleBatch(batchId, "");
 
         assertEq(uint256(vault.getBatch(batchId).status), uint256(BatchVault.BatchStatus.SETTLED));
 
@@ -542,8 +564,7 @@ contract BatchVaultTest is Test {
         assertEq(yb, 65e6); assertEq(nb, 0); assertEq(ys, 100e6); assertEq(ns, 0);
 
         uint256 ctfSplitBefore = ctf.splitCallCount();
-        vm.prank(relayer);
-        vault.settleBatch(batchId, orders, auths, CLEARING_PRICE, yb, nb, ys, ns, "");
+        _settle(batchId, orders, auths, CLEARING_PRICE);
 
         // No CTF split needed (direct internal match)
         assertEq(ctf.splitCallCount(), ctfSplitBefore);
@@ -592,8 +613,7 @@ contract BatchVaultTest is Test {
         (uint256 yb, uint256 nb, uint256 ys, uint256 ns) = _buildSettleParams(orders, CLEARING_PRICE);
         assertEq(yb, 0); assertEq(nb, 35e6); assertEq(ys, 0); assertEq(ns, 100e6);
 
-        vm.prank(relayer);
-        vault.settleBatch(batchId, orders, auths, CLEARING_PRICE, yb, nb, ys, ns, "");
+        _settle(batchId, orders, auths, CLEARING_PRICE);
 
         // Vault holds: 100 NO (from Dave) + 35 USDC (from Bob)
         assertEq(ctf.balanceOf(address(vault), _noTokenId()), 100e6);
@@ -638,14 +658,19 @@ contract BatchVaultTest is Test {
         assertEq(yb, 0); assertEq(nb, 0); assertEq(ys, 100e6); assertEq(ns, 100e6);
 
         uint256 mergeBefore = ctf.mergeCallCount();
+
+        // Phase 1: lockFunds — merge happens here
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, _buildAuths(2), CLEARING_PRICE, yb, nb, ys, ns, "");
+        vault.lockFunds(batchId, orders, _buildAuths(2), CLEARING_PRICE, yb, nb, ys, ns);
 
-        // CTF.mergePositions was called (100 YES + 100 NO → 100 USDC)
+        // CTF.mergePositions was called in lockFunds (100 YES + 100 NO → 100 USDC)
         assertEq(ctf.mergeCallCount(), mergeBefore + 1);
-
         // Vault holds 100 USDC (from merge) for sellers
         assertEq(usdc.balanceOf(address(vault)), 100e6);
+
+        // Phase 2: settleBatch
+        vm.prank(relayer);
+        vault.settleBatch(batchId, "");
 
         // Carol claims: 100 * 0.65 = 65 USDC
         uint256 carolBefore = usdc.balanceOf(carol);
@@ -699,13 +724,10 @@ contract BatchVaultTest is Test {
         auths[2] = _zeroAuth();
         auths[3] = _zeroAuth();
 
-        (uint256 yb, uint256 nb, uint256 ys, uint256 ns) = _buildSettleParams(orders, CLEARING_PRICE);
-
         uint256 splitBefore = ctf.splitCallCount();
         uint256 mergeBefore = ctf.mergeCallCount();
 
-        vm.prank(relayer);
-        vault.settleBatch(batchId, orders, auths, CLEARING_PRICE, yb, nb, ys, ns, "");
+        _settle(batchId, orders, auths, CLEARING_PRICE);
 
         // All matched internally — no split or merge needed
         assertEq(ctf.splitCallCount(), splitBefore);
@@ -729,9 +751,10 @@ contract BatchVaultTest is Test {
         assertEq(usdc.balanceOf(address(vault)), 0);
     }
 
-    // ─── Tests: settlement — YES-only batch (relayer gap fill) ───────────────
+    // ─── Tests: settlement — YES-only batch (relayer gap fill, zero capital) ──
 
-    /// @notice YES-only batch: relayer provides YES tokens (like v7.3 intermediary).
+    /// @notice YES-only batch: vault sends gap USDC to relayer; relayer provides YES tokens.
+    ///         v9: relayer uses vault-provided USDC to buy YES from CLOB — zero own capital.
     function test_settle_yesBuyOnly_relayerGapFill() public {
         uint256 batchId = _openBatch();
         // Alice: 65 USDC YES BUY → needs 100 YES from relayer
@@ -746,12 +769,27 @@ contract BatchVaultTest is Test {
         auths[0] = _buyAuth(alice);
 
         // yb=65e6, nb=0, ys=0, ns=0
-        // yesBuyersNeed = 100e6, splitQty = 0, yesGap = 100e6 (relayer provides)
-        uint256 relayerYesBefore = ctf.balanceOf(relayer, _yesTokenId());
-        vm.prank(relayer);
-        vault.settleBatch(batchId, orders, auths, CLEARING_PRICE, 65e6, 0, 0, 0, "");
+        // yesBuyersNeed = 100e6, splitQty=0, yesGap=100e6
+        uint256 relayerYesBefore  = ctf.balanceOf(relayer, _yesTokenId());
+        uint256 relayerUsdcBefore = usdc.balanceOf(relayer);
+        uint256 vaultUsdcBefore   = usdc.balanceOf(address(vault));
 
-        // Relayer provided 100 YES, received 65 USDC reimbursement
+        // Phase 1: lockFunds — vault pulls USDC from Alice, sends gap USDC to relayer
+        vm.prank(relayer);
+        vault.lockFunds(batchId, orders, auths, CLEARING_PRICE, 65e6, 0, 0, 0);
+
+        // Vault sent 65 USDC to relayer (for relayer to buy YES on CLOB — zero own capital)
+        uint256 usdcForGap = (100e6 * CLEARING_PRICE) / PRICE_DECIMALS; // ≈65 USDC
+        assertEq(usdc.balanceOf(relayer), relayerUsdcBefore + usdcForGap);
+        assertEq(usdc.balanceOf(address(vault)), vaultUsdcBefore); // vault sent it all to relayer
+        assertEq(uint256(vault.getBatch(batchId).status), uint256(BatchVault.BatchStatus.LOCKED));
+        assertEq(vault.getBatch(batchId).yesGap, 100e6);
+
+        // Phase 2: settleBatch — vault pulls 100 YES from relayer (relayer bought with vault USDC)
+        vm.prank(relayer);
+        vault.settleBatch(batchId, "");
+
+        // Relayer gave 100 YES to vault, received gap USDC (was sent in lockFunds)
         assertEq(ctf.balanceOf(relayer, _yesTokenId()), relayerYesBefore - 100e6);
         assertEq(ctf.balanceOf(address(vault), _yesTokenId()), 100e6);
 
@@ -759,6 +797,101 @@ contract BatchVaultTest is Test {
         vm.prank(alice);
         vault.claimPosition(batchId, BatchVault.OrderSide.YES_BUY, 65e6, 700_000, sA);
         assertEq(ctf.balanceOf(alice, _yesTokenId()), 100e6);
+    }
+
+    /// @notice NO-only batch: vault sends noGap USDC to relayer; relayer provides NO tokens.
+    function test_settle_noBuyOnly_relayerGapFill() public {
+        uint256 batchId = _openBatch();
+        // Bob: 35 USDC NO BUY → needs 100 NO from relayer (noGap)
+        bytes32 sB = bytes32(uint256(1));
+        bytes32 cB = _commitment(BatchVault.OrderSide.NO_BUY, 35e6, 400_000, sB);
+        vm.prank(bob); vault.commitBuyNoOrder(cB, 35e6, MARKET_ID);
+        _closeBatch(batchId);
+
+        BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
+        orders[0] = BatchVault.RevealedOrder(BatchVault.OrderSide.NO_BUY, 35e6, 400_000, sB);
+        BatchVault.TransferAuth[] memory auths = new BatchVault.TransferAuth[](1);
+        auths[0] = _buyAuth(bob);
+
+        uint256 relayerNoBefore   = ctf.balanceOf(relayer, _noTokenId());
+        uint256 relayerUsdcBefore = usdc.balanceOf(relayer);
+
+        // Phase 1: lockFunds
+        vm.prank(relayer);
+        vault.lockFunds(batchId, orders, auths, CLEARING_PRICE, 0, 35e6, 0, 0);
+
+        uint256 noPrice    = PRICE_DECIMALS - CLEARING_PRICE; // 350000
+        uint256 noGapQty   = (35e6 * PRICE_DECIMALS) / noPrice; // 100e6
+        uint256 usdcForGap = (noGapQty * noPrice) / PRICE_DECIMALS; // ≈35e6
+
+        assertEq(usdc.balanceOf(relayer), relayerUsdcBefore + usdcForGap);
+        assertEq(vault.getBatch(batchId).noGap, noGapQty);
+
+        // Phase 2: settleBatch — vault pulls noGap NO from relayer
+        vm.prank(relayer);
+        vault.settleBatch(batchId, "");
+
+        assertEq(ctf.balanceOf(relayer, _noTokenId()), relayerNoBefore - noGapQty);
+        assertEq(ctf.balanceOf(address(vault), _noTokenId()), noGapQty);
+
+        // Bob claims
+        vm.prank(bob);
+        vault.claimPosition(batchId, BatchVault.OrderSide.NO_BUY, 35e6, 400_000, sB);
+        assertEq(ctf.balanceOf(bob, _noTokenId()), noGapQty);
+    }
+
+    /// @notice Excess YES sellers: vault sends YES to relayer; relayer returns USDC after CLOB sale.
+    function test_settle_excessYesSellers_relayerLiquidates() public {
+        uint256 batchId = _openBatch();
+        // Alice: 65 USDC YES BUY → gets 100 YES
+        // Carol: 200 YES SELL → 100 directly matched, 100 excess (sent to relayer)
+        bytes32 sA = bytes32(uint256(1));
+        bytes32 sC = bytes32(uint256(2));
+        bytes32 cA = _commitment(BatchVault.OrderSide.YES_BUY,  65e6,  700_000, sA);
+        bytes32 cC = _commitment(BatchVault.OrderSide.YES_SELL, 200e6, 600_000, sC);
+
+        vm.prank(alice); vault.commitOrder(cA, 65e6, MARKET_ID);
+        _mintYes(carol, 200e6);
+        vm.prank(carol); vault.commitSellOrder(cC, 200e6, MARKET_ID);
+        _closeBatch(batchId);
+
+        BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](2);
+        orders[0] = BatchVault.RevealedOrder(BatchVault.OrderSide.YES_BUY,  65e6,  700_000, sA);
+        orders[1] = BatchVault.RevealedOrder(BatchVault.OrderSide.YES_SELL, 200e6, 600_000, sC);
+
+        BatchVault.TransferAuth[] memory auths = new BatchVault.TransferAuth[](2);
+        auths[0] = _buyAuth(alice);
+        auths[1] = _zeroAuth();
+
+        // filledYesBuyVol=65, filledYesSellQty=200
+        // yesBuyersNeed=100, directYesMatch=100, excessYes=100, mergeQty=0, finalExcessYes=100
+        uint256 relayerYesBefore  = ctf.balanceOf(relayer, _yesTokenId());
+        uint256 relayerUsdcBefore = usdc.balanceOf(relayer);
+
+        // Phase 1: lockFunds — sends 100 YES tokens to relayer (for CLOB sale)
+        vm.prank(relayer);
+        vault.lockFunds(batchId, orders, auths, CLEARING_PRICE, 65e6, 0, 200e6, 0);
+
+        // Relayer received 100 YES (finalExcessYes)
+        assertEq(ctf.balanceOf(relayer, _yesTokenId()), relayerYesBefore + 100e6);
+        assertEq(vault.getBatch(batchId).finalExcessYes, 100e6);
+
+        // Phase 2: settleBatch — vault pulls USDC from relayer (100 YES * 0.65 = 65 USDC)
+        vm.prank(relayer);
+        vault.settleBatch(batchId, "");
+
+        // Relayer gave back 65 USDC (CLOB sale proceeds)
+        uint256 usdcFromExcess = (100e6 * CLEARING_PRICE) / PRICE_DECIMALS; // 65e6
+        assertEq(usdc.balanceOf(relayer), relayerUsdcBefore - usdcFromExcess);
+
+        // Vault now has 65 USDC (from relayer) + 65 USDC (from Alice buyer EIP-3009) = 130 USDC for sellers
+        assertEq(usdc.balanceOf(address(vault)), 130e6);
+
+        // Carol claims: 200 * 0.65 = 130 USDC
+        uint256 carolBefore = usdc.balanceOf(carol);
+        vm.prank(carol);
+        vault.claimPosition(batchId, BatchVault.OrderSide.YES_SELL, 200e6, 600_000, sC);
+        assertEq(usdc.balanceOf(carol), carolBefore + 130e6);
     }
 
     // ─── Tests: unfilled orders ───────────────────────────────────────────────
@@ -773,10 +906,9 @@ contract BatchVaultTest is Test {
 
         BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
         orders[0] = BatchVault.RevealedOrder(BatchVault.OrderSide.YES_BUY, 100e6, 400_000, sA);
-        vm.prank(relayer);
-        vault.settleBatch(batchId, orders, _buildAuths(1), CLEARING_PRICE, 0, 0, 0, 0, "");
+        _settle(batchId, orders, _buildAuths(1), CLEARING_PRICE);
 
-        assertEq(usdc.balanceOf(alice), 1_000e6); // USDC never left wallet
+        assertEq(usdc.balanceOf(alice), 1_000e6); // USDC never left wallet (unfilled, no EIP-3009)
         vm.expectRevert(BatchVault.NothingToClaim.selector);
         vm.prank(alice);
         vault.claimPosition(batchId, BatchVault.OrderSide.YES_BUY, 100e6, 400_000, sA);
@@ -793,8 +925,7 @@ contract BatchVaultTest is Test {
 
         BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
         orders[0] = BatchVault.RevealedOrder(BatchVault.OrderSide.YES_SELL, 50e6, 800_000, sC);
-        vm.prank(relayer);
-        vault.settleBatch(batchId, orders, _buildAuths(1), CLEARING_PRICE, 0, 0, 0, 0, "");
+        _settle(batchId, orders, _buildAuths(1), CLEARING_PRICE);
 
         BatchVault.Position memory pos = vault.getPosition(batchId, cC);
         assertEq(pos.refundAmount, 50e6);
@@ -817,8 +948,7 @@ contract BatchVaultTest is Test {
 
         BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
         orders[0] = BatchVault.RevealedOrder(BatchVault.OrderSide.NO_SELL, 80e6, 500_000, sD);
-        vm.prank(relayer);
-        vault.settleBatch(batchId, orders, _buildAuths(1), CLEARING_PRICE, 0, 0, 0, 0, "");
+        _settle(batchId, orders, _buildAuths(1), CLEARING_PRICE);
 
         uint256 daveBefore = ctf.balanceOf(dave, _noTokenId());
         vm.prank(dave);
@@ -841,8 +971,7 @@ contract BatchVaultTest is Test {
         BatchVault.TransferAuth[] memory auths = new BatchVault.TransferAuth[](1);
         auths[0] = _buyAuth(alice);
 
-        vm.prank(relayer);
-        vault.settleBatch(batchId, orders, auths, CLEARING_PRICE, 65e6, 0, 0, 0, "");
+        _settle(batchId, orders, auths, CLEARING_PRICE);
 
         BatchVault.Batch memory b = vault.getBatch(batchId);
         assertTrue(b.claimMerkleRoot != bytes32(0));
@@ -871,24 +1000,13 @@ contract BatchVaultTest is Test {
         vm.prank(bob); vault.commitBuyNoOrder(cB, 35e6, MARKET_ID);
         _closeBatch(batchId);
 
-        // Provide YES+NO from split (relayer provides YES gap fill + NO bought by split)
-        // For test simplicity: yes buyer = 65 USDC gap fill via relayer
-        // Actually: no buyers need NO tokens from split. Bob is only order.
-        // Settlement: noBuyersNeed = 35e6/350000 = 100, filledNoSellQty = 0
-        // splitQty = min(0, 100) = 0, noGap = 100 → relayer provides 100 NO
-        // But relayer has NO tokens? No, relayer only has YES pre-minted.
-        // Let me use a simpler setup: give relayer NO tokens too
-
-        // Mint NO to relayer for gap fill
-        ctf.mintNo(address(usdc), MARKET_ID, relayer, 1_000_000e6);
-
         BatchVault.RevealedOrder[] memory orders = new BatchVault.RevealedOrder[](1);
         orders[0] = BatchVault.RevealedOrder(BatchVault.OrderSide.NO_BUY, 35e6, 400_000, sB);
         BatchVault.TransferAuth[] memory auths = new BatchVault.TransferAuth[](1);
         auths[0] = _buyAuth(bob);
 
-        vm.prank(relayer);
-        vault.settleBatch(batchId, orders, auths, CLEARING_PRICE, 0, 35e6, 0, 0, "");
+        // noGap = 100e6: vault sends 35 USDC to relayer in lockFunds; relayer gives 100 NO in settleBatch
+        _settle(batchId, orders, auths, CLEARING_PRICE);
 
         BatchVault.Batch memory b = vault.getBatch(batchId);
 
@@ -920,8 +1038,7 @@ contract BatchVaultTest is Test {
         BatchVault.TransferAuth[] memory auths = new BatchVault.TransferAuth[](2);
         auths[0] = _buyAuth(alice); auths[1] = _zeroAuth();
 
-        vm.prank(relayer);
-        vault.settleBatch(batchId, orders, auths, CLEARING_PRICE, 65e6, 0, 100e6, 0, "");
+        _settle(batchId, orders, auths, CLEARING_PRICE);
 
         BatchVault.Batch memory b = vault.getBatch(batchId);
         address freshRecipient = address(0xF45E);
@@ -949,8 +1066,7 @@ contract BatchVaultTest is Test {
         orders[0] = BatchVault.RevealedOrder(BatchVault.OrderSide.YES_BUY, 65e6, 700_000, sA);
         BatchVault.TransferAuth[] memory auths = new BatchVault.TransferAuth[](1);
         auths[0] = _buyAuth(alice);
-        vm.prank(relayer);
-        vault.settleBatch(batchId, orders, auths, CLEARING_PRICE, 65e6, 0, 0, 0, "");
+        _settle(batchId, orders, auths, CLEARING_PRICE);
 
         BatchVault.Batch memory b = vault.getBatch(batchId);
         bytes32[] memory inputs = _buildClaimPublicInputs(
@@ -974,8 +1090,7 @@ contract BatchVaultTest is Test {
         orders[0] = BatchVault.RevealedOrder(BatchVault.OrderSide.YES_BUY, 65e6, 700_000, sA);
         BatchVault.TransferAuth[] memory auths = new BatchVault.TransferAuth[](1);
         auths[0] = _buyAuth(alice);
-        vm.prank(relayer);
-        vault.settleBatch(batchId, orders, auths, CLEARING_PRICE, 65e6, 0, 0, 0, "");
+        _settle(batchId, orders, auths, CLEARING_PRICE);
 
         bytes32[] memory inputs = _buildClaimPublicInputs(
             batchId, bytes32(uint256(0xDEAD)), CLEARING_PRICE,
@@ -1005,11 +1120,9 @@ contract BatchVaultTest is Test {
         BatchVault.TransferAuth[] memory auths = new BatchVault.TransferAuth[](2);
         auths[0] = _zeroAuth(); auths[1] = _buyAuth(alice);
 
-        vm.prank(relayer);
-        vault.settleBatch(batchId, orders, auths, CLEARING_PRICE, 65e6, 0, 100e6, 0, "");
+        _settle(batchId, orders, auths, CLEARING_PRICE);
 
         BatchVault.Batch memory b = vault.getBatch(batchId);
-        uint256 carolFillUSDC = 100e6 * CLEARING_PRICE / PRICE_DECIMALS;
 
         bytes32[] memory inputs = _buildClaimPublicInputs(
             batchId, b.claimMerkleRoot, CLEARING_PRICE,
@@ -1020,8 +1133,6 @@ contract BatchVaultTest is Test {
         vm.expectRevert(BatchVault.AlreadyClaimed.selector);
         vm.prank(carol);
         vault.claimPosition(batchId, BatchVault.OrderSide.YES_SELL, 100e6, 600_000, sC);
-
-        (carolFillUSDC); // suppress unused warning
     }
 
     function test_crossPath_claimPosition_then_claimWithProof_reverts() public {
@@ -1042,8 +1153,7 @@ contract BatchVaultTest is Test {
         BatchVault.TransferAuth[] memory auths = new BatchVault.TransferAuth[](2);
         auths[0] = _zeroAuth(); auths[1] = _buyAuth(alice);
 
-        vm.prank(relayer);
-        vault.settleBatch(batchId, orders, auths, CLEARING_PRICE, 65e6, 0, 100e6, 0, "");
+        _settle(batchId, orders, auths, CLEARING_PRICE);
 
         BatchVault.Batch memory b = vault.getBatch(batchId);
 
@@ -1130,9 +1240,9 @@ contract BatchVaultTest is Test {
         vault.commitOrderFor(c, 50e6, daveAddr, 0, block.timestamp + 1 hours, sig, MARKET_ID);
     }
 
-    // ─── Tests: commitment mismatch ───────────────────────────────────────────
+    // ─── Tests: lockFunds / settleBatch validation ────────────────────────────
 
-    function test_settle_wrongCommitment_reverts() public {
+    function test_lockFunds_wrongCommitment_reverts() public {
         uint256 batchId = _openBatch();
         bytes32 sA = bytes32(uint256(1));
         bytes32 cA = _commitment(BatchVault.OrderSide.YES_BUY, 100e6, 650_000, sA);
@@ -1144,10 +1254,10 @@ contract BatchVaultTest is Test {
         orders[0] = BatchVault.RevealedOrder(BatchVault.OrderSide.YES_BUY, 100e6, 700_000 /* wrong */, sA);
         vm.expectRevert(BatchVault.CommitmentMismatch.selector);
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, _buildAuths(1), CLEARING_PRICE, 100e6, 0, 0, 0, "");
+        vault.lockFunds(batchId, orders, _buildAuths(1), CLEARING_PRICE, 100e6, 0, 0, 0);
     }
 
-    function test_settle_invalidClearingPrice_reverts() public {
+    function test_lockFunds_invalidClearingPrice_reverts() public {
         uint256 batchId = _openBatch();
         bytes32 sA = bytes32(uint256(1));
         bytes32 cA = _commitment(BatchVault.OrderSide.YES_BUY, 100e6, 650_000, sA);
@@ -1158,10 +1268,10 @@ contract BatchVaultTest is Test {
         orders[0] = BatchVault.RevealedOrder(BatchVault.OrderSide.YES_BUY, 100e6, 650_000, sA);
         vm.expectRevert(BatchVault.InvalidClearingPrice.selector);
         vm.prank(relayer);
-        vault.settleBatch(batchId, orders, _buildAuths(1), 0 /* invalid */, 0, 0, 0, 0, "");
+        vault.lockFunds(batchId, orders, _buildAuths(1), 0 /* invalid */, 0, 0, 0, 0);
     }
 
-    function test_settleByNonRelayer_reverts() public {
+    function test_lockFundsByNonRelayer_reverts() public {
         uint256 batchId = _openBatch();
         bytes32 cA = _commitment(BatchVault.OrderSide.YES_BUY, 100e6, 650_000, bytes32(uint256(1)));
         vm.prank(alice); vault.commitOrder(cA, 100e6, MARKET_ID);
@@ -1171,7 +1281,19 @@ contract BatchVaultTest is Test {
         orders[0] = BatchVault.RevealedOrder(BatchVault.OrderSide.YES_BUY, 100e6, 650_000, bytes32(uint256(1)));
         vm.expectRevert(BatchVault.OnlyRelayer.selector);
         vm.prank(alice);
-        vault.settleBatch(batchId, orders, _buildAuths(1), CLEARING_PRICE, 100e6, 0, 0, 0, "");
+        vault.lockFunds(batchId, orders, _buildAuths(1), CLEARING_PRICE, 100e6, 0, 0, 0);
+    }
+
+    function test_settleBatch_requiresLocked() public {
+        uint256 batchId = _openBatch();
+        bytes32 cA = _commitment(BatchVault.OrderSide.YES_BUY, 65e6, 700_000, bytes32(uint256(1)));
+        vm.prank(alice); vault.commitOrder(cA, 65e6, MARKET_ID);
+        _closeBatch(batchId);
+
+        // Calling settleBatch before lockFunds should revert (batch is SETTLING, not LOCKED)
+        vm.expectRevert(BatchVault.BatchNotLocked.selector);
+        vm.prank(relayer);
+        vault.settleBatch(batchId, "");
     }
 
     // ─── Tests: rescue stuck sell orders ─────────────────────────────────────
@@ -1244,8 +1366,13 @@ contract BatchVaultTest is Test {
         orders1[0] = BatchVault.RevealedOrder(BatchVault.OrderSide.YES_BUY, 100e6, 650_000, bytes32(uint256(1)));
         BatchVault.TransferAuth[] memory auths1 = new BatchVault.TransferAuth[](1);
         auths1[0] = _buyAuth(alice);
+
+        // Two-phase settle market 1
         vm.prank(relayer);
-        vault.settleBatch(batchId1, orders1, auths1, 650_000, 100e6, 0, 0, 0, "");
+        vault.lockFunds(batchId1, orders1, auths1, 650_000, 100e6, 0, 0, 0);
+        vm.prank(relayer);
+        vault.settleBatch(batchId1, "");
+
         assertEq(uint256(vault.getBatch(1).status), uint256(BatchVault.BatchStatus.SETTLED));
         assertEq(uint256(vault.getBatch(2).status), uint256(BatchVault.BatchStatus.OPEN));
     }
@@ -1285,8 +1412,7 @@ contract BatchVaultTest is Test {
         BatchVault.TransferAuth[] memory auths = new BatchVault.TransferAuth[](2);
         auths[0] = _zeroAuth(); auths[1] = _buyAuth(alice);
 
-        vm.prank(relayer);
-        vault.settleBatch(batchId, orders, auths, CLEARING_PRICE, 65e6, 0, 100e6, 0, "");
+        _settle(batchId, orders, auths, CLEARING_PRICE);
 
         vm.prank(carol);
         vault.claimPosition(batchId, BatchVault.OrderSide.YES_SELL, 100e6, 600_000, sC);
