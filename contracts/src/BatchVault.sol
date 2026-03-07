@@ -539,12 +539,19 @@ contract BatchVault {
 
         // 8. Send gap USDC to relayer — relayer buys tokens from CLOB using vault's USDC.
         //    Zero relayer capital: the USDC comes from user deposits, not the relayer wallet.
+        //
+        //    Polymarket CLOB requires makerAmount to be a multiple of 10000 (= $0.01 precision).
+        //    We round UP to the nearest 10000 so the relayer always has a valid makerAmount
+        //    without needing any USDC of its own (avoids "not enough balance" 400 errors).
+        uint256 CLOB_USDC_PREC = 10000; // $0.01 in 6-decimal USDC
         if (yesGap > 0) {
-            uint256 usdcForYesGap = (yesGap * clearingPrice) / PRICE_DECIMALS;
+            uint256 usdcForYesGapRaw = (yesGap * clearingPrice) / PRICE_DECIMALS;
+            uint256 usdcForYesGap = ((usdcForYesGapRaw + CLOB_USDC_PREC - 1) / CLOB_USDC_PREC) * CLOB_USDC_PREC;
             IERC20(usdc).transfer(relayer, usdcForYesGap);
         }
         if (noGap > 0) {
-            uint256 usdcForNoGap = (noGap * noPrice) / PRICE_DECIMALS;
+            uint256 usdcForNoGapRaw = (noGap * noPrice) / PRICE_DECIMALS;
+            uint256 usdcForNoGap = ((usdcForNoGapRaw + CLOB_USDC_PREC - 1) / CLOB_USDC_PREC) * CLOB_USDC_PREC;
             IERC20(usdc).transfer(relayer, usdcForNoGap);
         }
 

@@ -544,11 +544,26 @@ export class PolymarketClient {
     // CLOB precision requirements:
     //   makerAmount (USDC):  must be a multiple of 10000 (= 0.01 USDC)
     //   takerAmount (token): must be a multiple of 10    (= 0.00001 token)
-    // We ask for ceil(deficit / 10) * 10 tokens and pay ceil(takerAmount * limitPrice / 10000) * 10000 USDC.
-    // This may slightly exceed usdcToSpend (by at most 9999 ≈ $0.01 — relayer fronts the difference).
-    // The protocol invariant (clearing_price ≥ CLOB ask) guarantees the order fills.
-    const mid = await this.getMidPrice(tokenId);
-    const limitPrice = parseFloat(Math.min(0.999, mid * 1.01).toFixed(4));
+    //
+    // We use the CURRENT BEST ASK as our limit price (+ 0.2% buffer for tick movement).
+    // This is critical: the vault sends (yesGap × clearingPrice) USDC to the relayer, which
+    // equals roughly (deficit × mid). Using mid × 1.01 as limit price inflates makerAmount
+    // by ~1%, causing "not enough balance" errors because the relayer only has vault-provided
+    // USDC. The ask price ≈ clearing price, so the overshoot above vault-provided funds is
+    // at most $0.01 per batch (USDC precision rounding) — relayer keeps $1-5 as dust buffer.
+    let limitPrice: number;
+    try {
+      const bestAsk = await this.getBestAsk(tokenId);
+      // 0.2% buffer above ask: guarantees fill even if the book ticks up slightly between
+      // the price query and order submission, while keeping makerAmount near vault-provided USDC.
+      limitPrice = parseFloat(Math.min(0.999, bestAsk * 1.002).toFixed(4));
+      console.log(`[PolymarketClient] buyYesForSettlement: bestAsk=${bestAsk} → limitPrice=${limitPrice}`);
+    } catch {
+      // Fallback when order book has no asks (very illiquid market): use mid + 2%.
+      const mid = await this.getMidPrice(tokenId);
+      limitPrice = parseFloat(Math.min(0.999, mid * 1.02).toFixed(4));
+      console.log(`[PolymarketClient] buyYesForSettlement: no asks, using mid*1.02=${limitPrice}`);
+    }
 
     const TOKEN_PREC = 10n;
     const USDC_PREC  = 10000n;
