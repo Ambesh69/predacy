@@ -1451,11 +1451,23 @@ async function recoverOpenBatches() {
         args:         [forceBatchId],
       }) as { marketId: `0x${string}`; status: number };
 
-      if (batchInfo.status !== 1) {
-        console.log(`[Relayer] RECOVER_BATCH_ID: batch ${forceBatchId} status=${batchInfo.status} (not SETTLING) — skipping`);
+      // Accept SETTLING (1) and LOCKED (2) — processBatch now handles both.
+      // LOCKED batches were previously permanently-failed because the old code re-tried
+      // lockFunds (which reverts on LOCKED) → 3 quick failures → permanently failed.
+      // Now processBatch skips lockFunds for LOCKED batches, so we clear the flag.
+      if (batchInfo.status !== 1 && batchInfo.status !== 2) {
+        console.log(`[Relayer] RECOVER_BATCH_ID: batch ${forceBatchId} status=${batchInfo.status} (not SETTLING/LOCKED) — skipping`);
       } else {
+        if (permanentlyFailedBatches.has(forceBatchId.toString())) {
+          console.log(`[Relayer] RECOVER_BATCH_ID: clearing permanently-failed flag for batch ${forceBatchId}`);
+          permanentlyFailedBatches.delete(forceBatchId.toString());
+          if (_failRedis) {
+            await _failRedis.srem("predacy:failed_batches", forceBatchId.toString()).catch(() => {});
+          }
+        }
         const marketId = batchInfo.marketId;
         const key      = marketId.toLowerCase();
+        const phaseLabel = batchInfo.status === 2 ? "LOCKED" : "SETTLING";
         if (!activeMarkets.has(key)) {
           const state = createMarketState(marketId);
           state.currentBatchId  = forceBatchId;
@@ -1463,7 +1475,7 @@ async function recoverOpenBatches() {
           state.processingBatch = true;
           activeMarkets.set(key, state);
           batchToMarket.set(forceBatchId.toString(), key);
-          console.log(`[Relayer] RECOVER_BATCH_ID: recovering SETTLING batch ${forceBatchId} for market ${marketId}`);
+          console.log(`[Relayer] RECOVER_BATCH_ID: recovering ${phaseLabel} batch ${forceBatchId} for market ${marketId}`);
           state.processor.processBatch(forceBatchId)
             .then(() => { console.log(`[Relayer] RECOVER_BATCH_ID: settled batch ${forceBatchId}`); })
             .catch(async (err) => { await onSettleFail(state, key, forceBatchId, err); })
