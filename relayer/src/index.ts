@@ -1495,7 +1495,9 @@ async function recoverOpenBatches() {
         const marketId = batchInfo.marketId;
         const key      = marketId.toLowerCase();
         const phaseLabel = batchInfo.status === 2 ? "LOCKED" : "SETTLING";
-        if (!activeMarkets.has(key)) {
+        const existingState = activeMarkets.get(key);
+        if (!existingState) {
+          // Market not tracked at all — create fresh state and settle.
           const state = createMarketState(marketId);
           state.currentBatchId  = forceBatchId;
           state.settlingBatchId = forceBatchId;
@@ -1507,8 +1509,19 @@ async function recoverOpenBatches() {
             .then(() => { console.log(`[Relayer] RECOVER_BATCH_ID: settled batch ${forceBatchId}`); })
             .catch(async (err) => { await onSettleFail(state, key, forceBatchId, err); })
             .finally(() => { state.processingBatch = false; state.settlingBatchId = null; });
+        } else if (!existingState.processingBatch) {
+          // Market is tracked (e.g. by a different OPEN batch from recoverOpenBatches)
+          // but no settlement is in flight — force-settle the LOCKED batch on the existing state.
+          existingState.settlingBatchId = forceBatchId;
+          existingState.processingBatch = true;
+          batchToMarket.set(forceBatchId.toString(), key);
+          console.log(`[Relayer] RECOVER_BATCH_ID: recovering ${phaseLabel} batch ${forceBatchId} for market ${marketId} (market already tracked — injecting settlement)`);
+          existingState.processor.processBatch(forceBatchId)
+            .then(() => { console.log(`[Relayer] RECOVER_BATCH_ID: settled batch ${forceBatchId}`); })
+            .catch(async (err) => { await onSettleFail(existingState, key, forceBatchId, err); })
+            .finally(() => { existingState.processingBatch = false; existingState.settlingBatchId = null; });
         } else {
-          console.log(`[Relayer] RECOVER_BATCH_ID: batch ${forceBatchId} already tracked`);
+          console.log(`[Relayer] RECOVER_BATCH_ID: batch ${forceBatchId} already being processed — skipping`);
         }
       }
     } catch (err) {
