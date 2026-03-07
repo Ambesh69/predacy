@@ -4,29 +4,30 @@ pragma solidity ^0.8.20;
 import "./interfaces/IBatchVerifier.sol";
 
 /// @title PublicInputAdapter
-/// @notice Adapts BatchVault's 6-input format to the 37-input HonkVerifier format.
+/// @notice Adapts BatchVault's 6-input format to the 38-input HonkVerifier format.
 ///
 /// Background
 /// ----------
-/// The Noir circuit (MAX_ORDERS=8, ultra_honk) has 37 public inputs:
+/// The Noir circuit (MAX_ORDERS=8, ultra_honk) has 38 public inputs:
 ///   [0..31] commitmentRoot bytes  -- each byte as its own field element (value 0-255)
 ///   [32]    clearingPrice
-///   [33]    totalBuyVol
-///   [34]    totalSellVol
-///   [35]    netBuyAmount
-///   [36]    orderCount            -- number of real (non-padding) orders
+///   [33]    filledYesBuyVol
+///   [34]    filledNoBuyVol
+///   [35]    filledYesSellQty
+///   [36]    filledNoSellQty       -- 4-sided market: all four fill volumes are inputs
+///   [37]    orderCount            -- number of real (non-padding) orders
 ///
 /// BatchVault.settleBatch() builds only 6 public inputs:
 ///   [0]  commitmentRoot (full bytes32 -- not byte-expanded)
 ///   [1]  clearingPrice
-///   [2]  totalBuyVol
-///   [3]  totalSellVol
-///   [4]  netBuyAmount
-///   [5]  netSellYes               -- NOT a circuit public input (ignored here)
+///   [2]  filledYesBuyVol
+///   [3]  filledNoBuyVol
+///   [4]  filledYesSellQty
+///   [5]  filledNoSellQty          -- all 4 fill volumes passed through to circuit
 ///
 /// This adapter:
 ///   1. Expands inputs[0] (bytes32) into 32 individual byte field elements
-///   2. Passes scalars [1..4] through unchanged
+///   2. Passes scalars [1..5] through unchanged
 ///   3. Appends orderCount from pendingOrderCount (set by relayer before each settleBatch)
 ///
 /// Workflow
@@ -34,7 +35,7 @@ import "./interfaces/IBatchVerifier.sol";
 /// Before every real-ZK settleBatch call, the relayer calls:
 ///   adapter.setPendingOrderCount(n)
 /// where n = batch.commitmentCount (the on-chain number of orders in the batch).
-/// Then settleBatch proceeds as normal; this adapter converts the 6 inputs to 37.
+/// Then settleBatch proceeds as normal; this adapter converts the 6 inputs to 38.
 ///
 /// Security note
 /// -------------
@@ -65,24 +66,25 @@ contract PublicInputAdapter is IBatchVerifier {
     }
 
     /// @inheritdoc IBatchVerifier
-    /// @dev Receives 6-element publicInputs from BatchVault, converts to 37-element
+    /// @dev Receives 6-element publicInputs from BatchVault, converts to 38-element
     ///      array expected by the HonkVerifier, then delegates.
     ///
     ///      Input layout from BatchVault (inputs.length == 6):
     ///        [0] commitmentRoot (bytes32)
     ///        [1] clearingPrice
-    ///        [2] totalBuyVol
-    ///        [3] totalSellVol
-    ///        [4] netBuyAmount
-    ///        [5] netSellYes        <- ignored (not in circuit)
+    ///        [2] filledYesBuyVol
+    ///        [3] filledNoBuyVol
+    ///        [4] filledYesSellQty
+    ///        [5] filledNoSellQty   <- all 4 fill volumes are circuit public inputs
     ///
-    ///      Output layout for HonkVerifier (37 elements):
+    ///      Output layout for HonkVerifier (38 elements):
     ///        [0..31] commitmentRoot bytes (one field element per byte)
     ///        [32]    clearingPrice
-    ///        [33]    totalBuyVol
-    ///        [34]    totalSellVol
-    ///        [35]    netBuyAmount
-    ///        [36]    orderCount    <- from pendingOrderCount
+    ///        [33]    filledYesBuyVol
+    ///        [34]    filledNoBuyVol
+    ///        [35]    filledYesSellQty
+    ///        [36]    filledNoSellQty
+    ///        [37]    orderCount    <- from pendingOrderCount
     function verify(bytes calldata proof, bytes32[] calldata inputs)
         external
         view
@@ -91,7 +93,7 @@ contract PublicInputAdapter is IBatchVerifier {
     {
         require(inputs.length == 6, "PublicInputAdapter: expected 6 inputs");
 
-        bytes32[] memory real = new bytes32[](37);
+        bytes32[] memory real = new bytes32[](38);
 
         // Expand commitment root: bytes32 -> 32 field elements (one byte each, big-endian)
         // Matches zkProver.ts: _hexToBytes(commitmentRoot, 32) where byte 0 is MSB
@@ -101,15 +103,15 @@ contract PublicInputAdapter is IBatchVerifier {
             real[i] = bytes32(uint256(uint8(root[i])));
         }
 
-        // Scalar public inputs pass through unchanged
+        // All 4 fill volumes are circuit public inputs — pass through unchanged
         real[32] = inputs[1]; // clearingPrice
-        real[33] = inputs[2]; // totalBuyVol
-        real[34] = inputs[3]; // totalSellVol
-        real[35] = inputs[4]; // netBuyAmount
-        // inputs[5] = netSellYes -> NOT a circuit public input, skipped
+        real[33] = inputs[2]; // filledYesBuyVol
+        real[34] = inputs[3]; // filledNoBuyVol
+        real[35] = inputs[4]; // filledYesSellQty
+        real[36] = inputs[5]; // filledNoSellQty
 
         // Order count supplied by relayer via setPendingOrderCount()
-        real[36] = bytes32(pendingOrderCount);
+        real[37] = bytes32(pendingOrderCount);
 
         return honk.verify(proof, real);
     }
