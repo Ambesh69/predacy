@@ -81,15 +81,32 @@ contract MockCTF is IConditionalTokens {
         }
     }
 
-    /// @notice Burns outcome tokens and returns collateral (not used in testnet demo).
+    /// @notice Burns outcome tokens and returns collateral.
+    ///         Burns `amount` of each partition slot token from caller; returns `amount` USDC.
     function mergePositions(
-        address,
-        bytes32,
-        bytes32,
-        uint256[] calldata,
-        uint256
-    ) external pure override {
-        revert("MockCTF: mergePositions not implemented");
+        address collateralToken,
+        bytes32 parentCollectionId,
+        bytes32 conditionId,
+        uint256[] calldata partition,
+        uint256 amount
+    ) external override {
+        // Burn outcome tokens from caller
+        for (uint256 i = 0; i < partition.length; i++) {
+            bytes32 collectionId = keccak256(
+                abi.encodePacked(parentCollectionId, conditionId, partition[i])
+            );
+            uint256 tokenId = uint256(
+                keccak256(abi.encodePacked(collateralToken, collectionId))
+            );
+            require(_balances[msg.sender][tokenId] >= amount, "MockCTF: insufficient balance for merge");
+            _balances[msg.sender][tokenId] -= amount;
+            emit TransferSingle(msg.sender, msg.sender, address(0), tokenId, amount);
+        }
+        // Return collateral to caller
+        (bool ok, bytes memory data) = collateralToken.call(
+            abi.encodeWithSignature("transfer(address,uint256)", msg.sender, amount)
+        );
+        require(ok && (data.length == 0 || abi.decode(data, (bool))), "MockCTF: USDC transfer failed");
     }
 
     /// @notice Redeems resolved positions (not used in testnet demo).

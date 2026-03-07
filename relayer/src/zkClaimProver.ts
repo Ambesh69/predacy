@@ -1,17 +1,18 @@
 import { keccak256, encodeAbiParameters } from "viem";
 import { BatchProcessor } from "./batchProcessor.js";
+import { OrderSide } from "./types.js";
 
 /**
  * ZK Claim Prover — generates proofs of order membership for private claims.
  *
  * The claim circuit proves (without revealing which leaf):
- *   1. The order preimage (marketId, isBuy, amount, limitPrice, salt) hashes to a commitment
+ *   1. The order preimage (marketId, side, amount, limitPrice, salt) hashes to a commitment
  *   2. That commitment is a leaf in the batch's Merkle tree (claimMerkleRoot)
  *   3. The nullifier is keccak256(commitment, batchId, salt) — prevents double-claim
- *   4. Fill calculation is correct given the clearing price
+ *   4. Fill calculation is correct given the clearing price and order side
  *
  * The relayer calls claimWithProof() on-chain with the proof + public inputs.
- * `msg.sender` = relayer (not the trader). Recipient = extracted from publicInputs[4].
+ * `msg.sender` = relayer (not the trader). Recipient = extracted from publicInputs[4] (field [6]).
  *
  * Mock mode (default): generates mock proof accepted by MockBatchVerifier.
  * Real mode: generates UltraHonk proof via Noir + Barretenberg (circuits/claim/).
@@ -22,13 +23,10 @@ export interface ClaimProofParams {
   batchId:         bigint;
   claimMerkleRoot: `0x${string}`;
   clearingPrice:   bigint;
-  totalFilledBuyVol: bigint;
-  yesTokensReceived: bigint;
-  filledSellYes:   bigint;
 
   // Order preimage (private — only the user knows the salt)
   marketId:    `0x${string}`;
-  isBuy:       boolean;
+  side:        OrderSide;  // YES_BUY=0, YES_SELL=1, NO_BUY=2, NO_SELL=3 (replaces isBuy)
   amount:      bigint;
   limitPrice:  bigint;
   salt:        `0x${string}`;
@@ -69,9 +67,9 @@ export class ZKClaimProver {
    *   [5]  nullifier_lo         (low  128 bits of nullifier)
    *   [6]  recipient            (address as bytes32, Field element)
    *   [7]  fills                (bool: 1 or 0)
-   *   [8]  fillAmount           (u64 as bytes32)
-   *   [9]  refundAmount         (u64 as bytes32)
-   *   [10] isBuy                (bool: 1 or 0)
+   *   [8]  fillAmount           (USDC for BUY orders; token qty for SELL orders)
+   *   [9]  refundAmount         (token qty refund for unfilled SELL; 0 otherwise)
+   *   [10] side                 (uint8: 0=YES_BUY, 1=YES_SELL, 2=NO_BUY, 3=NO_SELL)
    *
    * bytes32 values (keccak256 hashes) are split into two u128 halves because
    * a full 256-bit value may exceed the BN254 scalar field (~254 bits).
@@ -110,7 +108,7 @@ export class ZKClaimProver {
       fills,
       fillAmount,
       refundAmount,
-      isBuy:           params.isBuy,
+      side:            params.side,
     });
 
     if (this.useRealProver) {
@@ -122,18 +120,18 @@ export class ZKClaimProver {
     return { proof: "0x", publicInputs };
   }
 
-  /** Mirror BatchVault commitment hash (no trader address) */
+  /** Mirror BatchVault v8 commitment hash: keccak256(marketId, uint8(side), amount, limitPrice, salt) */
   private _computeCommitment(params: ClaimProofParams): `0x${string}` {
     return keccak256(
       encodeAbiParameters(
         [
           { type: "bytes32" },
-          { type: "bool"    },
+          { type: "uint8"   }, // OrderSide enum (v8: replaces bool isBuy from v7.3)
           { type: "uint256" },
           { type: "uint256" },
           { type: "bytes32" },
         ],
-        [params.marketId, params.isBuy, params.amount, params.limitPrice, params.salt],
+        [params.marketId, params.side, params.amount, params.limitPrice, params.salt],
       ),
     );
   }
@@ -152,37 +150,43 @@ export class ZKClaimProver {
     );
   }
 
-  /** Compute fill result for this order at the batch clearing price */
+  /**
+   * Compute fill result for a 4-sided order at the batch clearing price.
+   * Mirrors BatchVault._assignPositions() and _executePayout().
+   *
+   * fillAmount semantics:
+   *   YES_BUY:  USDC amount filled (vault converts to YES tokens at claim time)
+   *   NO_BUY:   USDC amount filled (vault converts to NO tokens at claim time)
+   *   YES_SELL: YES token qty filled (vault pays USDC at clearing price at claim time)
+   *   NO_SELL:  NO token qty filled (vault pays USDC at noPrice at claim time)
+   */
   private _computeFill(params: ClaimProofParams): {
     fills:        boolean;
     fillAmount:   bigint;
     refundAmount: bigint;
   } {
-    const { isBuy, amount, limitPrice, clearingPrice } = params;
+    const { side, amount, limitPrice, clearingPrice } = params;
+    const noPrice = 1_000_000n - clearingPrice;
 
-    const fills = isBuy
-      ? limitPrice >= clearingPrice
-      : limitPrice <= clearingPrice;
+    let fills: boolean;
+    switch (side) {
+      case OrderSide.YES_BUY:  fills = limitPrice >= clearingPrice; break;
+      case OrderSide.YES_SELL: fills = limitPrice <= clearingPrice; break;
+      case OrderSide.NO_BUY:   fills = limitPrice >= noPrice;       break;
+      case OrderSide.NO_SELL:  fills = limitPrice <= noPrice;       break;
+    }
 
     if (!fills) {
-      // Unfilled: buy orders had no USDC deposited (EIP-3009 deferred model — nothing to refund)
-      //           sell orders get YES tokens returned
-      return {
-        fills:        false,
-        fillAmount:   0n,
-        refundAmount: isBuy ? 0n : amount,  // sell: refund YES tokens
-      };
+      // Unfilled:
+      //   BUY  orders: EIP-3009 deferred — no USDC deposited → nothing to refund
+      //   SELL orders: tokens pre-deposited → refund the token qty
+      const isSell = side === OrderSide.YES_SELL || side === OrderSide.NO_SELL;
+      return { fills: false, fillAmount: 0n, refundAmount: isSell ? amount : 0n };
     }
 
-    if (isBuy) {
-      // Filled buy: user gets proportional YES tokens
-      // fillAmount = USDC amount committed (used to compute yesShares in contract)
-      return { fills: true, fillAmount: amount, refundAmount: 0n };
-    } else {
-      // Filled sell: user gets USDC = amount * clearingPrice / 1_000_000
-      const usdcPayout = (amount * clearingPrice) / 1_000_000n;
-      return { fills: true, fillAmount: usdcPayout, refundAmount: 0n };
-    }
+    // fillAmount = USDC amount for BUY orders, token qty for SELL orders
+    // The actual token/USDC conversion happens in the contract's _executePayout()
+    return { fills: true, fillAmount: amount, refundAmount: 0n };
   }
 
   private _buildPublicInputs(params: {
@@ -194,22 +198,22 @@ export class ZKClaimProver {
     fills:           boolean;
     fillAmount:      bigint;
     refundAmount:    bigint;
-    isBuy:           boolean;
+    side:            OrderSide;
   }): `0x${string}`[] {
     const [rootHi, rootLo] = this._splitBytes32(params.claimMerkleRoot);
     const [nullHi, nullLo] = this._splitBytes32(params.nullifier);
     return [
-      this._toBytes32(params.batchId),       // [0]  batch_id
-      rootHi,                                // [1]  commitment_root_hi
-      rootLo,                                // [2]  commitment_root_lo
-      this._toBytes32(params.clearingPrice), // [3]  clearing_price
-      nullHi,                                // [4]  nullifier_hi
-      nullLo,                                // [5]  nullifier_lo
-      this._addressToBytes32(params.recipient), // [6]  recipient (Field)
-      this._toBytes32(params.fills ? 1n : 0n),  // [7]  fills
-      this._toBytes32(params.fillAmount),    // [8]  fill_amount
-      this._toBytes32(params.refundAmount),  // [9]  refund_amount
-      this._toBytes32(params.isBuy ? 1n : 0n),  // [10] is_buy_out
+      this._toBytes32(params.batchId),              // [0]  batch_id
+      rootHi,                                        // [1]  commitment_root_hi
+      rootLo,                                        // [2]  commitment_root_lo
+      this._toBytes32(params.clearingPrice),         // [3]  clearing_price
+      nullHi,                                        // [4]  nullifier_hi
+      nullLo,                                        // [5]  nullifier_lo
+      this._addressToBytes32(params.recipient),      // [6]  recipient (Field)
+      this._toBytes32(params.fills ? 1n : 0n),      // [7]  fills
+      this._toBytes32(params.fillAmount),            // [8]  fill_amount
+      this._toBytes32(params.refundAmount),          // [9]  refund_amount
+      this._toBytes32(BigInt(params.side)),          // [10] side (0-3, v8: replaces is_buy)
     ];
   }
 
@@ -245,6 +249,9 @@ export class ZKClaimProver {
    *
    * Circuit: circuits/claim/src/main.nr
    * Compiled: circuits/claim/target/claim.json
+   *
+   * NOTE: The Noir claim circuit needs to be updated for v8 (side: u8 instead of is_buy: bool).
+   * The relayer's mock prover path works now; real ZK is pending circuit update.
    */
   private async _noirProve(
     params:      ClaimProofParams,
@@ -286,7 +293,7 @@ export class ZKClaimProver {
     const witnessInputs = {
       // Private inputs
       market_id:    this._hexToBytes(params.marketId, 32),
-      is_buy:       params.isBuy,
+      side:         params.side,          // uint8 (v8: replaces is_buy bool)
       amount:       params.amount.toString(),
       limit_price:  params.limitPrice.toString(),
       salt:         this._hexToBytes(params.salt, 32),
@@ -303,7 +310,7 @@ export class ZKClaimProver {
       fills,
       fill_amount:        fillAmount.toString(),
       refund_amount:      refundAmount.toString(),
-      is_buy_out:         params.isBuy,
+      side_out:           params.side,    // uint8 (v8: replaces is_buy_out bool)
     };
 
     console.log("[ZKClaimProver] Executing claim circuit...");

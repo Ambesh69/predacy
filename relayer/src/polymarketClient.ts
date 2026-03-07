@@ -9,21 +9,32 @@ const CLOB_API  = "https://clob.polymarket.com";
 const GAMMA_API = "https://gamma-api.polymarket.com";
 
 /**
- * Polymarket CTFExchange on Polygon mainnet.
- * All orders are signed against this contract's EIP-712 domain.
+ * Polymarket exchange contracts on Polygon mainnet.
+ * Standard CTFExchange: binary/scalar markets.
+ * NegRiskExchange: group/neg-risk markets (most live markets, e.g. EPL, US elections).
+ * All orders are signed against the correct contract's EIP-712 domain.
  */
-const CTF_EXCHANGE = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E" as const;
-const POLYGON_CHAIN_ID = 137;
+const CTF_EXCHANGE      = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E" as const;
+const NEG_RISK_EXCHANGE = "0xC5d563A36AE78145C45a50134d48A1215220f80a" as const;
+const POLYGON_CHAIN_ID  = 137;
 
 /**
- * EIP-712 domain for Polymarket CTF Exchange.
+ * EIP-712 domains — one per exchange contract.
  * Fixed to Polygon mainnet — Polymarket CLOB only operates on mainnet.
+ * Domain name MUST be "Polymarket CTF Exchange" (matches on-chain DOMAIN_SEPARATOR).
  */
 const POLYMARKET_DOMAIN = {
-  name:              "CTF Exchange",
+  name:              "Polymarket CTF Exchange",
   version:           "1",
   chainId:           POLYGON_CHAIN_ID,
   verifyingContract: CTF_EXCHANGE,
+} as const;
+
+const NEG_RISK_DOMAIN = {
+  name:              "Polymarket CTF Exchange",
+  version:           "1",
+  chainId:           POLYGON_CHAIN_ID,
+  verifyingContract: NEG_RISK_EXCHANGE,
 } as const;
 
 /**
@@ -193,7 +204,9 @@ export class PolymarketClient {
   /** Polymarket proxy wallet address (maker). If set, used as `maker`; signer stays as EOA. */
   private proxyWallet:   string | null;
   /** In-process cache: conditionId (lower) → PolymarketMarket */
-  private _marketCache = new Map<string, PolymarketMarket>();
+  private _marketCache  = new Map<string, PolymarketMarket>();
+  /** In-process cache: tokenId → isNegRisk (avoids repeated /neg-risk lookups per session) */
+  private _negRiskCache = new Map<string, boolean>();
   /** Alchemy/custom RPC URL for on-chain scanning (uses default polygon RPC if unset) */
   private rpcUrl: string | undefined;
 
@@ -544,7 +557,39 @@ export class PolymarketClient {
   // ─── Internal: EIP-712 order building + signing ─────────────────────────────
 
   /**
+   * Resolve the correct EIP-712 domain for a given token.
+   * Most live Polymarket markets (EPL, elections, crypto) are "negRisk" markets
+   * that use a different exchange contract with a different EIP-712 verifyingContract.
+   * Cached per-session to avoid redundant API calls.
+   */
+  private async _getDomainForToken(
+    tokenId: string,
+  ): Promise<typeof POLYMARKET_DOMAIN | typeof NEG_RISK_DOMAIN> {
+    let isNegRisk = this._negRiskCache.get(tokenId);
+    if (isNegRisk === undefined) {
+      try {
+        const res = await axios.get(`${CLOB_API}/neg-risk`, {
+          params: { token_id: tokenId },
+        });
+        isNegRisk = res.data?.neg_risk === true;
+      } catch {
+        isNegRisk = false;
+      }
+      this._negRiskCache.set(tokenId, isNegRisk);
+      console.log(
+        `[PolymarketClient] token ${tokenId.slice(0, 10)}… is negRisk=${isNegRisk} ` +
+        `→ exchange=${isNegRisk ? NEG_RISK_EXCHANGE : CTF_EXCHANGE}`,
+      );
+    }
+    return isNegRisk ? NEG_RISK_DOMAIN : POLYMARKET_DOMAIN;
+  }
+
+  /**
    * Build and EIP-712 sign a Polymarket order.
+   *
+   * Automatically detects whether the token is a negRisk market and selects
+   * the correct EIP-712 verifyingContract (CTFExchange vs NegRiskExchange).
+   * Uses ClobClient-compatible JSON body format: salt as Number, owner+deferExec fields.
    *
    * Returns the JSON-stringified body ready to POST to /order, and the locally
    * computed order ID (salt-based) for logging before the response arrives.
@@ -562,8 +607,12 @@ export class PolymarketClient {
     const salt = BigInt(Date.now());
 
     // signatureType=0 (EOA) requires maker == signer.
-    // The relayer trades directly — no proxy wallet, maker = signer = EOA.
+    // The relayer trades directly — maker = signer = EOA.
     const makerAddress = account.address;
+
+    // Resolve the correct EIP-712 domain for this token's exchange contract.
+    const domain = await this._getDomainForToken(tokenId);
+
     const orderMessage = {
       salt,
       maker:         makerAddress,
@@ -580,7 +629,7 @@ export class PolymarketClient {
     };
 
     const signature = await account.signTypedData({
-      domain:      POLYMARKET_DOMAIN,
+      domain,
       types:       ORDER_TYPES,
       primaryType: "Order",
       message:     orderMessage,
@@ -588,26 +637,32 @@ export class PolymarketClient {
 
     const sideStr = side === SIDE_BUY ? "BUY" : "SELL";
 
-    const body = JSON.stringify({
+    // Body format must match ClobClient's orderToJson exactly:
+    //   salt: Number (parseInt, not string)
+    //   owner: apiKey at top level
+    //   deferExec: false at top level
+    const payload = {
       order: {
-        salt:          salt.toString(),
+        salt:          Number(salt),
         maker:         makerAddress,
         signer:        account.address,
         taker:         TAKER_ZERO,
         tokenId,
         makerAmount:   makerAmount.toString(),
         takerAmount:   takerAmount.toString(),
+        side:          sideStr,
         expiration:    "0",
         nonce:         "0",
         feeRateBps:    "0",
-        side:          sideStr,
         signatureType: SIG_TYPE_EOA,
         signature,
       },
+      owner:     this.apiKey,
       orderType,
-    });
+      deferExec: false,
+    };
 
-    return { body, orderId: `local-${salt}` };
+    return { body: JSON.stringify(payload), orderId: `local-${salt}` };
   }
 
   private _requireSigner(): void {

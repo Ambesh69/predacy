@@ -4,7 +4,9 @@ import { keccak256, encodeAbiParameters, parseAbiParameters } from "viem";
  * Compute a sealed-bid order commitment.
  * Matches BatchVault.sol's commitment verification exactly.
  *
- * commitment = keccak256(abi.encode(marketId, isBuy, amount, limitPrice, salt))
+ * commitment = keccak256(abi.encode(marketId, side, amount, limitPrice, salt))
+ *
+ * side: 0=YES_BUY, 1=YES_SELL, 2=NO_BUY, 3=NO_SELL  (matches OrderSide enum in BatchVault v8)
  *
  * Note: `trader` address is NOT included in the commitment hash.
  * The 256-bit salt is the secret credential — only the holder of the salt can
@@ -12,15 +14,15 @@ import { keccak256, encodeAbiParameters, parseAbiParameters } from "viem";
  */
 export function computeCommitment(params: {
   marketId: `0x${string}`;
-  isBuy: boolean;
-  amount: bigint;       // USDC, 6 decimals
+  side: number;         // 0=YES_BUY, 1=YES_SELL, 2=NO_BUY, 3=NO_SELL
+  amount: bigint;       // USDC (buy) or token qty (sell), 6 decimals
   limitPrice: bigint;   // 6-decimal fixed point
   salt: `0x${string}`;  // random 32 bytes (the secret credential)
 }): `0x${string}` {
   return keccak256(
     encodeAbiParameters(
-      parseAbiParameters("bytes32, bool, uint256, uint256, bytes32"),
-      [params.marketId, params.isBuy, params.amount, params.limitPrice, params.salt]
+      parseAbiParameters("bytes32, uint8, uint256, uint256, bytes32"),
+      [params.marketId, params.side, params.amount, params.limitPrice, params.salt]
     )
   );
 }

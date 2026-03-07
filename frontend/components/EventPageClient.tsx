@@ -736,13 +736,16 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         localStorage.getItem(`predacy:claim-recipient:${walletAddress.toLowerCase()}`) || walletAddress
       ) as `0x${string}`;
       const storedOrders: Array<{
-        commitment: string; salt: string; isBuy: boolean;
+        commitment: string; salt: string; side?: number; isBuy?: boolean;
         amount: string; limitPrice: string; batchId: string;
         marketId: string;
       }> = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
       const myOrder = storedOrders.find((o) => o.batchId === batchId.toString());
       if (!myOrder) throw new Error("Order preimage not found in local storage — cannot claim");
       if (!myOrder.marketId) throw new Error("Order is missing marketId — cannot claim");
+
+      // Support legacy localStorage entries that used isBuy (v7.x) instead of side (v8)
+      const orderSide = myOrder.side ?? (myOrder.isBuy ? 0 : 1);
 
       const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
       if (!relayerUrl) throw new Error("NEXT_PUBLIC_RELAYER_URL is not set");
@@ -755,7 +758,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         body: JSON.stringify({
           batchId:    batchId.toString(),
           marketId:   myOrder.marketId,
-          isBuy:      myOrder.isBuy,
+          side:       orderSide,
           amount:     myOrder.amount,
           limitPrice: myOrder.limitPrice,
           salt:       myOrder.salt,
@@ -867,11 +870,17 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       .catch(() => { /* tx is on-chain, just slow — balance will refresh on next poll */ });
   };
 
+  // OrderSide constants (must match BatchVault v8 OrderSide enum)
+  const YES_BUY  = 0;
+  const YES_SELL = 1;
+  const NO_BUY   = 2;
+  // const NO_SELL  = 3; // reserved for future use
+
   // ── Submit order (ephemeral wallet privacy pattern) ───────────────────────────
-  // BUY: ephemeral keypair → fund → sign all 3 sigs in-browser → no settlement leak
-  // SELL: unchanged — YES tokens must come from real wallet
+  // BUY (YES or NO): ephemeral keypair → fund → sign all 3 sigs in-browser → no settlement leak
+  // SELL (YES or NO): CTF approval + real wallet sign + relayer commitment
   const handleOrderSubmit = async (params: {
-    commitment: `0x${string}`; amount: bigint; salt: `0x${string}`; isBuy: boolean; limitPrice: bigint;
+    commitment: `0x${string}`; amount: bigint; salt: `0x${string}`; side: number; limitPrice: bigint;
   }) => {
     if (!selectedMarket) return;
     setChainError(null);
@@ -881,7 +890,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     setSubmitStep("approving");
     const walletClient = await ensureAmoy();
 
-    if (params.isBuy) {
+    if (params.side === YES_BUY || params.side === NO_BUY) {
       // ── BUY: ephemeral wallet pattern ──────────────────────────────────────
       const ephemeralPrivateKey = generatePrivateKey();
       const ephemeralAccount    = privateKeyToAccount(ephemeralPrivateKey);
@@ -904,7 +913,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
             commitment:     null,   // filled in after relayer confirms
             salt:           null,
             amount:         params.amount.toString(),
-            isBuy:          true,
+            side:           params.side,  // 0=YES_BUY, 2=NO_BUY
             limitPrice:     params.limitPrice.toString(),
             batchId:        "0",
             marketId:       selectedMarket.conditionId,
@@ -963,7 +972,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
           // in _verifyCommitments at settlement. Using batch.batchMarketId was wrong
           // when batch.batchId === 0n (MOCK_BATCH has bytes32(0) as marketId).
           marketId:   selectedMarket.conditionId as `0x${string}`,
-          isBuy:      true,
+          side:       params.side,  // YES_BUY=0 or NO_BUY=2
           amount:     chunkAmount,
           limitPrice: params.limitPrice,
           salt:       chunkSalt,
@@ -1034,7 +1043,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
             marketId:       selectedMarket.conditionId,
             batchId:        actualBatchId,
             signer:         ephemeralAddress,
-            isBuy: true, isSell: false,
+            side:           params.side,  // 0=YES_BUY, 2=NO_BUY
             amount:         chunk.chunkAmount.toString(),
             limitPrice:     params.limitPrice.toString(),
             salt:           chunk.chunkSalt,
@@ -1070,7 +1079,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
               commitment:       chunk.chunkCommitment,
               salt:             chunk.chunkSalt,
               amount:           chunk.chunkAmount.toString(),
-              isBuy:            true,
+              side:             params.side,  // 0=YES_BUY, 2=NO_BUY
               limitPrice:       params.limitPrice.toString(),
               batchId:          actualBatchId,
               marketId:         selectedMarket.conditionId,
@@ -1140,7 +1149,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         marketId:       selectedMarket.conditionId,
         batchId:        batch.batchId.toString(),
         signer:         walletAddress,
-        isBuy: false, isSell: true,
+        side:           params.side,  // 1=YES_SELL or 3=NO_SELL
         amount:         params.amount.toString(),
         limitPrice:     params.limitPrice.toString(),
         salt:           params.salt,
@@ -1168,8 +1177,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
           commitment:       params.commitment,
           salt:             params.salt,
           amount:           params.amount.toString(),
-          isBuy:            false,
-          isSell:           true,   // distinguish sell from "buy NO"
+          side:             params.side,   // 1=YES_SELL or 3=NO_SELL
           limitPrice:       params.limitPrice.toString(),
           batchId:          batch.batchId.toString(),
           marketId:         selectedMarket.conditionId,

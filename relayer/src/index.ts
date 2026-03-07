@@ -205,12 +205,13 @@ const server = createServer((req, res) => {
   // POST /order
   //
   // Privacy path (recommended) — include `signature`, `commitment`, `nonce`, `deadline`:
-  //   { marketId, batchId, signer, isBuy, amount, limitPrice, salt,
+  //   { marketId, batchId, signer, side, amount, limitPrice, salt,
   //     commitment, signature, nonce, deadline }
-  //   → relayer calls commitOrderFor() on-chain; only relayer address visible
+  //   side: 0=YES_BUY, 1=YES_SELL, 2=NO_BUY, 3=NO_SELL (v8, replaces isBuy bool)
+  //   → relayer calls commit*OrderFor() on-chain; only relayer address visible
   //
   // Legacy path — omit `signature`:
-  //   { marketId, batchId, trader, isBuy, amount, limitPrice, salt }
+  //   { marketId, batchId, trader, side, amount, limitPrice, salt }
   //   → trader already committed on-chain; relayer just stores order details
   if (req.method === "POST" && req.url === "/order") {
     let body = "";
@@ -218,14 +219,14 @@ const server = createServer((req, res) => {
     req.on("end", async () => {
       try {
         const data = JSON.parse(body);
-        const { marketId, batchId, isBuy, amount, limitPrice, salt } = data;
+        const { marketId, batchId, side, amount, limitPrice, salt } = data;
 
         if (!marketId) {
           send(400, { error: "Missing required field: marketId (Polymarket condition ID)" });
           return;
         }
-        if (batchId === undefined || isBuy === undefined || !amount || !limitPrice || !salt) {
-          send(400, { error: "Missing fields: batchId, isBuy, amount, limitPrice, salt" });
+        if (batchId === undefined || side === undefined || !amount || !limitPrice || !salt) {
+          send(400, { error: "Missing fields: batchId, side, amount, limitPrice, salt" });
           return;
         }
         if (!missingVars.length === false) {
@@ -237,9 +238,10 @@ const server = createServer((req, res) => {
         const state = await ensureMarket(marketId as `0x${string}`);
         const { processor } = state;
 
+        const sideNum = Number(side); // 0=YES_BUY, 1=YES_SELL, 2=NO_BUY, 3=NO_SELL
         const order = {
           trader:     (data.signer ?? data.trader) as `0x${string}`,
-          isBuy:      Boolean(isBuy),
+          side:       sideNum,
           amount:     BigInt(amount),
           limitPrice: BigInt(limitPrice),
           salt:       salt as `0x${string}`,
@@ -252,7 +254,9 @@ const server = createServer((req, res) => {
             send(400, { error: "Privacy path requires: signer, commitment, nonce, deadline, signature" });
             return;
           }
-          if (data.isSell) {
+          // SELL orders (YES_SELL=1, NO_SELL=3): tokens pre-deposited on-chain
+          const isSellSide = sideNum === 1 || sideNum === 3;
+          if (isSellSide) {
             await processor.submitSellCommitmentFor(
               BigInt(batchId),
               order,
@@ -354,7 +358,7 @@ const server = createServer((req, res) => {
           saveWalletHistoryEntry(walletAddr, {
             commitment:     (data.commitment as string).toLowerCase(),
             batchId:        actualBatchId.toString(),
-            isBuy:          Boolean(isBuy),
+            side:           sideNum,
             amount:         String(amount),
             limitPrice:     String(limitPrice),
             salt:           String(salt),
@@ -375,7 +379,8 @@ const server = createServer((req, res) => {
   // ZK claim: user sends their order preimage; relayer builds Merkle path,
   // generates ZK proof, calls claimWithProof() on-chain, and returns txHash.
   //
-  // Body: { batchId, marketId, isBuy, amount, limitPrice, salt, recipient }
+  // Body: { batchId, marketId, side, amount, limitPrice, salt, recipient }
+  //   side: 0=YES_BUY, 1=YES_SELL, 2=NO_BUY, 3=NO_SELL (v8, replaces isBuy bool)
   // Response: { ok: true, txHash }
   //
   // Privacy: the relayer submits claimWithProof() as msg.sender — neither the
@@ -387,10 +392,10 @@ const server = createServer((req, res) => {
     req.on("end", async () => {
       try {
         const data = JSON.parse(body);
-        const { batchId, marketId, isBuy, amount, limitPrice, salt, recipient } = data;
+        const { batchId, marketId, side, amount, limitPrice, salt, recipient } = data;
 
-        if (!batchId || !marketId || isBuy === undefined || !amount || !limitPrice || !salt || !recipient) {
-          send(400, { error: "Missing fields: batchId, marketId, isBuy, amount, limitPrice, salt, recipient" });
+        if (!batchId || !marketId || side === undefined || !amount || !limitPrice || !salt || !recipient) {
+          send(400, { error: "Missing fields: batchId, marketId, side, amount, limitPrice, salt, recipient" });
           return;
         }
         if (missingVars.length > 0) {
@@ -413,9 +418,6 @@ const server = createServer((req, res) => {
           clearingPrice: bigint;
           claimMerkleRoot: `0x${string}`;
           commitmentCount: bigint;
-          yesTokensReceived: bigint;
-          filledSellYes: bigint;
-          totalFilledBuyVol: bigint;
         };
 
         if (batchRaw.status !== 2 /* SETTLED */) {
@@ -437,21 +439,19 @@ const server = createServer((req, res) => {
         }
 
         // 3. Generate ZK claim proof
+        const { OrderSide } = await import("./types.js");
         const prover = new ZKClaimProver(baseConfig.useRealZk ?? false);
         const { proof, publicInputs } = await prover.generateProof({
-          batchId:           batchIdBig,
-          claimMerkleRoot:   batchRaw.claimMerkleRoot,
-          clearingPrice:     batchRaw.clearingPrice,
-          totalFilledBuyVol: batchRaw.totalFilledBuyVol,
-          yesTokensReceived: batchRaw.yesTokensReceived,
-          filledSellYes:     batchRaw.filledSellYes,
-          marketId:          marketId  as `0x${string}`,
-          isBuy:             Boolean(isBuy),
-          amount:            amountBig,
-          limitPrice:        limitPriceBig,
-          salt:              salt      as `0x${string}`,
+          batchId:         batchIdBig,
+          claimMerkleRoot: batchRaw.claimMerkleRoot,
+          clearingPrice:   batchRaw.clearingPrice,
+          marketId:        marketId  as `0x${string}`,
+          side:            Number(side) as typeof OrderSide[keyof typeof OrderSide], // 0-3
+          amount:          amountBig,
+          limitPrice:      limitPriceBig,
+          salt:            salt      as `0x${string}`,
           allCommitments,
-          recipient:         recipient as `0x${string}`,
+          recipient:       recipient as `0x${string}`,
         });
 
         // 4. Submit claimWithProof() on-chain (relayer is msg.sender — no trader address leaked)
@@ -678,7 +678,7 @@ const BATCH_CLOSED_EVENT = parseAbiItem(
   "event BatchClosed(uint256 indexed batchId, uint256 commitmentCount)",
 );
 const BATCH_SETTLED_EVENT = parseAbiItem(
-  "event BatchSettled(uint256 indexed batchId, uint256 clearingPrice, uint256 totalBuyVolume, uint256 totalSellVolume, uint256 netBuyAmount, uint256 yesTokensReceived)",
+  "event BatchSettled(uint256 indexed batchId, uint256 clearingPrice, uint256 filledYesBuyVol, uint256 filledNoBuyVol, uint256 filledYesSellQty, uint256 filledNoSellQty, uint256 splitQty, uint256 mergeQty)",
 );
 
 let fromBlock = 0n;
@@ -726,7 +726,7 @@ async function getHistoryRedis(): Promise<any | null> {
 interface WalletHistoryEntry {
   commitment:     string;
   batchId:        string;
-  isBuy:          boolean;
+  side:           number;  // OrderSide: 0=YES_BUY, 1=YES_SELL, 2=NO_BUY, 3=NO_SELL (v8)
   amount:         string;
   limitPrice:     string;
   salt:           string;

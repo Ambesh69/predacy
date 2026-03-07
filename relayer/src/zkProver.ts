@@ -20,9 +20,10 @@ export interface ProofInputs {
   orders:           Order[];
   commitments:      `0x${string}`[];
   clearingPrice:    bigint;
-  netBuyAmount:     bigint;
-  filledBuyVolume:  bigint;
-  filledSellVolume: bigint;
+  filledYesBuyVol:  bigint; // USDC from filled YES_BUY orders
+  filledNoBuyVol:   bigint; // USDC from filled NO_BUY orders
+  filledYesSellQty: bigint; // YES tokens from filled YES_SELL orders
+  filledNoSellQty:  bigint; // NO tokens from filled NO_SELL orders
 }
 
 export interface ProofOutput {
@@ -61,13 +62,17 @@ export class ZKProver {
     }
 
     // Prototype: mock proof (MockBatchVerifier accepts anything)
+    // Public inputs match BatchVault v8 settleBatch() publicInputs[0..5]:
+    //   [0] commitmentRoot, [1] clearingPrice, [2] filledYesBuyVol,
+    //   [3] filledNoBuyVol, [4] filledYesSellQty, [5] filledNoSellQty
     console.log("[ZKProver] Using mock proof (prototype mode)");
     const publicInputs: `0x${string}`[] = [
       commitmentRoot,
       this._toBytes32(inputs.clearingPrice),
-      this._toBytes32(inputs.filledBuyVolume),
-      this._toBytes32(inputs.filledSellVolume),
-      this._toBytes32(inputs.netBuyAmount),
+      this._toBytes32(inputs.filledYesBuyVol),
+      this._toBytes32(inputs.filledNoBuyVol),
+      this._toBytes32(inputs.filledYesSellQty),
+      this._toBytes32(inputs.filledNoSellQty),
     ];
     return {
       proof: "0x",
@@ -149,8 +154,12 @@ export class ZKProver {
     const noir    = new Noir(circuit);
 
     // -- Build witness inputs ------------------------------------------------
+    // NOTE: The Noir circuit (batch_clearing/src/main.nr) needs to be updated
+    // for v8 4-sided orders (side: u8 instead of is_buy: bool).
+    // For now, the real prover path uses `side` directly; update the circuit
+    // when the ZK proving system is brought up to v8.
     const paddingOrder = {
-      is_buy:      false,
+      side:        0,    // OrderSide.YES_BUY = 0 (safe padding default)
       amount:      "0",
       limit_price: "0",
       salt:        Array(32).fill(0) as number[],
@@ -161,7 +170,7 @@ export class ZKProver {
 
     // Pad orders array to MAX_ORDERS=8
     const circuitOrders: typeof paddingOrder[] = inputs.orders.map((o) => ({
-      is_buy:      o.isBuy,
+      side:        o.side,           // uint8 OrderSide enum (v8)
       amount:      o.amount.toString(),
       limit_price: o.limitPrice.toString(),
       salt:        this._hexToBytes(o.salt as `0x${string}`, 32),
@@ -180,13 +189,14 @@ export class ZKProver {
     }
 
     const witnessInputs = {
-      // Public inputs (must match circuit signature order)
-      commitment_root: this._hexToBytes(commitmentRoot, 32),
-      clearing_price:  inputs.clearingPrice.toString(),
-      total_buy_vol:   inputs.filledBuyVolume.toString(),
-      total_sell_vol:  inputs.filledSellVolume.toString(),
-      net_buy_amount:  inputs.netBuyAmount.toString(),
-      order_count:     orderCount.toString(),
+      // Public inputs (must match circuit signature order — update circuit for v8)
+      commitment_root:    this._hexToBytes(commitmentRoot, 32),
+      clearing_price:     inputs.clearingPrice.toString(),
+      filled_yes_buy_vol: inputs.filledYesBuyVol.toString(),
+      filled_no_buy_vol:  inputs.filledNoBuyVol.toString(),
+      filled_yes_sell_qty:inputs.filledYesSellQty.toString(),
+      filled_no_sell_qty: inputs.filledNoSellQty.toString(),
+      order_count:        orderCount.toString(),
       // Private inputs (witness -- never revealed on-chain)
       market_id:   this._hexToBytes(inputs.marketId, 32),
       orders:      circuitOrders,

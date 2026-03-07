@@ -125,7 +125,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     ephemeralPrivateKey: `0x${string}`;
     ephemeralAddress:    `0x${string}`;
     fundingAmount:       bigint;
-    params:              { commitment: `0x${string}`; amount: bigint; salt: `0x${string}`; isBuy: boolean; limitPrice: bigint };
+    params:              { commitment: `0x${string}`; amount: bigint; salt: `0x${string}`; side: number; limitPrice: bigint };
     batchId:             bigint;
     deadline:            bigint;
     contracts:           ReturnType<typeof getContracts>;
@@ -137,7 +137,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   const [position, setPosition]       = useState<{
     filledAmount: bigint;
     refundAmount: bigint;
-    isBuy: boolean;
+    side: number;
     claimed: boolean;
   } | null>(null);
   const [claimLoading, setClaimLoading] = useState(false);
@@ -316,7 +316,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
           abi: BATCH_VAULT_ABI,
           functionName: "getPosition",
           args: [batch.batchId, myOrder.commitment as `0x${string}`],
-        }) as { filledAmount: bigint; refundAmount: bigint; isBuy: boolean; claimed: boolean };
+        }) as { filledAmount: bigint; refundAmount: bigint; side: number; claimed: boolean };
         if (!cancelled) setPosition(pos);
       } catch {
         // RPC hiccup — keep current
@@ -356,7 +356,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
             const ephemeralAccount = privateKeyToAccount(ephemeralPrivateKey);
             const ephemeralWalletClient = createWalletClient({ account: ephemeralAccount, chain: ACTIVE_CHAIN, transport: http() });
 
-            const actualCommitment = computeCommitment({ marketId: id as `0x${string}`, isBuy: params.isBuy, amount: params.amount, limitPrice: params.limitPrice, salt: params.salt });
+            const actualCommitment = computeCommitment({ marketId: id as `0x${string}`, side: params.side, amount: params.amount, limitPrice: params.limitPrice, salt: params.salt });
             const ephemeralNonce = await publicClient.readContract({ address: contracts.batchVault, abi: BATCH_VAULT_ABI, functionName: "nonces", args: [ephemeralAddress] }) as bigint;
 
             // v6 contract: batchId removed from CommitOrder EIP-712 — sig valid for any batch.
@@ -426,7 +426,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
             const resp = await fetch(`${relayerUrl}/order`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ marketId: id, batchId: batchId.toString(), signer: ephemeralAddress, isBuy: true, isSell: false, amount: params.amount.toString(), limitPrice: params.limitPrice.toString(), salt: params.salt, commitment: actualCommitment, signature, nonce: ephemeralNonce.toString(), deadline: deadline.toString(), transferAuth, requeueAuths }),
+              body: JSON.stringify({ marketId: id, batchId: batchId.toString(), signer: ephemeralAddress, side: params.side, amount: params.amount.toString(), limitPrice: params.limitPrice.toString(), salt: params.salt, commitment: actualCommitment, signature, nonce: ephemeralNonce.toString(), deadline: deadline.toString(), transferAuth, requeueAuths }),
             });
 
             const relayerData = await resp.json().catch(() => ({}));
@@ -441,7 +441,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
             try {
               const key = `predacy:orders:${walletAddress!.toLowerCase()}`;
               const existing: unknown[] = JSON.parse(localStorage.getItem(key) ?? "[]");
-              existing.unshift({ commitment: actualCommitment, salt: params.salt, amount: params.amount.toString(), isBuy: true, limitPrice: params.limitPrice.toString(), batchId: actualBatchId, marketId: id, marketQuestion: market?.question ?? null, timestamp: Date.now(), ephemeralKey: ephemeralPrivateKey, ephemeralAddress, railgun: true });
+              existing.unshift({ commitment: actualCommitment, salt: params.salt, amount: params.amount.toString(), side: params.side, limitPrice: params.limitPrice.toString(), batchId: actualBatchId, marketId: id, marketQuestion: market?.question ?? null, timestamp: Date.now(), ephemeralKey: ephemeralPrivateKey, ephemeralAddress, railgun: true });
               localStorage.setItem(key, JSON.stringify(existing.slice(0, 200)));
             } catch { /* ignore quota / SSR errors */ }
           } catch (e: any) {
@@ -558,11 +558,14 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   //     4. On-chain: Transfer(ephemeralAddress → vault) — NOT realWallet!
   //     5. Claim: POST /claim-proof to relayer — relayer generates ZK proof + submits on-chain
   //   SELL orders: unchanged (real wallet signs everything; YES tokens must come from real wallet)
+  // YES_BUY=0, YES_SELL=1, NO_BUY=2, NO_SELL=3 (matches BatchVault v8 OrderSide enum)
+  const YES_BUY = 0;
+
   const handleOrderSubmit = async (params: {
     commitment: `0x${string}`;
     amount: bigint;
     salt: `0x${string}`;
-    isBuy: boolean;
+    side: number;
     limitPrice: bigint;
   }) => {
     setChainError(null);
@@ -573,7 +576,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     const walletClient = await ensureAmoy();
 
     // ── BUY ORDER: ephemeral wallet pattern ──────────────────────────────────
-    if (params.isBuy) {
+    if (params.side === YES_BUY) {
       // 1. Generate fresh ephemeral keypair (in-memory only)
       const ephemeralPrivateKey = generatePrivateKey();
       const ephemeralAccount    = privateKeyToAccount(ephemeralPrivateKey);
@@ -613,7 +616,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       // commitment hashes using batch.marketId at settlement, so they must match.
       const actualCommitment = computeCommitment({
         marketId:   id as `0x${string}`,
-        isBuy:      params.isBuy,
+        side:       params.side,
         amount:     params.amount,
         limitPrice: params.limitPrice,
         salt:       params.salt,
@@ -736,8 +739,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
           marketId:     id,
           batchId:      batch.batchId.toString(),
           signer:       ephemeralAddress,  // ← ephemeral, NOT realWallet
-          isBuy:        true,
-          isSell:       false,
+          side:         params.side,
           amount:       params.amount.toString(),
           limitPrice:   params.limitPrice.toString(),
           salt:         params.salt,
@@ -784,7 +786,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
           commitment:      actualCommitment,
           salt:            params.salt,
           amount:          params.amount.toString(),
-          isBuy:           true,
+          side:            params.side,
           limitPrice:      params.limitPrice.toString(),
           batchId:         actualBatchId,
           marketId:        id,
@@ -875,8 +877,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         marketId:   id,
         batchId:    batch.batchId.toString(),
         signer:     walletAddress,
-        isBuy:      false,
-        isSell:     true,
+        side:       params.side,
         amount:     params.amount.toString(),
         limitPrice: params.limitPrice.toString(),
         salt:       params.salt,
@@ -914,7 +915,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         commitment:     params.commitment,
         salt:           params.salt,
         amount:         params.amount.toString(),
-        isBuy:          false,
+        side:           params.side,
         limitPrice:     params.limitPrice.toString(),
         batchId:        batch.batchId.toString(),
         marketId:       id,
@@ -1284,7 +1285,11 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
                 />
                 {position && (
                   <div className="border-t border-border/40 pt-3 space-y-3">
-                    <Row label="Side" value={position.isBuy ? "BUY YES" : "SELL YES"} />
+                    <Row label="Side" value={
+                      position.side === 0 ? "BUY YES" :
+                      position.side === 1 ? "SELL YES" :
+                      position.side === 2 ? "BUY NO" : "SELL NO"
+                    } />
                     <Row label="Filled" value={`$${(Number(position.filledAmount) / 1e6).toFixed(2)}`} />
                     {position.refundAmount > 0n && (
                       <Row label="Refund" value={`$${(Number(position.refundAmount) / 1e6).toFixed(2)}`} />
@@ -1308,12 +1313,12 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
                   <p className="text-accent text-[11px] tracking-widest uppercase">✓ CLAIMED</p>
                   {position.filledAmount > 0n && (
                     <p className="text-muted-dim text-[10px]">
-                      {position.isBuy && batch.clearingPrice > 0n
-                        ? `~${(Number(position.filledAmount) / Number(batch.clearingPrice)).toFixed(2)} YES tokens received`
+                      {(position.side === 0 || position.side === 2) && batch.clearingPrice > 0n
+                        ? `~${(Number(position.filledAmount) / Number(batch.clearingPrice)).toFixed(2)} ${position.side === 2 ? "NO" : "YES"} tokens received`
                         : `$${(Number(position.filledAmount) / 1e6).toFixed(2)} USDC received`}
-                      {position.refundAmount > 0n && ` + ${position.isBuy
+                      {position.refundAmount > 0n && ` + ${(position.side === 0 || position.side === 2)
                         ? `$${(Number(position.refundAmount) / 1e6).toFixed(2)} refund`
-                        : `${(Number(position.refundAmount) / 1e6).toFixed(2)} YES tokens refunded`}`}
+                        : `${(Number(position.refundAmount) / 1e6).toFixed(2)} ${position.side === 1 ? "YES" : "NO"} tokens refunded`}`}
                     </p>
                   )}
                 </div>

@@ -1,35 +1,57 @@
 /// <reference types="vitest/importMeta" />
+import { OrderSide } from "./types.js";
 import type { Order, ClearingResult } from "./types.js";
 
 const PRICE_DECIMALS = 1_000_000n; // 6 decimal places
 
 /**
- * Compute the batch clearing price using a sealed-bid batch auction.
+ * Compute the batch clearing price using a 4-sided sealed-bid batch auction.
  *
  * Order types:
- *   isBuy=true  → buy YES: amount in USDC
- *   isBuy=false → sell YES: amount in YES tokens
+ *   YES_BUY  — pay USDC for YES tokens:  amount in USDC, limitPrice = max YES price
+ *   YES_SELL — sell YES for USDC:         amount in YES tokens, limitPrice = min YES price
+ *   NO_BUY   — pay USDC for NO tokens:   amount in USDC, limitPrice = max NO price
+ *   NO_SELL  — sell NO for USDC:          amount in NO tokens, limitPrice = min NO price
+ *
+ * At clearing price P (YES price, 6-decimal):
+ *   noPrice = 1_000_000 - P
+ *   YES_BUY  fills when order.limitPrice >= P       (willing to pay at most limitPrice per YES)
+ *   YES_SELL fills when order.limitPrice <= P       (willing to accept at least limitPrice per YES)
+ *   NO_BUY   fills when order.limitPrice >= noPrice (willing to pay at most limitPrice per NO)
+ *   NO_SELL  fills when order.limitPrice <= noPrice (willing to accept at least limitPrice per NO)
  *
  * Algorithm (uniform price, max-volume):
- *  1. Collect all buy and sell orders
- *  2. For each candidate clearing price P (from all submitted limit prices):
- *     - buyVol(P)      = Σ buy.amount where buy.limitPrice >= P            (USDC)
- *     - sellVolUSDC(P) = Σ sell.amount * P / 1e6 where sell.limitPrice <= P (YES→USDC equiv)
- *     - filledVol(P)   = min(buyVol(P), sellVolUSDC(P))
- *  3. Choose P that maximizes filledVol(P)
- *     - Tie-break: highest price (favors sellers, common in batch auctions)
- *  4. All orders at or better than P are filled at exactly P
+ *  1. Candidate prices: all YES limit prices + complements of all NO limit prices
+ *  2. For each candidate P:
+ *     - totalBuyUSDC  = yesBuyVol(P) + noBuyVol(P)
+ *     - totalSellUSDC = yesSellUSDC(P) + noSellUSDC(P)
+ *     - filledVol(P)  = min(totalBuyUSDC, totalSellUSDC)
+ *  3. Choose P that maximises filledVol(P)
+ *     - Tie-break: highest price (slight seller favoritism, common in batch auctions)
  *
- * If no crossing exists, returns clearingPrice = 0 and routes all buys to Polymarket.
+ * If no internal crossing exists (filledVol = 0), returns clearingPrice = 0 so
+ * batchProcessor anchors to Polymarket mid-price for price discovery.
+ *
+ * Note: YES and NO buyers can always cross with each other via CTF.splitPosition
+ * (the vault's own USDC). This min(buy, sell) objective biases toward batches with
+ * internal sell-side liquidity; the gap is covered by the relayer CLOB fill in
+ * processBatch (much smaller than v7.3 now that split/merge handle balanced batches).
  */
 export function computeClearingPrice(orders: Order[]): ClearingResult {
-  const buys = orders.filter((o) => o.isBuy);
-  const sells = orders.filter((o) => !o.isBuy);
+  const yesBuys  = orders.filter((o) => o.side === OrderSide.YES_BUY);
+  const yesSells = orders.filter((o) => o.side === OrderSide.YES_SELL);
+  const noBuys   = orders.filter((o) => o.side === OrderSide.NO_BUY);
+  const noSells  = orders.filter((o) => o.side === OrderSide.NO_SELL);
 
-  // Collect all candidate prices from submitted limit prices
+  // Candidate prices: all YES/SELL limit prices + complements of all NO limit prices
   const candidatePrices = new Set<bigint>();
   for (const o of orders) {
-    candidatePrices.add(o.limitPrice);
+    if (o.side === OrderSide.YES_BUY || o.side === OrderSide.YES_SELL) {
+      candidatePrices.add(o.limitPrice);
+    } else {
+      // NO_BUY / NO_SELL: limitPrice is a NO price → convert to YES equivalent
+      candidatePrices.add(PRICE_DECIMALS - o.limitPrice);
+    }
   }
 
   let bestPrice = 0n;
@@ -37,17 +59,27 @@ export function computeClearingPrice(orders: Order[]): ClearingResult {
 
   for (const price of candidatePrices) {
     if (price <= 0n || price >= PRICE_DECIMALS) continue;
+    const noPrice = PRICE_DECIMALS - price;
 
-    const buyVol = buys
+    // USDC provided by eligible buyers at this price
+    const yesBuyVol = yesBuys
       .filter((o) => o.limitPrice >= price)
       .reduce((sum, o) => sum + o.amount, 0n);
+    const noBuyVol  = noBuys
+      .filter((o) => o.limitPrice >= noPrice)
+      .reduce((sum, o) => sum + o.amount, 0n);
 
-    // Sell orders have amount in YES tokens; convert to USDC-equivalent at this price
-    const sellVolUSDC = sells
+    // USDC-equivalent received by eligible sellers at this price
+    const yesSellUSDC = yesSells
       .filter((o) => o.limitPrice <= price)
-      .reduce((sum, o) => sum + o.amount * price / PRICE_DECIMALS, 0n);
+      .reduce((sum, o) => sum + (o.amount * price) / PRICE_DECIMALS, 0n);
+    const noSellUSDC  = noSells
+      .filter((o) => o.limitPrice <= noPrice)
+      .reduce((sum, o) => sum + (o.amount * noPrice) / PRICE_DECIMALS, 0n);
 
-    const filled = buyVol < sellVolUSDC ? buyVol : sellVolUSDC;
+    const totalBuy  = yesBuyVol + noBuyVol;
+    const totalSell = yesSellUSDC + noSellUSDC;
+    const filled    = totalBuy < totalSell ? totalBuy : totalSell;
 
     if (filled > bestFilledVolume || (filled === bestFilledVolume && price > bestPrice)) {
       bestFilledVolume = filled;
@@ -56,58 +88,45 @@ export function computeClearingPrice(orders: Order[]): ClearingResult {
   }
 
   if (bestPrice === 0n || bestFilledVolume === 0n) {
-    // No crossing — route everything to Polymarket at market price
-    const totalBuyAmount = buys.reduce((sum, o) => sum + o.amount, 0n);
+    // No internal crossing — price will come from Polymarket (batchProcessor anchors to mid)
     return {
-      clearingPrice: 0n,
-      filledBuyVolume: 0n,
-      filledSellVolume: 0n,
-      filledSellYes: 0n,
-      netBuyAmount: totalBuyAmount,
-      netSellYes: 0n,
-      filledOrders: [...orders],
-      unfilledOrders: [],
+      clearingPrice:    0n,
+      filledYesBuyVol:  0n,
+      filledNoBuyVol:   0n,
+      filledYesSellQty: 0n,
+      filledNoSellQty:  0n,
+      filledOrders:     [...orders], // all orders "pending" — re-evaluated at effectiveClearingPrice
+      unfilledOrders:   [],
     };
   }
 
-  // Determine which orders fill at clearingPrice
-  const filledOrders: Order[] = [];
+  // Assign fills at the best crossing price
+  const noPrice = PRICE_DECIMALS - bestPrice;
+  const filledOrders: Order[]   = [];
   const unfilledOrders: Order[] = [];
 
   for (const o of orders) {
-    const fills = o.isBuy ? o.limitPrice >= bestPrice : o.limitPrice <= bestPrice;
-    if (fills) {
-      filledOrders.push(o);
-    } else {
-      unfilledOrders.push(o);
-    }
+    let fills: boolean;
+    if      (o.side === OrderSide.YES_BUY)  fills = o.limitPrice >= bestPrice;
+    else if (o.side === OrderSide.YES_SELL) fills = o.limitPrice <= bestPrice;
+    else if (o.side === OrderSide.NO_BUY)   fills = o.limitPrice >= noPrice;
+    else                                     fills = o.limitPrice <= noPrice; // NO_SELL
+
+    if (fills) filledOrders.push(o);
+    else        unfilledOrders.push(o);
   }
 
-  const filledBuyVolume = filledOrders
-    .filter((o) => o.isBuy)
-    .reduce((sum, o) => sum + o.amount, 0n);
-
-  // filledSellYes: raw YES token count from filled sell orders
-  const filledSellYes = filledOrders
-    .filter((o) => !o.isBuy)
-    .reduce((sum, o) => sum + o.amount, 0n);
-
-  // filledSellVolume: same as filledSellYes (YES tokens) — passed as totalSellVol to contract
-  const filledSellVolume = filledSellYes;
-
-  // Net USDC to route to Polymarket: buy vol minus USDC-equivalent of sell vol
-  const filledSellUSDC = filledSellYes * bestPrice / PRICE_DECIMALS;
-  const netBuyAmount = filledBuyVolume > filledSellUSDC
-    ? filledBuyVolume - filledSellUSDC
-    : 0n;
+  const filledYesBuyVol  = filledOrders.filter((o) => o.side === OrderSide.YES_BUY) .reduce((s, o) => s + o.amount, 0n);
+  const filledNoBuyVol   = filledOrders.filter((o) => o.side === OrderSide.NO_BUY)  .reduce((s, o) => s + o.amount, 0n);
+  const filledYesSellQty = filledOrders.filter((o) => o.side === OrderSide.YES_SELL).reduce((s, o) => s + o.amount, 0n);
+  const filledNoSellQty  = filledOrders.filter((o) => o.side === OrderSide.NO_SELL) .reduce((s, o) => s + o.amount, 0n);
 
   return {
     clearingPrice: bestPrice,
-    filledBuyVolume,
-    filledSellVolume,
-    filledSellYes,
-    netBuyAmount,
-    netSellYes: 0n, // internal crossing is always net-buy; net-sell only arises from Polymarket-anchored price
+    filledYesBuyVol,
+    filledNoBuyVol,
+    filledYesSellQty,
+    filledNoSellQty,
     filledOrders,
     unfilledOrders,
   };
@@ -115,45 +134,32 @@ export function computeClearingPrice(orders: Order[]): ClearingResult {
 
 /**
  * Given an externally-supplied clearing price (e.g. from Polymarket mid-price),
- * compute fill volumes and net positions for settlement.
+ * compute fill volumes for all 4 order types.
  *
- * Used when effectiveClearingPrice differs from the internal crossing price
- * (e.g. sell-only or all-buy batches where price comes from Polymarket).
+ * Used when there is no internal crossing (all-buy, all-sell, or no-crossing batches)
+ * and batchProcessor uses the Polymarket price for settlement.
  */
 export function computeFillsAtPrice(orders: Order[], price: bigint): {
-  filledBuyVolume: bigint;
-  filledSellYes: bigint;
-  netBuyAmount: bigint;
-  netSellYes: bigint;
+  filledYesBuyVol:  bigint;
+  filledNoBuyVol:   bigint;
+  filledYesSellQty: bigint;
+  filledNoSellQty:  bigint;
 } {
-  const PRICE_DECIMALS = 1_000_000n;
-  let filledBuyVolume = 0n;
-  let filledSellYes = 0n;
+  const noPrice = PRICE_DECIMALS - price;
+
+  let filledYesBuyVol  = 0n;
+  let filledNoBuyVol   = 0n;
+  let filledYesSellQty = 0n;
+  let filledNoSellQty  = 0n;
 
   for (const o of orders) {
-    if (o.isBuy && o.limitPrice >= price) {
-      filledBuyVolume += o.amount;
-    } else if (!o.isBuy && o.limitPrice <= price) {
-      filledSellYes += o.amount;
-    }
+    if      (o.side === OrderSide.YES_BUY  && o.limitPrice >= price)   filledYesBuyVol  += o.amount;
+    else if (o.side === OrderSide.NO_BUY   && o.limitPrice >= noPrice)  filledNoBuyVol   += o.amount;
+    else if (o.side === OrderSide.YES_SELL && o.limitPrice <= price)    filledYesSellQty += o.amount;
+    else if (o.side === OrderSide.NO_SELL  && o.limitPrice <= noPrice)  filledNoSellQty  += o.amount;
   }
 
-  const filledSellUSDC = filledSellYes * price / PRICE_DECIMALS;
-  const netBuyAmount  = filledBuyVolume > filledSellUSDC ? filledBuyVolume - filledSellUSDC : 0n;
-  const netSellUSDC   = filledSellUSDC > filledBuyVolume ? filledSellUSDC - filledBuyVolume : 0n;
-
-  // Convert net-sell USDC back to YES tokens using ceiling division to avoid under-selling.
-  // Round-trip truncation (YES→USDC→YES) can understate netSellYes by 1, causing mockSellYes
-  // to mint 1 less USDC than claimPosition owes the seller → revert on transfer.
-  // Ceiling ensures vault always receives enough USDC to cover every filled sell order.
-  // Special case: when there are no buyers at all, netSellYes == filledSellYes exactly.
-  const netSellYes = filledBuyVolume === 0n
-    ? filledSellYes
-    : price > 0n
-      ? (netSellUSDC * PRICE_DECIMALS + price - 1n) / price  // ceiling division
-      : 0n;
-
-  return { filledBuyVolume, filledSellYes, netBuyAmount, netSellYes };
+  return { filledYesBuyVol, filledNoBuyVol, filledYesSellQty, filledNoSellQty };
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -161,63 +167,106 @@ export function computeFillsAtPrice(orders: Order[], price: bigint): {
 if (import.meta.vitest) {
   const { describe, it, expect } = import.meta.vitest;
 
-  describe("computeClearingPrice", () => {
-    it("finds crossing price that maximizes volume", () => {
+  describe("computeClearingPrice (4-sided)", () => {
+    it("finds crossing price that maximises YES_BUY ↔ YES_SELL volume", () => {
       const orders: Order[] = [
-        { trader: "0xA", isBuy: true,  amount: 100_000_000n, limitPrice: 700_000n, salt: "0x01" },
-        { trader: "0xB", isBuy: true,  amount:  50_000_000n, limitPrice: 650_000n, salt: "0x02" },
+        { trader: "0xA" as `0x${string}`, side: OrderSide.YES_BUY,  amount: 100_000_000n, limitPrice: 700_000n, salt: "0x01" as `0x${string}` },
+        { trader: "0xB" as `0x${string}`, side: OrderSide.YES_BUY,  amount:  50_000_000n, limitPrice: 650_000n, salt: "0x02" as `0x${string}` },
         // Carol sells 80 YES tokens at min 0.60
-        { trader: "0xC", isBuy: false, amount:  80_000_000n, limitPrice: 600_000n, salt: "0x03" },
+        { trader: "0xC" as `0x${string}`, side: OrderSide.YES_SELL, amount:  80_000_000n, limitPrice: 600_000n, salt: "0x03" as `0x${string}` },
       ];
 
       const result = computeClearingPrice(orders);
 
-      // At 0.65: buyVol=150, sellVolUSDC=80*0.65=52, filled=52
-      // At 0.70: buyVol=100, sellVolUSDC=80*0.70=56, filled=56 — higher, wins
+      // At 0.65: yesBuyVol=150, yesSellUSDC=80*0.65=52, filled=min(150,52)=52
+      // At 0.70: yesBuyVol=100, yesSellUSDC=80*0.70=56, filled=min(100,56)=56 — higher, wins
       expect(result.clearingPrice).toBe(700_000n);
-      expect(result.filledBuyVolume).toBe(100_000_000n);
-      expect(result.filledSellYes).toBe(80_000_000n);
-      // netBuy = 100 - 80*0.70 = 100 - 56 = 44
-      expect(result.netBuyAmount).toBe(44_000_000n);
+      expect(result.filledYesBuyVol).toBe(100_000_000n);
+      expect(result.filledYesSellQty).toBe(80_000_000n);
+      expect(result.filledNoBuyVol).toBe(0n);
+      expect(result.filledNoSellQty).toBe(0n);
     });
 
     it("returns no-cross result when buys and sells don't cross", () => {
       const orders: Order[] = [
-        { trader: "0xA", isBuy: true,  amount: 100_000_000n, limitPrice: 400_000n, salt: "0x01" },
-        { trader: "0xB", isBuy: false, amount:  50_000_000n, limitPrice: 700_000n, salt: "0x02" },
+        { trader: "0xA" as `0x${string}`, side: OrderSide.YES_BUY,  amount: 100_000_000n, limitPrice: 400_000n, salt: "0x01" as `0x${string}` },
+        { trader: "0xB" as `0x${string}`, side: OrderSide.YES_SELL, amount:  50_000_000n, limitPrice: 700_000n, salt: "0x02" as `0x${string}` },
       ];
 
       const result = computeClearingPrice(orders);
-      // No crossing: buy wants < 0.40, sell wants > 0.70
       expect(result.clearingPrice).toBe(0n);
-      expect(result.netBuyAmount).toBe(100_000_000n); // all buys routed to Polymarket
-      expect(result.filledSellYes).toBe(0n);
+      expect(result.filledYesBuyVol).toBe(0n);
+      expect(result.filledYesSellQty).toBe(0n);
     });
 
-    it("handles all-buy batch", () => {
+    it("handles all-buy batch (no sellers → no internal crossing)", () => {
       const orders: Order[] = [
-        { trader: "0xA", isBuy: true, amount: 100_000_000n, limitPrice: 650_000n, salt: "0x01" },
-        { trader: "0xB", isBuy: true, amount: 200_000_000n, limitPrice: 700_000n, salt: "0x02" },
+        { trader: "0xA" as `0x${string}`, side: OrderSide.YES_BUY, amount: 100_000_000n, limitPrice: 650_000n, salt: "0x01" as `0x${string}` },
+        { trader: "0xB" as `0x${string}`, side: OrderSide.YES_BUY, amount: 200_000_000n, limitPrice: 700_000n, salt: "0x02" as `0x${string}` },
       ];
 
       const result = computeClearingPrice(orders);
-      expect(result.clearingPrice).toBe(0n); // no sells — can't cross internally
-      expect(result.netBuyAmount).toBe(300_000_000n); // route all to Polymarket
-      expect(result.filledSellYes).toBe(0n);
+      expect(result.clearingPrice).toBe(0n); // no sells → price from Polymarket
+      expect(result.filledYesBuyVol).toBe(0n);
     });
 
-    it("computes netBuyAmount correctly with partial internal match", () => {
-      // Buy 100 USDC, sell 60 YES at 0.65 clearing
-      // filledSellUSDC = 60 * 0.65 = 39, netBuy = 100 - 39 = 61
+    it("finds crossing with YES_BUY and NO_SELL (complementary sides)", () => {
+      // YES buyer at 0.65 and NO seller at min 0.35 — they agree at a price near 0.65
+      // At P=0.65: yesBuyVol=100, noSellUSDC=80*(1-0.35)/1e6... wait
+      // NO_SELL.limitPrice=350_000n means they want at least 0.35 per NO token
+      // At P=0.65: noPrice=0.35, NO_SELL fills when limitPrice <= noPrice: 350_000 <= 350_000 → fills
+      // noSellUSDC = 80 * 0.35 = 28
+      // At P=0.65: totalBuy=100, totalSell=0+28=28, filled=28
       const orders: Order[] = [
-        { trader: "0xA", isBuy: true,  amount: 100_000_000n, limitPrice: 700_000n, salt: "0x01" },
-        { trader: "0xB", isBuy: false, amount:  60_000_000n, limitPrice: 600_000n, salt: "0x02" },
+        { trader: "0xA" as `0x${string}`, side: OrderSide.YES_BUY,  amount: 100_000_000n, limitPrice: 650_000n, salt: "0x01" as `0x${string}` },
+        { trader: "0xB" as `0x${string}`, side: OrderSide.NO_SELL,  amount:  80_000_000n, limitPrice: 350_000n, salt: "0x02" as `0x${string}` },
       ];
+
       const result = computeClearingPrice(orders);
-      expect(result.clearingPrice).toBeGreaterThan(0n);
-      expect(result.filledSellYes).toBe(60_000_000n);
-      const expectedNetBuy = result.filledBuyVolume - result.filledSellYes * result.clearingPrice / 1_000_000n;
-      expect(result.netBuyAmount).toBe(expectedNetBuy);
+      // At P=0.65: totalBuy=100, totalSell=80*0.35=28, filled=28
+      expect(result.clearingPrice).toBe(650_000n);
+      expect(result.filledYesBuyVol).toBe(100_000_000n);
+      expect(result.filledNoSellQty).toBe(80_000_000n);
+    });
+
+    it("handles NO_BUY orders at complementary price", () => {
+      // NO buyer wants max 0.40 per NO token → YES price must be ≥ 0.60
+      // YES seller wants min 0.60 per YES → price must be ≥ 0.60
+      // At P=0.60: noPrice=0.40, NO_BUY fills (0.40 >= 0.40), YES_SELL fills (0.60 <= 0.60)
+      const orders: Order[] = [
+        { trader: "0xA" as `0x${string}`, side: OrderSide.NO_BUY,   amount: 100_000_000n, limitPrice: 400_000n, salt: "0x01" as `0x${string}` },
+        { trader: "0xB" as `0x${string}`, side: OrderSide.YES_SELL, amount: 150_000_000n, limitPrice: 600_000n, salt: "0x02" as `0x${string}` },
+      ];
+
+      const result = computeClearingPrice(orders);
+      // At P=0.60: noPrice=0.40
+      //   noBuyVol=100, yesSellUSDC=150*0.60=90, filled=min(100, 90)=90
+      // Candidate prices: 400_000 (NO_BUY complement: 1e6-400_000=600_000) and 600_000 (YES_SELL)
+      // Both candidates = 600_000
+      expect(result.clearingPrice).toBe(600_000n);
+      expect(result.filledNoBuyVol).toBe(100_000_000n);
+      expect(result.filledYesSellQty).toBe(150_000_000n);
+    });
+
+    it("computeFillsAtPrice handles all 4 sides", () => {
+      const orders: Order[] = [
+        { trader: "0xA" as `0x${string}`, side: OrderSide.YES_BUY,  amount: 100_000_000n, limitPrice: 700_000n, salt: "0x01" as `0x${string}` },
+        { trader: "0xB" as `0x${string}`, side: OrderSide.YES_SELL, amount:  80_000_000n, limitPrice: 600_000n, salt: "0x02" as `0x${string}` },
+        { trader: "0xC" as `0x${string}`, side: OrderSide.NO_BUY,   amount:  50_000_000n, limitPrice: 450_000n, salt: "0x03" as `0x${string}` },
+        { trader: "0xD" as `0x${string}`, side: OrderSide.NO_SELL,  amount:  60_000_000n, limitPrice: 300_000n, salt: "0x04" as `0x${string}` },
+      ];
+
+      // At price 0.65: noPrice = 0.35
+      const fills = computeFillsAtPrice(orders, 650_000n);
+
+      // YES_BUY: 700_000 >= 650_000 → fills
+      expect(fills.filledYesBuyVol).toBe(100_000_000n);
+      // YES_SELL: 600_000 <= 650_000 → fills
+      expect(fills.filledYesSellQty).toBe(80_000_000n);
+      // NO_BUY: 450_000 >= 350_000 → fills
+      expect(fills.filledNoBuyVol).toBe(50_000_000n);
+      // NO_SELL: 300_000 <= 350_000 → fills
+      expect(fills.filledNoSellQty).toBe(60_000_000n);
     });
   });
 }

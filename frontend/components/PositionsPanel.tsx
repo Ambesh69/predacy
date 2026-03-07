@@ -13,21 +13,34 @@ const publicClient = createPublicClient({
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
+/** OrderSide mirrors BatchVault v8 enum (0=YES_BUY,1=YES_SELL,2=NO_BUY,3=NO_SELL) */
+const YES_BUY  = 0;
+const YES_SELL = 1;
+const NO_BUY   = 2;
+const NO_SELL  = 3;
+
+/** Derive `side` number from legacy localStorage fields (isBuy, isSell). */
+function legacySideToNum(isBuy?: boolean, isSell?: boolean): number {
+  if (isSell) return YES_SELL;
+  if (isBuy === false) return YES_SELL; // old v7 "isBuy:false" was always YES_SELL
+  return YES_BUY;
+}
+
 interface HistoricalPosition {
   batchId:        bigint;
   batchMarketId:  `0x${string}`;
   batchStatus:    BatchStatus;
   clearingPrice:  bigint;
   marketQuestion?: string;
-  /** True when this is a sell commitment (not a buy-NO) */
-  isSell?: boolean;
+  /** Order side — 0=YES_BUY, 1=YES_SELL, 2=NO_BUY, 3=NO_SELL */
+  side: number;
   position: {
     filledAmount: bigint;
     refundAmount: bigint;
-    isBuy:        boolean;
+    side:         number;
     claimed:      boolean;
   };
-  /** Number of YES tokens received (buy) or YES tokens sold (sell) — computed */
+  /** Number of tokens received (buy) or tokens sold (sell) — computed */
   shares?: number;
   /** True if the batch is still being settled by the relayer */
   settling?: boolean;
@@ -83,22 +96,32 @@ function timeAgo(ts: number) {
 
 // ── Sub-components ────────────────────────────────────────────────────────────
 
-function DirectionBadge({ isBuy, isSell }: { isBuy: boolean; isSell?: boolean }) {
-  if (isSell) {
+function DirectionBadge({ side }: { side: number }) {
+  if (side === YES_SELL) {
     return (
       <span className="text-[9px] tracking-widest uppercase px-1.5 py-0.5 border font-mono border-amber-500/40 text-amber-400 bg-amber-500/5">
         SELL YES
       </span>
     );
   }
+  if (side === NO_SELL) {
+    return (
+      <span className="text-[9px] tracking-widest uppercase px-1.5 py-0.5 border font-mono border-amber-600/40 text-amber-500 bg-amber-600/5">
+        SELL NO
+      </span>
+    );
+  }
+  if (side === NO_BUY) {
+    return (
+      <span className="text-[9px] tracking-widest uppercase px-1.5 py-0.5 border font-mono border-danger/30 text-danger bg-danger/5">
+        BUY NO
+      </span>
+    );
+  }
+  // YES_BUY (default)
   return (
-    <span className={clsx(
-      "text-[9px] tracking-widest uppercase px-1.5 py-0.5 border font-mono",
-      isBuy
-        ? "border-accent/30 text-accent bg-accent/5"
-        : "border-danger/30 text-danger bg-danger/5",
-    )}>
-      {isBuy ? "YES" : "NO"}
+    <span className="text-[9px] tracking-widest uppercase px-1.5 py-0.5 border font-mono border-accent/30 text-accent bg-accent/5">
+      BUY YES
     </span>
   );
 }
@@ -116,6 +139,7 @@ function SkeletonRow() {
 interface PositionRowProps {
   batchId:        bigint;
   position:       HistoricalPosition["position"];
+  side:           number;   // 0=YES_BUY, 1=YES_SELL, 2=NO_BUY, 3=NO_SELL
   clearingPrice:  bigint;
   marketQuestion?: string;
   shares?:        number;
@@ -123,17 +147,16 @@ interface PositionRowProps {
   isClaiming:     boolean;
   claimError?:    string;
   isActive:       boolean;  // true = unclaimed settled; false = claimed (holding)
-  isSell?:        boolean;  // true = sell order (shows SELL badge + SOLD ✓, no claim button)
   onClose?:       () => void; // pre-fills SELL form for this position
 }
 
 function PositionRow({
-  batchId, position, clearingPrice, marketQuestion, shares,
-  onClaim, isClaiming, claimError, isActive, isSell, onClose,
+  batchId, position, side, clearingPrice, marketQuestion, shares,
+  onClaim, isClaiming, claimError, isActive, onClose,
 }: PositionRowProps) {
 
+  const isSell      = side === YES_SELL || side === NO_SELL;
   const avgCents    = clearingPrice > 0n ? (Number(clearingPrice) / 1e4).toFixed(1) : "—";
-  const filledUsdc  = Number(position.filledAmount) / 1e6;
   const sharesDisp  = shares != null ? shares.toFixed(1) : "—";
 
   return (
@@ -141,7 +164,7 @@ function PositionRow({
       {/* Row header: direction badge + question + batch ID */}
       <div className="flex items-start gap-2 min-w-0">
         <div className="flex-shrink-0 pt-px">
-          <DirectionBadge isBuy={position.isBuy} isSell={isSell} />
+          <DirectionBadge side={side} />
         </div>
         <p className="text-[11px] text-text leading-snug line-clamp-2 min-w-0 flex-1">
           {marketQuestion ?? `Batch #${batchId.toString()}`}
@@ -230,7 +253,7 @@ function PositionRow({
 // ── Activity row ──────────────────────────────────────────────────────────────
 interface ActivityRowProps {
   batchId:        bigint;
-  isBuy:          boolean;
+  side:           number;   // 0=YES_BUY, 1=YES_SELL, 2=NO_BUY, 3=NO_SELL
   amount:         bigint;
   clearingPrice?: bigint;
   shares?:        number;
@@ -240,27 +263,25 @@ interface ActivityRowProps {
 }
 
 function ActivityRow({
-  batchId, isBuy, amount, clearingPrice, shares, marketQuestion, timestamp, batchStatus,
+  batchId, side, amount, clearingPrice, shares, marketQuestion, timestamp, batchStatus,
 }: ActivityRowProps) {
-  const amountDisplay = isBuy
-    ? fUsdc(amount)
-    : `${(Number(amount) / 1e6).toFixed(2)} YES`;
+  const isBuyOrder = side === YES_BUY || side === NO_BUY;
+  const tokenLabel = (side === YES_BUY || side === YES_SELL) ? "YES" : "NO";
 
-  const sharesDisplay = clearingPrice && clearingPrice > 0n && isBuy && shares != null
+  const amountDisplay = isBuyOrder
+    ? fUsdc(amount)
+    : `${(Number(amount) / 1e6).toFixed(2)} ${tokenLabel}`;
+
+  const sharesDisplay = clearingPrice && clearingPrice > 0n && isBuyOrder && shares != null
     ? `${shares.toFixed(1)} shares`
     : null;
 
   return (
     <div className="px-4 py-3 border-b border-border/40 last:border-b-0 flex items-start gap-3">
       {/* Type badge */}
-      <span className={clsx(
-        "text-[9px] tracking-widest uppercase px-1.5 py-0.5 border font-mono flex-shrink-0 mt-0.5",
-        isBuy
-          ? "border-accent/30 text-accent bg-accent/5"
-          : "border-danger/30 text-danger bg-danger/5",
-      )}>
-        {isBuy ? "BUY YES" : "SELL YES"}
-      </span>
+      <div className="flex-shrink-0 mt-0.5">
+        <DirectionBadge side={side} />
+      </div>
 
       {/* Market + batch */}
       <div className="flex-1 min-w-0 space-y-0.5">
@@ -326,7 +347,7 @@ function UnfilledCard({ hp, onSweep }: {
   return (
     <div className="px-4 py-3 border-b border-border/40">
       <div className="flex items-center gap-2 mb-1">
-        <DirectionBadge isBuy={hp.position.isBuy} />
+        <DirectionBadge side={hp.side} />
         <span className="text-[10px] text-muted tracking-widest uppercase">Not filled</span>
         <span className="text-[9px] text-muted-dim ml-auto">#{hp.batchId.toString()}</span>
       </div>
@@ -335,7 +356,7 @@ function UnfilledCard({ hp, onSweep }: {
         <p className="text-[10px] text-text leading-snug line-clamp-2 mb-2">{hp.marketQuestion}</p>
       )}
 
-      {hp.position.isBuy ? (
+      {(hp.side === YES_BUY || hp.side === NO_BUY) ? (
         <div className="space-y-2">
           <p className="text-[9px] text-muted-dim leading-snug">
             Your limit was below the batch clearing price.
@@ -408,7 +429,7 @@ export default function PositionsPanel({
 }: PositionsPanelProps) {
   const [historicalPositions, setHistoricalPositions] = useState<HistoricalPosition[]>([]);
   const [allStoredOrders,     setAllStoredOrders]     = useState<Array<{
-    batchId: string; isBuy: boolean; amount: string; marketQuestion?: string;
+    batchId: string; side: number; amount: string; marketQuestion?: string;
     timestamp?: number; clearingPrice?: bigint; shares?: number; batchStatus?: BatchStatus;
   }>>([]);
   const [scanning,      setScanning]      = useState(false);
@@ -419,8 +440,10 @@ export default function PositionsPanel({
 
   // Current-batch position (fetched when settled)
   const [currentPosition, setCurrentPosition] = useState<{
-    filledAmount: bigint; refundAmount: bigint; isBuy: boolean; claimed: boolean; isSell?: boolean;
+    filledAmount: bigint; refundAmount: bigint; side: number; claimed: boolean;
   } | null>(null);
+  // side of the current-batch order (from localStorage, more reliable than on-chain for new fields)
+  const [currentSide, setCurrentSide] = useState<number>(YES_BUY);
   // Ephemeral key/address for current-batch unfilled orders (for one-click sweep)
   const [currentEphemeral, setCurrentEphemeral] = useState<{
     key: string; address: string; amount: bigint;
@@ -438,11 +461,16 @@ export default function PositionsPanel({
       try {
         const storageKey  = `predacy:orders:${walletAddress.toLowerCase()}`;
         const stored: Array<{
-          commitment: string; batchId: string; isBuy?: boolean; isSell?: boolean;
+          commitment: string; batchId: string;
+          side?: number; isBuy?: boolean; isSell?: boolean;
           ephemeralKey?: string; ephemeralAddress?: string; amount?: string; swept?: boolean;
         }> = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
         const myOrder = stored.find((o) => o.batchId === currentBatchId.toString() && !!o.commitment);
         if (!myOrder) return;
+
+        // Resolve order side — support both v8 (side) and legacy v7 (isBuy/isSell) formats
+        const orderSide = myOrder.side ?? legacySideToNum(myOrder.isBuy, myOrder.isSell);
+        const isBuyOrder = orderSide === YES_BUY || orderSide === NO_BUY;
 
         const contracts = getContracts(ACTIVE_CHAIN.id);
         const pos = await publicClient.readContract({
@@ -450,13 +478,12 @@ export default function PositionsPanel({
           abi:          BATCH_VAULT_ABI,
           functionName: "getPosition",
           args:         [currentBatchId, myOrder.commitment as `0x${string}`],
-        }) as { filledAmount: bigint; refundAmount: bigint; isBuy: boolean; claimed: boolean };
-        // Use localStorage isBuy (reliable) rather than contract isBuy to detect sells
-        const isSellOrder = myOrder.isSell === true || myOrder.isBuy === false;
+        }) as { filledAmount: bigint; refundAmount: bigint; side: number; claimed: boolean };
         if (!cancelled) {
-          setCurrentPosition({ ...pos, isSell: isSellOrder });
+          setCurrentPosition(pos);
+          setCurrentSide(orderSide);
           // If unfilled buy with ephemeral key, make it available for the sweep button
-          if (!isSellOrder && pos.filledAmount === 0n && pos.refundAmount === 0n
+          if (isBuyOrder && pos.filledAmount === 0n && pos.refundAmount === 0n
               && myOrder.ephemeralKey && myOrder.ephemeralAddress && !myOrder.swept) {
             setCurrentEphemeral({
               key:     myOrder.ephemeralKey,
@@ -481,17 +508,19 @@ export default function PositionsPanel({
 
     let storedOrders: Array<{
       commitment: string; batchId: string; salt?: string; claimed?: boolean;
-      isBuy: boolean; isSell?: boolean; amount: string; marketQuestion?: string; timestamp?: number;
+      side?: number; isBuy?: boolean; isSell?: boolean;
+      amount: string; marketQuestion?: string; timestamp?: number;
       marketId?: string; ephemeralKey?: string; ephemeralAddress?: string; swept?: boolean;
     }> = [];
     const storageKey = `predacy:orders:${walletAddress.toLowerCase()}`;
     try {
       storedOrders = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
-      // ── Migration: any isBuy:false order is a sell (platform has no NO-buy orders).
-      // Tag them with isSell:true so all downstream code can rely on the flag alone.
-      const needsMigration = storedOrders.some((o) => !o.isBuy && !o.isSell);
+      // ── Migration: convert legacy isBuy/isSell fields to side (v8 schema)
+      const needsMigration = storedOrders.some((o) => o.side === undefined);
       if (needsMigration) {
-        storedOrders = storedOrders.map((o) => (!o.isBuy && !o.isSell) ? { ...o, isSell: true } : o);
+        storedOrders = storedOrders.map((o) =>
+          o.side !== undefined ? o : { ...o, side: legacySideToNum(o.isBuy, o.isSell) }
+        );
         try { localStorage.setItem(storageKey, JSON.stringify(storedOrders)); } catch { /* ignore */ }
       }
     } catch { /* ignore */ }
@@ -503,11 +532,11 @@ export default function PositionsPanel({
 
     // Keep raw order list for Activity tab (enriched below)
     const rawActivity: typeof allStoredOrders = historicalOrders.map((o) => ({
-      batchId:       o.batchId,
-      isBuy:         o.isBuy,
-      amount:        o.amount,
+      batchId:        o.batchId,
+      side:           o.side ?? YES_BUY,
+      amount:         o.amount,
       marketQuestion: o.marketQuestion,
-      timestamp:     o.timestamp,
+      timestamp:      o.timestamp,
     }));
 
     await Promise.allSettled(
@@ -526,8 +555,11 @@ export default function PositionsPanel({
               abi:          BATCH_VAULT_ABI,
               functionName: "getPosition",
               args:         [id, order.commitment as `0x${string}`],
-            }) as Promise<{ filledAmount: bigint; refundAmount: bigint; isBuy: boolean; claimed: boolean }>,
+            }) as Promise<{ filledAmount: bigint; refundAmount: bigint; side: number; claimed: boolean }>,
           ]);
+
+          const orderSide = order.side ?? YES_BUY;
+          const isBuyOrder = orderSide === YES_BUY || orderSide === NO_BUY;
 
           if (posRaw.filledAmount === 0n && posRaw.refundAmount === 0n) {
             // Enrich activity row
@@ -548,14 +580,14 @@ export default function PositionsPanel({
                 batchStatus:      bs,
                 clearingPrice:    batchRaw.clearingPrice ?? 0n,
                 marketQuestion:   order.marketQuestion,
-                isSell:           order.isSell === true || !order.isBuy,
-                position: { filledAmount: 0n, refundAmount: 0n, isBuy: order.isBuy, claimed: false },
+                side:             orderSide,
+                position: { filledAmount: 0n, refundAmount: 0n, side: orderSide, claimed: false },
                 shares:           0,
                 settling:         bs === BatchStatus.SETTLING && !isStuck,
                 unfilled:         bs === BatchStatus.SETTLED || isStuck,
-                ephemeralKey:     order.isBuy ? order.ephemeralKey     : undefined,
-                ephemeralAddress: order.isBuy ? order.ephemeralAddress : undefined,
-                unfilledAmount:   order.isBuy ? BigInt(order.amount)   : undefined,
+                ephemeralKey:     isBuyOrder ? order.ephemeralKey     : undefined,
+                ephemeralAddress: isBuyOrder ? order.ephemeralAddress : undefined,
+                unfilledAmount:   isBuyOrder ? BigInt(order.amount)   : undefined,
                 swept:            order.swept === true,
               });
             }
@@ -607,7 +639,7 @@ export default function PositionsPanel({
             batchStatus:    batchRaw.status as BatchStatus,
             clearingPrice,
             marketQuestion: order.marketQuestion,
-            isSell:         order.isSell === true || !order.isBuy,
+            side:           orderSide,
             position:       { ...posRaw, claimed },
             shares,
           });
@@ -678,8 +710,7 @@ export default function PositionsPanel({
     (currentPosition.filledAmount > 0n || currentPosition.refundAmount > 0n);
 
   // A current-batch sell should appear in Closed, not Active.
-  // isSell is set reliably from localStorage (order.isSell || !order.isBuy) in the useEffect above.
-  const currentIsSell = currentPositionVisible && currentPosition?.isSell === true;
+  const currentIsSell = currentPositionVisible && (currentSide === YES_SELL || currentSide === NO_SELL);
   const currentPositionInActive = currentPositionVisible && !currentIsSell;
   const currentPositionInClosed = currentPositionVisible && currentIsSell;
 
@@ -689,18 +720,19 @@ export default function PositionsPanel({
   // Current batch for Activity tab
   const currentForActivity = hasCurrentOrder ? currentBatchCommitments[0] : null;
 
-  // Active = filled YES buy orders (claimed or unclaimed — user still holds YES tokens).
-  // hp.isSell is derived from order.isSell||!order.isBuy so it correctly catches legacy sells.
+  // Active = filled buy orders (claimed or unclaimed — user still holds tokens).
   const activePositions = historicalPositions.filter(
-    (hp) => hp.batchStatus === BatchStatus.SETTLED && !hp.unfilled && !hp.settling && !hp.isSell
+    (hp) => hp.batchStatus === BatchStatus.SETTLED && !hp.unfilled && !hp.settling
+      && (hp.side === YES_BUY || hp.side === NO_BUY)
   );
   // Pending = still being settled or not filled at clearing price
   const pendingPositions = historicalPositions.filter(
     (hp) => hp.settling || hp.unfilled
   );
-  // Closed = settled sell orders (isSell is now reliably set for all sell entries).
+  // Closed = settled sell orders.
   const closedPositions = historicalPositions.filter(
-    (hp) => hp.batchStatus === BatchStatus.SETTLED && !hp.settling && hp.isSell
+    (hp) => hp.batchStatus === BatchStatus.SETTLED && !hp.settling
+      && (hp.side === YES_SELL || hp.side === NO_SELL)
   );
 
   // Activity = all historical stored orders (newest first) + current if exists
@@ -792,12 +824,12 @@ export default function PositionsPanel({
                 <PositionRow
                   batchId={currentBatchId}
                   position={currentPosition}
+                  side={currentSide}
                   clearingPrice={0n}
                   onClaim={handleClaim}
                   isClaiming={claimingBatchId === currentBatchId}
                   claimError={claimErrors[currentBatchId.toString()]}
                   isActive={!currentPosition.claimed}
-                  isSell={false}
                   onClose={
                     currentPosition.claimed && onClosePosition
                       ? () => onClosePosition(computeYesAmount(currentPosition.filledAmount, currentBatchClearingPrice), currentBatchClearingPrice)
@@ -816,7 +848,8 @@ export default function PositionsPanel({
                     batchMarketId: ("0x" + "0".repeat(64)) as `0x${string}`,
                     batchStatus:   BatchStatus.SETTLED,
                     clearingPrice: 0n,
-                    position:      { filledAmount: 0n, refundAmount: 0n, isBuy: true, claimed: false },
+                    side:          currentSide,
+                    position:      { filledAmount: 0n, refundAmount: 0n, side: currentSide, claimed: false },
                     unfilled:      true,
                     ephemeralKey:     currentEphemeral?.key,
                     ephemeralAddress: currentEphemeral?.address,
@@ -831,7 +864,7 @@ export default function PositionsPanel({
                 hp.settling ? (
                   <div key={hp.batchId.toString()} className="px-4 py-3 border-b border-border/40">
                     <div className="flex items-center gap-2 mb-1">
-                      <DirectionBadge isBuy={hp.position.isBuy} isSell={hp.isSell} />
+                      <DirectionBadge side={hp.side} />
                       <span className="w-2 h-2 border border-blue/60 border-t-transparent rounded-full animate-spin flex-shrink-0" />
                       <span className="text-[10px] text-blue/70 tracking-wide uppercase">Settling</span>
                       <span className="text-[9px] text-muted-dim ml-auto">#{hp.batchId.toString()}</span>
@@ -865,6 +898,7 @@ export default function PositionsPanel({
                     key={hp.batchId.toString()}
                     batchId={hp.batchId}
                     position={hp.position}
+                    side={hp.side}
                     clearingPrice={hp.clearingPrice}
                     marketQuestion={hp.marketQuestion}
                     shares={hp.shares}
@@ -872,9 +906,8 @@ export default function PositionsPanel({
                     isClaiming={claimingBatchId === hp.batchId}
                     claimError={claimErrors[hp.batchId.toString()]}
                     isActive={!hp.position.claimed}
-                    isSell={hp.isSell}
                     onClose={
-                      !hp.isSell && hp.position.claimed && onClosePosition
+                      (hp.side === YES_BUY || hp.side === NO_BUY) && hp.position.claimed && onClosePosition
                         ? () => onClosePosition(computeYesAmount(hp.position.filledAmount, hp.clearingPrice), hp.clearingPrice)
                         : undefined
                     }
@@ -901,12 +934,12 @@ export default function PositionsPanel({
                     <PositionRow
                       batchId={currentBatchId}
                       position={currentPosition}
+                      side={currentSide}
                       clearingPrice={currentBatchClearingPrice}
                       onClaim={handleClaim}
                       isClaiming={claimingBatchId === currentBatchId}
                       claimError={claimErrors[currentBatchId.toString()]}
                       isActive={!currentPosition.claimed}
-                      isSell={true}
                     />
                   )}
                   {closedPositions.map((hp) => (
@@ -914,6 +947,7 @@ export default function PositionsPanel({
                       key={hp.batchId.toString()}
                       batchId={hp.batchId}
                       position={hp.position}
+                      side={hp.side}
                       clearingPrice={hp.clearingPrice}
                       marketQuestion={hp.marketQuestion}
                       shares={hp.shares}
@@ -921,7 +955,6 @@ export default function PositionsPanel({
                       isClaiming={claimingBatchId === hp.batchId}
                       claimError={claimErrors[hp.batchId.toString()]}
                       isActive={!hp.position.claimed}
-                      isSell={hp.isSell || !hp.position.isBuy}
                     />
                   ))}
                 </>
@@ -940,7 +973,7 @@ export default function PositionsPanel({
           {currentForActivity && currentBatchId > 0n && (
             <ActivityRow
               batchId={currentBatchId}
-              isBuy={true}  // current session orders are always BUY for simplicity
+              side={currentSide}
               amount={currentForActivity.amount ?? 0n}
               batchStatus={currentBatchStatus}
             />
@@ -958,7 +991,7 @@ export default function PositionsPanel({
               <ActivityRow
                 key={`${o.batchId}-${i}`}
                 batchId={BigInt(o.batchId)}
-                isBuy={o.isBuy}
+                side={o.side}
                 amount={BigInt(o.amount)}
                 clearingPrice={o.clearingPrice}
                 shares={o.shares}

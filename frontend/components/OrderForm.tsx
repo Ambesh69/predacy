@@ -15,6 +15,12 @@ const publicClient = createPublicClient({
   transport: http(),
 });
 
+// OrderSide mirrors BatchVault v8 enum
+export const YES_BUY  = 0;
+export const YES_SELL = 1;
+export const NO_BUY   = 2;
+export const NO_SELL  = 3;
+
 interface OrderFormProps {
   market: Market;
   marketId: `0x${string}`;
@@ -23,7 +29,7 @@ interface OrderFormProps {
     commitment: `0x${string}`;
     amount: bigint;
     salt: `0x${string}`;
-    isBuy: boolean;
+    side: number;         // 0=YES_BUY, 1=YES_SELL, 2=NO_BUY, 3=NO_SELL
     limitPrice: bigint;
   }) => Promise<void>;
   walletAddress?: `0x${string}`;
@@ -39,19 +45,18 @@ interface OrderFormProps {
 const PRICE_STEP        = 10_000;
 const MARKET_SELL_LIMIT = 0n;
 
-/** Compute the YES token ID for a given market (mirrors BatchVault._getYesTokenId).
+/** Compute the YES or NO token ID for a given market.
+ *  Mirrors Gnosis CTF: YES uses indexSet=2, NO uses indexSet=1.
  *  Must use encodePacked to match Solidity abi.encodePacked — address stays 20 bytes,
  *  not padded to 32 like standard ABI encoding would do. */
-function computeYesTokenId(usdcAddress: `0x${string}`, conditionId: `0x${string}`): bigint {
-  // mirrors MockCTF.getCollectionId(bytes32(0), conditionId, 2)
+function computeTokenId(usdcAddress: `0x${string}`, conditionId: `0x${string}`, indexSet: bigint): bigint {
   const parentCollectionId = ("0x" + "00".repeat(32)) as `0x${string}`;
   const collectionId = keccak256(
     encodePacked(
       ["bytes32", "bytes32", "uint256"],
-      [parentCollectionId, conditionId, 2n]
+      [parentCollectionId, conditionId, indexSet]
     )
   );
-  // mirrors MockCTF.getPositionId(usdc, collectionId) — address is 20 bytes packed
   const positionId = keccak256(
     encodePacked(
       ["address", "bytes32"],
@@ -59,6 +64,14 @@ function computeYesTokenId(usdcAddress: `0x${string}`, conditionId: `0x${string}
     )
   );
   return BigInt(positionId);
+}
+/** YES token — indexSet=2 (Gnosis CTF convention for outcome 0) */
+function computeYesTokenId(usdcAddress: `0x${string}`, conditionId: `0x${string}`): bigint {
+  return computeTokenId(usdcAddress, conditionId, 2n);
+}
+/** NO token — indexSet=1 (Gnosis CTF convention for outcome 1) */
+function computeNoTokenId(usdcAddress: `0x${string}`, conditionId: `0x${string}`): bigint {
+  return computeTokenId(usdcAddress, conditionId, 1n);
 }
 
 export default function OrderForm({
@@ -123,19 +136,30 @@ export default function OrderForm({
   const yesPrice = parseFloat(market.outcomePrices[0]);
   const noPrice  = parseFloat(market.outcomePrices[1] ?? (1 - yesPrice).toFixed(4));
 
-  // Market buy limit: current yes price + user slippage tolerance, capped at 99.9999¢
+  // Market buy limits: current price + user slippage tolerance, capped at 99.9999¢
   const marketBuyLimit = BigInt(
     Math.min(999_999, Math.ceil(yesPrice * (1 + slippageBps / 10_000) * 1_000_000))
   );
+  const marketNoBuyLimit = BigInt(
+    Math.min(999_999, Math.ceil(noPrice * (1 + slippageBps / 10_000) * 1_000_000))
+  );
 
-  // YES balance for sell mode
+  // Derived order side (0–3) from mode + token toggle
+  const orderSide: number = mode === "buy"
+    ? (isBuy ? YES_BUY : NO_BUY)
+    : (sellYes ? YES_SELL : NO_SELL);
+
+  // YES/NO token balances for sell mode
   const [yesBalance, setYesBalance] = useState<bigint | null>(null);
+  const [noBalance,  setNoBalance]  = useState<bigint | null>(null);
   const [yesBalanceLoading, setYesBalanceLoading] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);  // manual ↻ button
 
   const effectiveLimitPrice = mode === "sell"
     ? (orderType === "market" ? MARKET_SELL_LIMIT : BigInt(limitPrice))
-    : (orderType === "market" ? (isBuy ? marketBuyLimit : MARKET_SELL_LIMIT) : BigInt(limitPrice));
+    : (orderType === "market"
+        ? (isBuy ? marketBuyLimit : marketNoBuyLimit)
+        : BigInt(limitPrice));
 
   const updateCommitment = useCallback(() => {
     if (!walletAddress) return;
@@ -145,21 +169,17 @@ export default function OrderForm({
       const effLP = mode === "sell"
         ? (orderType === "market" ? MARKET_SELL_LIMIT : BigInt(limitPrice))
         : (orderType === "market"
-          ? (isBuy ? marketBuyLimit : MARKET_SELL_LIMIT)
+          ? (isBuy ? marketBuyLimit : marketNoBuyLimit)
           : BigInt(limitPrice));
-      const isOrderBuy = mode === "buy" ? isBuy : false; // sell mode always isBuy=false
-      setCommitment(computeCommitment({ marketId, isBuy: isOrderBuy, amount: amountParsed, limitPrice: effLP, salt }));
+      setCommitment(computeCommitment({ marketId, side: orderSide, amount: amountParsed, limitPrice: effLP, salt }));
     } catch { /* ignore parse errors while typing */ }
-  }, [walletAddress, amountDisplay, isBuy, limitPrice, orderType, marketId, salt, mode, marketBuyLimit]);
+  }, [walletAddress, amountDisplay, isBuy, sellYes, limitPrice, orderType, marketId, salt, mode, marketBuyLimit, marketNoBuyLimit, orderSide]);
 
   useEffect(() => { updateCommitment(); }, [updateCommitment]);
 
-  // Fetch YES balance when switching to sell mode.
+  // Fetch YES or NO balance when switching to sell mode.
   useEffect(() => {
-    if (mode !== "sell" || !walletAddress || !sellYes) {
-      if (!sellYes) setYesBalance(null);
-      return;
-    }
+    if (mode !== "sell" || !walletAddress) return;
     setYesBalanceLoading(true);
     let cancelled = false;
     (async () => {
@@ -170,21 +190,26 @@ export default function OrderForm({
           marketId,
           ...candidateMarketIds,
         ])];
-        let total = 0n;
+        let totalYes = 0n;
+        let totalNo  = 0n;
         for (const condId of allIds) {
-          const yesTokenId = computeYesTokenId(contracts.usdc, condId);
-          const bal = await publicClient.readContract({
-            address: contracts.ctf,
-            abi: CTF_ABI,
-            functionName: "balanceOf",
-            args: [walletAddress, yesTokenId],
-          }) as bigint;
-          total += bal;
+          const [yesBal, noBal] = await Promise.all([
+            publicClient.readContract({
+              address: contracts.ctf, abi: CTF_ABI, functionName: "balanceOf",
+              args: [walletAddress, computeYesTokenId(contracts.usdc, condId)],
+            }) as Promise<bigint>,
+            publicClient.readContract({
+              address: contracts.ctf, abi: CTF_ABI, functionName: "balanceOf",
+              args: [walletAddress, computeNoTokenId(contracts.usdc, condId)],
+            }) as Promise<bigint>,
+          ]);
+          totalYes += yesBal;
+          totalNo  += noBal;
         }
-        if (!cancelled) setYesBalance(total);
+        if (!cancelled) { setYesBalance(totalYes); setNoBalance(totalNo); }
       } catch (err) {
-        console.error("[OrderForm] Failed to fetch YES balance:", err);
-        if (!cancelled) setYesBalance(0n);
+        console.error("[OrderForm] Failed to fetch token balance:", err);
+        if (!cancelled) { setYesBalance(0n); setNoBalance(0n); }
       } finally {
         if (!cancelled) setYesBalanceLoading(false);
       }
@@ -200,8 +225,7 @@ export default function OrderForm({
     setError(null);
     try {
       const amount = BigInt(Math.round(parseFloat(amountDisplay) * 1_000_000));
-      const isOrderBuy = mode === "buy" ? isBuy : false;
-      await onSubmit({ commitment, amount, salt, isBuy: isOrderBuy, limitPrice: effectiveLimitPrice });
+      await onSubmit({ commitment, amount, salt, side: orderSide, limitPrice: effectiveLimitPrice });
       setSubmitted(true);
     } catch (err: unknown) {
       setError(getErrorMessage(err));
@@ -217,15 +241,13 @@ export default function OrderForm({
   const amountNum = parseFloat(amountDisplay || "0") || 0;
   const fillPrice = orderType === "limit"
     ? limitPrice / 1_000_000
-    : (mode === "sell" ? yesPrice : (isBuy ? yesPrice : noPrice));
+    : (mode === "sell"
+        ? (sellYes ? yesPrice : noPrice)
+        : (isBuy ? yesPrice : noPrice));
   const sharesOut    = fillPrice > 0 && amountNum > 0 ? amountNum / fillPrice : 0;
   const toWin        = sharesOut;
   const potentialPct = fillPrice > 0 ? (1 / fillPrice - 1) * 100 : 0;
   const receiveUSDC  = amountNum * fillPrice;
-
-  const yesBalanceDisplay = yesBalance !== null
-    ? (Number(yesBalance) / 1_000_000).toFixed(2)
-    : null;
 
   // ── Sealed state ────────────────────────────────────────────────────────────
   if (submitted) {
@@ -402,10 +424,15 @@ export default function OrderForm({
           </button>
           <button
             type="button"
-            disabled
-            className="py-2 px-3 text-xs font-medium tracking-wide rounded-sm bg-surface/30 border border-border/40 text-muted/40 cursor-not-allowed"
+            onClick={() => setSellYes(false)}
+            className={clsx(
+              "py-2 px-3 text-xs font-medium tracking-wide transition-all duration-150 rounded-sm",
+              !sellYes
+                ? "bg-danger/20 border border-danger/40 text-danger"
+                : "bg-surface/60 border border-border text-muted hover:border-border-bright hover:text-text"
+            )}
           >
-            No <span className="text-[10px] opacity-60">V2</span>
+            No <span className="tabular-nums opacity-80">{(noPrice * 100).toFixed(1)}¢</span>
           </button>
         </div>
       )}
@@ -415,43 +442,50 @@ export default function OrderForm({
         <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
           <div className="flex flex-col gap-3 px-3 py-3">
 
-            {/* YES Token Amount */}
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between">
-                <label className="text-[10px] text-muted tracking-widest uppercase">YES Tokens to Sell</label>
-                {isConnected && (
-                  <span className="flex items-center gap-1 text-[10px] text-muted-dim tabular-nums">
-                    {yesBalanceLoading ? "loading…" : yesBalanceDisplay !== null ? `Balance: ${yesBalanceDisplay}` : "Balance: —"}
-                    <button type="button" onClick={() => setRefreshTick(t => t + 1)}
-                      className="hover:text-muted transition-colors leading-none" title="Refresh balance">↻</button>
-                  </span>
-                )}
-              </div>
-              <div className="flex items-center border border-border bg-surface focus-within:border-border-bright transition-colors">
-                <input
-                  type="number"
-                  value={amountDisplay}
-                  onChange={(e) => setAmountDisplay(e.target.value)}
-                  className="flex-1 bg-transparent px-3 py-2.5 text-text text-sm tabular-nums focus:outline-none"
-                  placeholder="0.00" min="0" step="any"
-                />
-                <span className="pr-3 text-muted text-[11px]">YES</span>
-              </div>
-              {yesBalance !== null && yesBalance > 0n && (
-                <div className="flex gap-1">
-                  {[25, 50, 75, 100].map((pct) => (
-                    <button key={pct} type="button"
-                      onClick={() => {
-                        const amt = Number(yesBalance) * pct / 100 / 1_000_000;
-                        setAmountDisplay(amt.toFixed(6).replace(/\.?0+$/, ""));
-                      }}
-                      className="flex-1 py-1 text-[10px] border border-border text-muted hover:border-border-bright hover:text-muted transition-colors">
-                      {pct}%
-                    </button>
-                  ))}
+            {/* Token Amount (YES or NO depending on sellYes) */}
+            {(() => {
+              const tokenLabel   = sellYes ? "YES" : "NO";
+              const tokenBalance = sellYes ? yesBalance : noBalance;
+              const balDisplay   = tokenBalance !== null ? (Number(tokenBalance) / 1_000_000).toFixed(2) : null;
+              return (
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[10px] text-muted tracking-widest uppercase">{tokenLabel} Tokens to Sell</label>
+                    {isConnected && (
+                      <span className="flex items-center gap-1 text-[10px] text-muted-dim tabular-nums">
+                        {yesBalanceLoading ? "loading…" : balDisplay !== null ? `Balance: ${balDisplay}` : "Balance: —"}
+                        <button type="button" onClick={() => setRefreshTick(t => t + 1)}
+                          className="hover:text-muted transition-colors leading-none" title="Refresh balance">↻</button>
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center border border-border bg-surface focus-within:border-border-bright transition-colors">
+                    <input
+                      type="number"
+                      value={amountDisplay}
+                      onChange={(e) => setAmountDisplay(e.target.value)}
+                      className="flex-1 bg-transparent px-3 py-2.5 text-text text-sm tabular-nums focus:outline-none"
+                      placeholder="0.00" min="0" step="any"
+                    />
+                    <span className="pr-3 text-muted text-[11px]">{tokenLabel}</span>
+                  </div>
+                  {tokenBalance !== null && tokenBalance > 0n && (
+                    <div className="flex gap-1">
+                      {[25, 50, 75, 100].map((pct) => (
+                        <button key={pct} type="button"
+                          onClick={() => {
+                            const amt = Number(tokenBalance) * pct / 100 / 1_000_000;
+                            setAmountDisplay(amt.toFixed(6).replace(/\.?0+$/, ""));
+                          }}
+                          className="flex-1 py-1 text-[10px] border border-border text-muted hover:border-border-bright hover:text-muted transition-colors">
+                          {pct}%
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
+              );
+            })()}
 
             {/* Sell: compact "You'll receive" summary */}
             {amountNum > 0 && (
@@ -527,17 +561,20 @@ export default function OrderForm({
                     {submitStep === "approving" ? "APPROVING CTF…" : "SIGNING ORDER…"}
                   </span>
                 ) : (
-                  `SEAL ${orderType === "market" ? "MKT" : "LMT"} SELL YES — ${amountDisplay || "0"} tokens`
+                  `SEAL ${orderType === "market" ? "MKT" : "LMT"} SELL ${sellYes ? "YES" : "NO"} — ${amountDisplay || "0"} tokens`
                 )}
               </button>
             )}
-            {isConnected && batchOpen && (
-              <p className="text-center text-[10px] text-muted-dim mt-2">
-                {yesBalance === 0n
-                  ? "No YES tokens in wallet — buy YES first."
-                  : "1 tx (CTF approve, if needed) + 1 signature"}
-              </p>
-            )}
+            {isConnected && batchOpen && (() => {
+              const bal = sellYes ? yesBalance : noBalance;
+              return (
+                <p className="text-center text-[10px] text-muted-dim mt-2">
+                  {bal === 0n
+                    ? `No ${sellYes ? "YES" : "NO"} tokens in wallet — buy ${sellYes ? "YES" : "NO"} first.`
+                    : "1 tx (CTF approve, if needed) + 1 signature"}
+                </p>
+              );
+            })()}
           </div>
         </form>
       )}

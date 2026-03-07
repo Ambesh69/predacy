@@ -6,6 +6,7 @@ import { ZKProver } from "./zkProver.js";
 import { PolymarketClient, type ClobOrderForChain } from "./polymarketClient.js";
 export type { ClobOrderForChain };
 import { createOrderStore, type OrderStore } from "./orderStore.js";
+import { OrderSide } from "./types.js";
 import type { Order, Commitment, BatchInfo, TransferAuth, RequeueAuth } from "./types.js";
 
 /** Result for one excluded order from requeueExcludedOrders(). */
@@ -98,6 +99,36 @@ export const BATCH_VAULT_ABI = [
     stateMutability: "nonpayable",
   },
   {
+    name: "commitBuyNoOrderFor",
+    type: "function",
+    inputs: [
+      { name: "commitment", type: "bytes32" },
+      { name: "amount",     type: "uint256" },
+      { name: "signer",     type: "address" },
+      { name: "nonce",      type: "uint256" },
+      { name: "deadline",   type: "uint256" },
+      { name: "signature",  type: "bytes"   },
+      { name: "marketId",   type: "bytes32" },
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+  {
+    name: "commitSellNoOrderFor",
+    type: "function",
+    inputs: [
+      { name: "commitment", type: "bytes32" },
+      { name: "noAmount",   type: "uint256" },
+      { name: "signer",     type: "address" },
+      { name: "nonce",      type: "uint256" },
+      { name: "deadline",   type: "uint256" },
+      { name: "signature",  type: "bytes"   },
+      { name: "marketId",   type: "bytes32" },
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+  {
     name: "nonces",
     type: "function",
     inputs: [{ name: "owner", type: "address" }],
@@ -112,16 +143,17 @@ export const BATCH_VAULT_ABI = [
       {
         name: "orders",
         type: "tuple[]",
+        // RevealedOrder struct: side (uint8) replaces isBuy (bool) from v7.3
         components: [
-          { name: "isBuy",      type: "bool"    },
+          { name: "side",       type: "uint8"   }, // OrderSide enum: 0=YES_BUY, 1=YES_SELL, 2=NO_BUY, 3=NO_SELL
           { name: "amount",     type: "uint256" },
           { name: "limitPrice", type: "uint256" },
           { name: "salt",       type: "bytes32" },
         ],
       },
       // EIP-3009 transfer authorizations — one per order (same index as orders[]).
-      // For sell orders and unfilled buy orders, pass zero-value struct (ignored by contract).
-      // `from` = ephemeral wallet address (source of USDC pull for filled buy orders).
+      // For SELL orders and unfilled BUY orders, pass zero-value struct (ignored by contract).
+      // `from` = ephemeral wallet address (source of USDC pull for filled BUY orders).
       {
         name: "auths",
         type: "tuple[]",
@@ -135,13 +167,12 @@ export const BATCH_VAULT_ABI = [
           { name: "s",           type: "bytes32" },
         ],
       },
-      { name: "clearingPrice", type: "uint256" },
-      { name: "totalBuyVol",   type: "uint256" },
-      { name: "totalSellVol",  type: "uint256" },
-      { name: "netBuyAmount",  type: "uint256" },
-      { name: "netSellYes",    type: "uint256" },
-      { name: "proof",         type: "bytes"   },
-      // v7.3: clobOrders and clobFillAmounts removed — relayer-intermediary settlement
+      { name: "clearingPrice",     type: "uint256" },
+      { name: "filledYesBuyVol",   type: "uint256" }, // USDC from filled YES_BUY orders
+      { name: "filledNoBuyVol",    type: "uint256" }, // USDC from filled NO_BUY orders
+      { name: "filledYesSellQty",  type: "uint256" }, // YES tokens from filled YES_SELL orders
+      { name: "filledNoSellQty",   type: "uint256" }, // NO tokens from filled NO_SELL orders
+      { name: "proof",             type: "bytes"   },
     ],
     outputs: [],
     stateMutability: "nonpayable",
@@ -154,21 +185,20 @@ export const BATCH_VAULT_ABI = [
       {
         name: "",
         type: "tuple",
+        // Matches BatchVault v8 Batch struct exactly
         components: [
-          { name: "marketId",          type: "bytes32" },
-          { name: "openedAt",          type: "uint256" },
-          { name: "closedAt",          type: "uint256" },
-          { name: "status",            type: "uint8"   },
-          { name: "totalDeposited",    type: "uint256" },
-          { name: "totalSellYes",      type: "uint256" },
-          { name: "clearingPrice",     type: "uint256" },
-          { name: "netBuyAmount",      type: "uint256" },
-          { name: "yesTokensReceived", type: "uint256" },
-          { name: "filledSellYes",     type: "uint256" },
-          { name: "totalFilledBuyVol", type: "uint256" },
-          { name: "commitmentCount",   type: "uint256" },
-          { name: "commitmentRoot",    type: "bytes32" },
-          { name: "claimMerkleRoot",   type: "bytes32" },
+          { name: "marketId",        type: "bytes32" },
+          { name: "openedAt",        type: "uint256" },
+          { name: "closedAt",        type: "uint256" },
+          { name: "status",          type: "uint8"   },
+          { name: "totalDeposited",  type: "uint256" }, // USDC from YES buyers
+          { name: "totalDepositedNo",type: "uint256" }, // USDC from NO buyers (v8 new)
+          { name: "totalSellYes",    type: "uint256" }, // YES tokens from YES sellers
+          { name: "totalSellNo",     type: "uint256" }, // NO tokens from NO sellers (v8 new)
+          { name: "clearingPrice",   type: "uint256" },
+          { name: "commitmentCount", type: "uint256" },
+          { name: "commitmentRoot",  type: "bytes32" },
+          { name: "claimMerkleRoot", type: "bytes32" },
         ],
       },
     ],
@@ -428,24 +458,15 @@ export class BatchProcessor {
   // ─── Order intake (called from HTTP /order endpoint) ──────────────────────
 
   /**
-   * Privacy path: the trader signed an EIP-712 CommitOrder AND an EIP-3009
-   * TransferWithAuthorization off-chain.
+   * Privacy path for BUY orders (YES_BUY or NO_BUY): the trader signed an EIP-712
+   * CommitOrder AND an EIP-3009 TransferWithAuthorization off-chain.
    *
-   * The relayer calls commitOrderFor() on-chain (only relayer address visible),
-   * then stores the order details + TransferAuth for settlement.
+   * The relayer calls commitOrderFor() (YES_BUY) or commitBuyNoOrderFor() (NO_BUY)
+   * on-chain — only the relayer address is visible. The EIP-3009 TransferAuth is
+   * stored and submitted at settlement to pull USDC from the user's wallet.
    *
-   * At settlement, the stored TransferAuth for each filled buy order is submitted
-   * to BatchVault.settleBatch(), which calls IUSDC.transferWithAuthorization()
-   * to pull USDC from the user's wallet — no upfront deposit needed.
-   *
-   * @param batchId      Current batch ID
-   * @param order        Full plaintext order (stored off-chain for settlement)
-   * @param commitment   The keccak256 commitment hash (already computed by frontend)
-   * @param signer       Trader's wallet address
-   * @param nonce        EIP-712 nonce from nonces[signer] at signing time
-   * @param deadline     Signature expiry (unix seconds)
-   * @param signature    65-byte EIP-712 CommitOrder signature
-   * @param transferAuth EIP-3009 authorization (buy orders only — undefined for sell orders)
+   * @param order.side   Must be YES_BUY or NO_BUY
+   * @param transferAuth EIP-3009 authorization — required for BUY orders
    */
   async submitCommitmentFor(
     batchId: bigint,
@@ -457,6 +478,10 @@ export class BatchProcessor {
     signature: `0x${string}`,
     transferAuth?: TransferAuth,
   ): Promise<void> {
+    if (order.side !== OrderSide.YES_BUY && order.side !== OrderSide.NO_BUY) {
+      throw new Error(`submitCommitmentFor: expected BUY order, got side=${order.side}`);
+    }
+
     // Verify commitment hash BEFORE going on-chain.
     // If the frontend computed the hash with the wrong marketId (or any other wrong param),
     // we catch it here and reject — preventing USDC from getting stuck in the ephemeral
@@ -470,34 +495,36 @@ export class BatchProcessor {
       );
     }
 
-    console.log(`[BatchProcessor] Submitting commitOrderFor on behalf of ${signer}`);
+    const isYesBuy = order.side === OrderSide.YES_BUY;
+    const fnName   = isYesBuy ? "commitOrderFor" : "commitBuyNoOrderFor";
+    console.log(`[BatchProcessor] Submitting ${fnName} on behalf of ${signer} (side=${order.side})`);
 
     const hash = await this._write({
       address: this.config.vaultAddress,
       abi: BATCH_VAULT_ABI,
-      functionName: "commitOrderFor",
+      functionName: fnName,
       args: [commitment, order.amount, signer, nonce, deadline, signature, this.config.marketId],
       ...chainGas(this.config.chainId),
     });
 
     await this.publicClient.waitForTransactionReceipt({ hash });
-    console.log(`[BatchProcessor] commitOrderFor tx: ${hash} (trader=${signer} hidden)`);
+    console.log(`[BatchProcessor] ${fnName} tx: ${hash} (trader=${signer} hidden)`);
 
     // Store order keyed by commitment hash — used for matching at settlement.
-    // (Trader address not in on-chain Commitment struct — match by hash, not address)
     const orderWithAuth: Order = { ...order, trader: signer, transferAuth };
     await this.store.save(batchId.toString(), commitment.toLowerCase(), orderWithAuth);
-    console.log(`[BatchProcessor] Stored order for commitment ${commitment} (batch ${batchId})`);
+    console.log(`[BatchProcessor] Stored ${isYesBuy ? "YES_BUY" : "NO_BUY"} order for commitment ${commitment} (batch ${batchId})`);
   }
 
   /**
-   * Privacy path for SELL orders: trader signed an EIP-712 CommitOrder off-chain.
-   * The relayer calls commitSellOrderFor() on-chain — YES tokens pulled from signer via
-   * safeTransferFrom (requires signer to have called ctf.setApprovalForAll(vault, true)).
+   * Privacy path for SELL orders (YES_SELL or NO_SELL): trader signed an EIP-712
+   * CommitOrder off-chain. The relayer calls commitSellOrderFor() (YES_SELL) or
+   * commitSellNoOrderFor() (NO_SELL) on-chain — tokens are pulled from the signer
+   * via safeTransferFrom (requires ctf.setApprovalForAll(vault, true)).
    *
-   * Note: Sell orders don't need a TransferAuth (no USDC involved at order time).
+   * Sell orders don't need a TransferAuth — tokens are deposited upfront, not USDC.
    *
-   * @param yesAmount  Number of YES tokens (6 decimals) to sell
+   * @param order.side   Must be YES_SELL or NO_SELL
    */
   async submitSellCommitmentFor(
     batchId: bigint,
@@ -508,6 +535,10 @@ export class BatchProcessor {
     deadline: bigint,
     signature: `0x${string}`,
   ): Promise<void> {
+    if (order.side !== OrderSide.YES_SELL && order.side !== OrderSide.NO_SELL) {
+      throw new Error(`submitSellCommitmentFor: expected SELL order, got side=${order.side}`);
+    }
+
     // Same hash verification as buy orders — prevent irrecoverable commitment mismatches.
     const expected = this._computeCommitmentHash(this.config.marketId, order);
     if (expected.toLowerCase() !== commitment.toLowerCase()) {
@@ -517,23 +548,25 @@ export class BatchProcessor {
       );
     }
 
-    console.log(`[BatchProcessor] Submitting commitSellOrderFor on behalf of ${signer}`);
+    const isYesSell = order.side === OrderSide.YES_SELL;
+    const fnName    = isYesSell ? "commitSellOrderFor" : "commitSellNoOrderFor";
+    console.log(`[BatchProcessor] Submitting ${fnName} on behalf of ${signer} (side=${order.side})`);
 
     const hash = await this._write({
       address: this.config.vaultAddress,
       abi: BATCH_VAULT_ABI,
-      functionName: "commitSellOrderFor",
+      functionName: fnName,
       args: [commitment, order.amount, signer, nonce, deadline, signature, this.config.marketId],
       ...chainGas(this.config.chainId),
     });
 
     await this.publicClient.waitForTransactionReceipt({ hash });
-    console.log(`[BatchProcessor] commitSellOrderFor tx: ${hash} (seller=${signer})`);
+    console.log(`[BatchProcessor] ${fnName} tx: ${hash} (seller=${signer})`);
 
-    // Sell orders: no TransferAuth (seller deposited YES tokens, not USDC)
+    // Sell orders: no TransferAuth (tokens deposited, not USDC)
     const orderWithTrader: Order = { ...order, trader: signer };
     await this.store.save(batchId.toString(), commitment.toLowerCase(), orderWithTrader);
-    console.log(`[BatchProcessor] Stored sell order for commitment ${commitment} (batch ${batchId})`);
+    console.log(`[BatchProcessor] Stored ${isYesSell ? "YES_SELL" : "NO_SELL"} order for commitment ${commitment} (batch ${batchId})`);
   }
 
   /**
@@ -651,13 +684,14 @@ export class BatchProcessor {
     const clearing = computeClearingPrice(orders);
     console.log(
       `[BatchProcessor] Internal clearing: price=${clearing.clearingPrice}, ` +
-      `buyVol=${clearing.filledBuyVolume}, sellVol=${clearing.filledSellVolume}, ` +
-      `netBuy=${clearing.netBuyAmount}`,
+      `yesBuyVol=${clearing.filledYesBuyVol}, noBuyVol=${clearing.filledNoBuyVol}, ` +
+      `yesSellQty=${clearing.filledYesSellQty}, noSellQty=${clearing.filledNoSellQty}`,
     );
 
     // 4. Fetch Polymarket data + execute net position (only when API keys are set)
     let effectiveClearingPrice = clearing.clearingPrice;
     let cachedYesToken: string | undefined;
+    let cachedNoToken:  string | undefined;
 
     // ─── 4a. Price discovery ──────────────────────────────────────────────────
     if (this.config.polymarket.apiKey) {
@@ -666,6 +700,9 @@ export class BatchProcessor {
         cachedYesToken =
           market.tokens.find((t) => t.outcome?.toLowerCase() === "yes")?.token_id ??
           market.clobTokenIds?.[0];
+        cachedNoToken =
+          market.tokens.find((t) => t.outcome?.toLowerCase() === "no")?.token_id ??
+          market.clobTokenIds?.[1];
         if (!cachedYesToken) throw new Error("YES token not found for market");
 
         if (effectiveClearingPrice === 0n) {
@@ -746,52 +783,85 @@ export class BatchProcessor {
     // 5. Re-compute fills at the effective clearing price.
     let fills = computeFillsAtPrice(orders, effectiveClearingPrice);
     console.log(
-      `[BatchProcessor] Fills at effective price: buyVol=${fills.filledBuyVolume}, ` +
-      `sellYes=${fills.filledSellYes}, netBuy=${fills.netBuyAmount}, netSellYes=${fills.netSellYes}`,
+      `[BatchProcessor] Fills at effective price: yesBuyVol=${fills.filledYesBuyVol}, ` +
+      `noBuyVol=${fills.filledNoBuyVol}, yesSellQty=${fills.filledYesSellQty}, noSellQty=${fills.filledNoSellQty}`,
     );
 
-    // ─── 4b. Pre-buy YES tokens via CLOB (v7.3 relayer-intermediary) ──────────────
+    // ─── 4b. Relayer gap fill (v8: only edge-case residual after split/merge) ─────
     //
-    // NET BUY (fills.netBuyAmount > 0):
-    //   Relayer buys YES via CLOB API before calling settleBatch.
-    //   vault.settleBatch pulls YES from relayer wallet and reimburses USDC.
-    //   Requires: ctf.isApprovedForAll(relayer, vault) == true (set by ensureApprovals).
-    //   Only runs on mainnet (chainId 137) where CLOB API is available.
+    // The vault handles balanced batches with zero relayer capital via CTF.splitPosition:
+    //   YES buyers + NO buyers provide USDC → vault splits → YES to YES buyers, NO to NO buyers
+    //   Excess YES sellers + NO sellers cancel via CTF.mergePositions → USDC returned
     //
-    // NET SELL (fills.netSellYes > 0):
-    //   Vault pulls USDC from relayer and sends YES to relayer.
-    //   Relayer then sells YES on CLOB off-chain to recover capital.
-    //   Requires: usdc.allowance(relayer, vault) >= usdcFromSell (set by ensureApprovals).
-    //   Post-settlement: relayer calls placeMarketSell to liquidate received YES.
+    // A relayer gap is only needed when YES demand and NO demand are UNBALANCED after
+    // all sellers are consumed. For balanced batches (common case) yesGap = noGap = 0.
     //
-    if (cachedYesToken && fills.netBuyAmount > 0n && this.config.chainId === 137) {
-      const yesNeeded = (fills.netBuyAmount * 1_000_000n) / effectiveClearingPrice;
-      console.log(`[BatchProcessor] Net buy: pre-buying ${yesNeeded} YES tokens via CLOB (${fills.netBuyAmount} USDC)`);
-      if (!this.config.ctfAddress) {
-        throw new Error("[BatchProcessor] ctfAddress not set — cannot poll YES balance. Set CTF_ADDRESS env var.");
-      }
+    // Gap calculation mirrors the on-chain logic in settleBatch():
+    const PRICE_DEC = 1_000_000n;
+    const noPrice   = PRICE_DEC - effectiveClearingPrice;
+    const yesBuyersNeedTokens = effectiveClearingPrice > 0n
+      ? (fills.filledYesBuyVol * PRICE_DEC) / effectiveClearingPrice : 0n;
+    const noBuyersNeedTokens  = noPrice > 0n
+      ? (fills.filledNoBuyVol * PRICE_DEC) / noPrice : 0n;
+    const directYesMatch = yesBuyersNeedTokens < fills.filledYesSellQty ? yesBuyersNeedTokens : fills.filledYesSellQty;
+    const directNoMatch  = noBuyersNeedTokens  < fills.filledNoSellQty  ? noBuyersNeedTokens  : fills.filledNoSellQty;
+    const remYesDemand   = yesBuyersNeedTokens - directYesMatch;
+    const remNoDemand    = noBuyersNeedTokens  - directNoMatch;
+    const splitQty       = remYesDemand < remNoDemand ? remYesDemand : remNoDemand;
+    const yesGap         = remYesDemand - splitQty;  // YES tokens relayer must pre-buy
+    const noGap          = remNoDemand  - splitQty;  // NO tokens relayer must pre-buy
+    const excessYes      = fills.filledYesSellQty - directYesMatch;
+    const excessNo       = fills.filledNoSellQty  - directNoMatch;
+    const mergeQty       = excessYes < excessNo ? excessYes : excessNo;
+    const finalExcessYes = excessYes - mergeQty;  // YES sent to relayer (relayer sells on CLOB)
+    const finalExcessNo  = excessNo  - mergeQty;  // NO sent to relayer (relayer sells on CLOB)
+
+    console.log(
+      `[BatchProcessor] Settlement geometry: split=${splitQty}, merge=${mergeQty}, ` +
+      `yesGap=${yesGap}, noGap=${noGap}, finalExcessYes=${finalExcessYes}, finalExcessNo=${finalExcessNo}`,
+    );
+
+    // Pre-buy YES gap from CLOB (only needed on mainnet; testnet uses mock CTF)
+    if (yesGap > 0n && cachedYesToken && this.config.chainId === 137) {
+      const usdcForGap = (yesGap * effectiveClearingPrice) / PRICE_DEC;
+      console.log(`[BatchProcessor] YES gap: pre-buying ${yesGap} YES tokens via CLOB (${usdcForGap} USDC)`);
       try {
-        await this.polymarket.buyYesForSettlement(
-          cachedYesToken,
-          yesNeeded,
-          fills.netBuyAmount,
-          this.config.ctfAddress,
-        );
-        console.log(`[BatchProcessor] YES tokens acquired — proceeding to settleBatch`);
+        await this.polymarket.buyYesForSettlement(cachedYesToken, yesGap, usdcForGap, this.config.ctfAddress!);
+        console.log(`[BatchProcessor] YES gap acquired`);
       } catch (err) {
-        console.error(`[BatchProcessor] CLOB buy failed — aborting settlement:`, err);
+        console.error(`[BatchProcessor] CLOB YES gap buy failed — aborting settlement:`, err);
         throw err;
       }
-    } else if (cachedYesToken && fills.netSellYes > 0n) {
-      const usdcFromSell = (fills.netSellYes * effectiveClearingPrice) / 1_000_000n;
-      console.log(
-        `[BatchProcessor] Net sell: vault will pull ${usdcFromSell} USDC from relayer, ` +
-        `send ${fills.netSellYes} YES to relayer. ` +
-        `(Relayer sells YES off-chain after settlement)`,
-      );
-      // USDC allowance was already set to max by ensureApprovals() — no additional tx needed.
-    } else if (fills.netBuyAmount > 0n && this.config.chainId !== 137) {
-      console.log(`[BatchProcessor] Testnet: skipping CLOB pre-buy (relayer must have YES pre-minted)`);
+    } else if (yesGap > 0n && this.config.chainId !== 137) {
+      console.log(`[BatchProcessor] Testnet: skipping CLOB YES gap buy (${yesGap} tokens)`);
+    }
+
+    // Pre-buy NO gap from CLOB (mirrors YES gap logic, uses NO token ID)
+    if (noGap > 0n && cachedNoToken && this.config.chainId === 137) {
+      const usdcForNoGap = (noGap * noPrice) / PRICE_DEC;
+      console.log(`[BatchProcessor] NO gap: pre-buying ${noGap} NO tokens via CLOB (${usdcForNoGap} USDC)`);
+      try {
+        await this.polymarket.buyYesForSettlement(cachedNoToken, noGap, usdcForNoGap, this.config.ctfAddress!);
+        console.log(`[BatchProcessor] NO gap acquired`);
+      } catch (err) {
+        console.error(`[BatchProcessor] CLOB NO gap buy failed — aborting settlement:`, err);
+        throw err;
+      }
+    } else if (noGap > 0n && this.config.chainId !== 137) {
+      console.log(`[BatchProcessor] Testnet: skipping CLOB NO gap buy (${noGap} tokens)`);
+    } else if (noGap > 0n && !cachedNoToken) {
+      console.warn(`[BatchProcessor] NO gap=${noGap} but NO token ID unknown — relayer must have NO tokens pre-funded`);
+    }
+
+    // Excess sellers: vault will send tokens to relayer during settleBatch.
+    // Relayer needs: ctf.setApprovalForAll(vault, true) and usdc.approve(vault, max) (ensureApprovals).
+    if (finalExcessYes > 0n) {
+      const usdcNeeded = (finalExcessYes * effectiveClearingPrice) / PRICE_DEC;
+      console.log(`[BatchProcessor] Excess YES: vault sends ${finalExcessYes} YES to relayer, pulls ${usdcNeeded} USDC. Will sell YES on CLOB post-settlement.`);
+    }
+    if (finalExcessNo > 0n) {
+      const usdcNeeded = (finalExcessNo * noPrice) / PRICE_DEC;
+      console.log(`[BatchProcessor] Excess NO: vault sends ${finalExcessNo} NO to relayer, pulls ${usdcNeeded} USDC. Will sell NO on CLOB post-settlement.`);
     }
 
     // 6. Generate ZK proof (mock in prototype mode; real proof when USE_REAL_ZK=true)
@@ -800,9 +870,10 @@ export class BatchProcessor {
       orders,
       commitments:       commitments.map((c) => c.hash),
       clearingPrice:     effectiveClearingPrice,
-      netBuyAmount:      fills.netBuyAmount,
-      filledBuyVolume:   fills.filledBuyVolume,
-      filledSellVolume:  fills.filledSellYes,
+      filledYesBuyVol:   fills.filledYesBuyVol,
+      filledNoBuyVol:    fills.filledNoBuyVol,
+      filledYesSellQty:  fills.filledYesSellQty,
+      filledNoSellQty:   fills.filledNoSellQty,
     });
 
     // 6b. PublicInputAdapter (real ZK only)
@@ -820,28 +891,33 @@ export class BatchProcessor {
     }
 
     // 7. Build EIP-3009 TransferAuth[] — one per order (parallel to orders[]).
-    //    For filled buy orders: use stored TransferAuth (pulls USDC from user's wallet).
-    //    For sell orders / unfilled buy orders: zero struct (contract skips these).
+    //    For filled BUY orders (YES_BUY and NO_BUY): use stored TransferAuth (pulls USDC).
+    //    For SELL orders / unfilled BUY orders: zero struct (contract skips these).
     //    Track excluded buy orders that have pre-signed requeue sigs for auto-requeue.
     const excludedOrders: Array<{ order: Order; commitment: `0x${string}` }> = [];
+    const noPrice_auths = PRICE_DEC - effectiveClearingPrice;
 
     const auths = orders.map((order, i) => {
-      const isFilled = order.isBuy
-        ? order.limitPrice >= effectiveClearingPrice
-        : order.limitPrice <= effectiveClearingPrice;
+      const isBuy = order.side === OrderSide.YES_BUY || order.side === OrderSide.NO_BUY;
+      let isFilled: boolean;
+      if (order.side === OrderSide.YES_BUY)  isFilled = order.limitPrice >= effectiveClearingPrice;
+      else if (order.side === OrderSide.NO_BUY)   isFilled = order.limitPrice >= noPrice_auths;
+      else if (order.side === OrderSide.YES_SELL) isFilled = order.limitPrice <= effectiveClearingPrice;
+      else                                          isFilled = order.limitPrice <= noPrice_auths; // NO_SELL
 
-      if (!isFilled && order.isBuy && order.requeueAuths && order.requeueAuths.length > 0) {
+      // Track excluded BUY orders for auto-requeue to the next batch
+      if (!isFilled && isBuy && order.requeueAuths && order.requeueAuths.length > 0) {
         excludedOrders.push({ order, commitment: commitments[i].hash });
       }
 
-      if (order.isBuy && isFilled && order.transferAuth) {
-        console.log(`[BatchProcessor] Including TransferAuth for filled buy order (ephemeral=${order.trader})`);
+      if (isBuy && isFilled && order.transferAuth) {
+        console.log(`[BatchProcessor] Including TransferAuth for filled ${OrderSide[order.side]} order (ephemeral=${order.trader})`);
         // Ensure `from` = ephemeral wallet address (stored as order.trader)
         return { ...order.transferAuth, from: order.trader };
       }
 
-      if (order.isBuy && isFilled && !order.transferAuth) {
-        console.warn(`[BatchProcessor] Filled buy order for ${order.trader} has no TransferAuth — settlement will fail for this order`);
+      if (isBuy && isFilled && !order.transferAuth) {
+        console.warn(`[BatchProcessor] Filled ${OrderSide[order.side]} order for ${order.trader} has no TransferAuth — settlement will fail for this order`);
       }
 
       return ZERO_TRANSFER_AUTH;
@@ -855,7 +931,7 @@ export class BatchProcessor {
       args: [
         batchId,
         orders.map((o) => ({
-          isBuy:      o.isBuy,
+          side:       o.side,       // uint8 OrderSide enum (v8)
           amount:     o.amount,
           limitPrice: o.limitPrice,
           salt:       o.salt,
@@ -870,12 +946,11 @@ export class BatchProcessor {
           s:           a.s,
         })),
         effectiveClearingPrice,
-        fills.filledBuyVolume,
-        fills.filledSellYes,
-        fills.netBuyAmount,
-        fills.netSellYes,
+        fills.filledYesBuyVol,
+        fills.filledNoBuyVol,
+        fills.filledYesSellQty,
+        fills.filledNoSellQty,
         proof as `0x${string}`,
-        // v7.3: clobOrders and clobFillAmounts removed — relayer-intermediary settlement
       ],
       ...chainGas(this.config.chainId),
     });
@@ -883,15 +958,26 @@ export class BatchProcessor {
     await this.publicClient.waitForTransactionReceipt({ hash: settleHash });
     console.log(`[BatchProcessor] Batch ${batchId} settled! tx: ${settleHash}`);
 
-    // 9. Post-settlement: for net-sell batches, sell received YES tokens on CLOB.
-    //    Vault sent YES tokens to relayer during settleBatch — relayer now liquidates them.
-    if (cachedYesToken && fills.netSellYes > 0n && this.config.chainId === 137) {
-      console.log(`[BatchProcessor] Net sell: liquidating ${fills.netSellYes} YES tokens on CLOB`);
+    // 9. Post-settlement: liquidate excess tokens received from vault on the CLOB.
+    //    Vault sent finalExcessYes YES tokens and finalExcessNo NO tokens to relayer
+    //    during settleBatch — relayer now sells them to recover USDC.
+    if (cachedYesToken && finalExcessYes > 0n && this.config.chainId === 137) {
+      console.log(`[BatchProcessor] Liquidating ${finalExcessYes} excess YES tokens on CLOB`);
       try {
-        const { orderId } = await this.polymarket.placeMarketSell(cachedYesToken, fills.netSellYes);
+        const { orderId } = await this.polymarket.placeMarketSell(cachedYesToken, finalExcessYes);
         console.log(`[BatchProcessor] YES sell order placed: orderId=${orderId}`);
       } catch (sellErr) {
         console.warn(`[BatchProcessor] YES sell failed (non-fatal — capital at risk):`, sellErr);
+      }
+    }
+
+    if (cachedNoToken && finalExcessNo > 0n && this.config.chainId === 137) {
+      console.log(`[BatchProcessor] Liquidating ${finalExcessNo} excess NO tokens on CLOB`);
+      try {
+        const { orderId } = await this.polymarket.placeMarketSell(cachedNoToken, finalExcessNo);
+        console.log(`[BatchProcessor] NO sell order placed: orderId=${orderId}`);
+      } catch (sellErr) {
+        console.warn(`[BatchProcessor] NO sell failed (non-fatal — capital at risk):`, sellErr);
       }
     }
 
@@ -924,7 +1010,8 @@ export class BatchProcessor {
     const results: RequeueResult[] = [];
 
     for (const { order, commitment } of excludedOrders) {
-      if (!order.isBuy) continue; // sell order requeue is not supported (YES tokens pre-deposited)
+      // Only BUY orders (YES_BUY / NO_BUY) can be requeued — sell orders pre-deposited tokens
+      if (order.side !== OrderSide.YES_BUY && order.side !== OrderSide.NO_BUY) continue;
       if (!order.requeueAuths || order.requeueAuths.length === 0) {
         console.log(`[BatchProcessor] No requeue auths remaining for ${commitment} — cannot auto-requeue`);
         results.push({ commitment, status: "no_auths", fromBatchId, remainingAuths: 0 });
@@ -937,10 +1024,11 @@ export class BatchProcessor {
       try {
         console.log(`[BatchProcessor] Requeueing excluded order ${commitment} (ephemeral=${requeueAuth.ephemeral}, nonce=${requeueAuth.nonce})`);
 
+        const requeueFn = order.side === OrderSide.YES_BUY ? "commitOrderFor" : "commitBuyNoOrderFor";
         const hash = await this._write({
           address:      this.config.vaultAddress,
           abi:          BATCH_VAULT_ABI,
-          functionName: "commitOrderFor",
+          functionName: requeueFn,
           args: [
             commitment,
             order.amount,
@@ -1030,18 +1118,22 @@ export class BatchProcessor {
     return matched;
   }
 
-  /** Mirror BatchVault._executeCommit commitment hash computation (no trader address) */
+  /**
+   * Mirror BatchVault._computeCommitmentHash() (v8).
+   * Hash = keccak256(abi.encode(marketId, uint8(side), amount, limitPrice, salt))
+   * No trader address — privacy model.
+   */
   private _computeCommitmentHash(marketId: `0x${string}`, order: Order): `0x${string}` {
     return keccak256(
       encodeAbiParameters(
         [
           { type: "bytes32" },
-          { type: "bool"    },
+          { type: "uint8"   }, // OrderSide enum (v8: replaces bool isBuy from v7.3)
           { type: "uint256" },
           { type: "uint256" },
           { type: "bytes32" },
         ],
-        [marketId, order.isBuy, order.amount, order.limitPrice, order.salt],
+        [marketId, order.side, order.amount, order.limitPrice, order.salt],
       ),
     );
   }

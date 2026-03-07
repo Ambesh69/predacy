@@ -5,7 +5,7 @@ import { polygon, polygonAmoy } from "viem/chains";
 export const CONTRACTS = {
   // Polygon mainnet (live Polymarket)
   [polygon.id]: {
-    batchVault: "0x33073E5EB47394937733237517B760B19F10DF36" as `0x${string}`, // v7.3: relayer-intermediary settlement (pre-buys YES via CLOB, no operator access needed)
+    batchVault: "0x44Ed1EA9b420d3B954b5779Eed6CED1deFd1cf21" as `0x${string}`, // v8: 4-sided orders (YES_BUY/YES_SELL/NO_BUY/NO_SELL)
     usdc: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174" as `0x${string}`,
     ctf:  "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045" as `0x${string}`,
   },
@@ -80,15 +80,43 @@ export const CTF_ABI = [
   },
 ] as const;
 
-// ── BatchVault ABI (subset needed by frontend) ────────────────────────────────
+// ── BatchVault ABI (subset needed by frontend) — v8: 4 order sides ───────────
 
 export const BATCH_VAULT_ABI = [
+  // ── YES BUY: pay USDC → receive YES tokens (EIP-3009 deferred) ──────────
   {
     name: "commitOrder",
     type: "function",
     inputs: [
       { name: "commitment", type: "bytes32" },
       { name: "amount",     type: "uint256" },
+      { name: "marketId",   type: "bytes32" },
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+  {
+    name: "commitOrderFor",
+    type: "function",
+    inputs: [
+      { name: "commitment", type: "bytes32" },
+      { name: "amount",     type: "uint256" },
+      { name: "signer",     type: "address" },
+      { name: "nonce",      type: "uint256" },
+      { name: "deadline",   type: "uint256" },
+      { name: "signature",  type: "bytes"   },
+      { name: "marketId",   type: "bytes32" },
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+  // ── YES SELL: deposit YES tokens → receive USDC ───────────────────────────
+  {
+    name: "commitSellOrder",
+    type: "function",
+    inputs: [
+      { name: "commitment", type: "bytes32" },
+      { name: "yesAmount",  type: "uint256" },
       { name: "marketId",   type: "bytes32" },
     ],
     outputs: [],
@@ -109,19 +137,61 @@ export const BATCH_VAULT_ABI = [
     outputs: [],
     stateMutability: "nonpayable",
   },
+  // ── NO BUY: pay USDC → receive NO tokens (EIP-3009 deferred) ────────────
   {
-    name: "claimPosition",
+    name: "commitBuyNoOrder",
     type: "function",
     inputs: [
-      { name: "batchId",    type: "uint256" },
-      { name: "isBuy",      type: "bool"    },
+      { name: "commitment", type: "bytes32" },
       { name: "amount",     type: "uint256" },
-      { name: "limitPrice", type: "uint256" },
-      { name: "salt",       type: "bytes32" },
+      { name: "marketId",   type: "bytes32" },
     ],
     outputs: [],
     stateMutability: "nonpayable",
   },
+  {
+    name: "commitBuyNoOrderFor",
+    type: "function",
+    inputs: [
+      { name: "commitment", type: "bytes32" },
+      { name: "amount",     type: "uint256" },
+      { name: "signer",     type: "address" },
+      { name: "nonce",      type: "uint256" },
+      { name: "deadline",   type: "uint256" },
+      { name: "signature",  type: "bytes"   },
+      { name: "marketId",   type: "bytes32" },
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+  // ── NO SELL: deposit NO tokens → receive USDC ────────────────────────────
+  {
+    name: "commitSellNoOrder",
+    type: "function",
+    inputs: [
+      { name: "commitment", type: "bytes32" },
+      { name: "noAmount",   type: "uint256" },
+      { name: "marketId",   type: "bytes32" },
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+  {
+    name: "commitSellNoOrderFor",
+    type: "function",
+    inputs: [
+      { name: "commitment", type: "bytes32" },
+      { name: "noAmount",   type: "uint256" },
+      { name: "signer",     type: "address" },
+      { name: "nonce",      type: "uint256" },
+      { name: "deadline",   type: "uint256" },
+      { name: "signature",  type: "bytes"   },
+      { name: "marketId",   type: "bytes32" },
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+  // ── ZK claim ─────────────────────────────────────────────────────────────
   {
     // ZK claim: prove order membership in Merkle tree without revealing trader address.
     // Payout goes to recipient derived from publicInputs[4] (chosen by user at claim time).
@@ -136,6 +206,7 @@ export const BATCH_VAULT_ABI = [
     outputs: [],
     stateMutability: "nonpayable",
   },
+  // ── Read functions ────────────────────────────────────────────────────────
   {
     name: "getBatch",
     type: "function",
@@ -145,20 +216,18 @@ export const BATCH_VAULT_ABI = [
         name: "",
         type: "tuple",
         components: [
-          { name: "marketId",          type: "bytes32" },
-          { name: "openedAt",          type: "uint256" },
-          { name: "closedAt",          type: "uint256" },
-          { name: "status",            type: "uint8"   },
-          { name: "totalDeposited",    type: "uint256" },
-          { name: "totalSellYes",      type: "uint256" },
-          { name: "clearingPrice",     type: "uint256" },
-          { name: "netBuyAmount",      type: "uint256" },
-          { name: "yesTokensReceived", type: "uint256" },
-          { name: "filledSellYes",     type: "uint256" },
-          { name: "totalFilledBuyVol", type: "uint256" },
-          { name: "commitmentCount",   type: "uint256" },
-          { name: "commitmentRoot",    type: "bytes32" },
-          { name: "claimMerkleRoot",   type: "bytes32" },
+          { name: "marketId",        type: "bytes32" },
+          { name: "openedAt",        type: "uint256" },
+          { name: "closedAt",        type: "uint256" },
+          { name: "status",          type: "uint8"   },
+          { name: "totalDeposited",  type: "uint256" }, // USDC from YES buyers
+          { name: "totalDepositedNo",type: "uint256" }, // USDC from NO buyers
+          { name: "totalSellYes",    type: "uint256" }, // YES tokens from YES sellers
+          { name: "totalSellNo",     type: "uint256" }, // NO tokens from NO sellers
+          { name: "clearingPrice",   type: "uint256" }, // 6-decimal fixed point
+          { name: "commitmentCount", type: "uint256" },
+          { name: "commitmentRoot",  type: "bytes32" },
+          { name: "claimMerkleRoot", type: "bytes32" },
         ],
       },
     ],
@@ -178,7 +247,7 @@ export const BATCH_VAULT_ABI = [
         components: [
           { name: "filledAmount", type: "uint256" },
           { name: "refundAmount", type: "uint256" },
-          { name: "isBuy",        type: "bool"    },
+          { name: "side",         type: "uint8"   }, // 0=YES_BUY,1=YES_SELL,2=NO_BUY,3=NO_SELL
           { name: "claimed",      type: "bool"    },
         ],
       },
@@ -236,10 +305,12 @@ export const BATCH_VAULT_ABI = [
     inputs: [
       { name: "batchId",          type: "uint256", indexed: true  },
       { name: "clearingPrice",    type: "uint256", indexed: false },
-      { name: "totalBuyVolume",   type: "uint256", indexed: false },
-      { name: "totalSellVolume",  type: "uint256", indexed: false },
-      { name: "netBuyAmount",     type: "uint256", indexed: false },
-      { name: "yesTokensReceived",type: "uint256", indexed: false },
+      { name: "filledYesBuyVol",  type: "uint256", indexed: false },
+      { name: "filledNoBuyVol",   type: "uint256", indexed: false },
+      { name: "filledYesSellQty", type: "uint256", indexed: false },
+      { name: "filledNoSellQty",  type: "uint256", indexed: false },
+      { name: "splitQty",         type: "uint256", indexed: false },
+      { name: "mergeQty",         type: "uint256", indexed: false },
     ],
   },
 ] as const;

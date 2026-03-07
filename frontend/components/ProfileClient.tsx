@@ -11,6 +11,27 @@ import { clsx } from "clsx";
 import { BATCH_VAULT_ABI, ERC20_ABI, BatchStatus, getContracts } from "@/lib/contracts";
 import { ACTIVE_CHAIN } from "@/lib/chain";
 
+const YES_BUY = 0, YES_SELL = 1, NO_BUY = 2, NO_SELL = 3;
+
+function legacySideToNum(isBuy: boolean, isSell: boolean): number {
+  if (isSell) return YES_SELL;
+  if (!isBuy) return NO_BUY;
+  return YES_BUY;
+}
+function sideLabel(side: number) {
+  if (side === YES_SELL) return "SELL YES";
+  if (side === NO_BUY)   return "BUY NO";
+  if (side === NO_SELL)  return "SELL NO";
+  return "BUY YES";
+}
+function sideBadgeClass(side: number) {
+  if (side === YES_SELL || side === NO_SELL)
+    return "border-amber-500/40 text-amber-400 bg-amber-500/5";
+  if (side === NO_BUY)
+    return "border-danger/30 text-danger bg-danger/5";
+  return "border-accent/30 text-accent bg-accent/5";
+}
+
 const publicClient = createPublicClient({
   chain: ACTIVE_CHAIN,
   transport: http(),
@@ -29,8 +50,9 @@ interface StoredOrder {
   commitment:        string;
   salt?:             string;
   amount:            string;
-  isBuy:             boolean;
-  isSell?:           boolean;  // true = sell order (not a buy-NO order)
+  side?:             number;   // 0=YES_BUY,1=YES_SELL,2=NO_BUY,3=NO_SELL (v8+)
+  isBuy:             boolean;  // legacy (v7 and earlier)
+  isSell?:           boolean;  // legacy: true = YES_SELL
   limitPrice:        string;
   batchId:           string;
   marketId:          string | null;
@@ -45,8 +67,9 @@ interface OrderEntry {
   commitment:       `0x${string}`;
   salt?:            string;
   rawAmount:        bigint;
-  isBuy:            boolean;
-  isSell?:          boolean;  // true = sell order (not a buy-NO)
+  side:             number;   // 0=YES_BUY,1=YES_SELL,2=NO_BUY,3=NO_SELL
+  isBuy:            boolean;  // derived: side===YES_BUY||side===NO_BUY
+  isSell:           boolean;  // derived: side===YES_SELL||side===NO_SELL
   limitPrice:       bigint;
   batchId:          bigint;
   marketId?:        `0x${string}`;
@@ -200,10 +223,12 @@ function SkeletonRow() {
 function ActivityRow({ order }: { order: OrderEntry }) {
   const [expanded, setExpanded] = useState(false);
 
-  // For sell orders rawAmount is YES token count (6-decimal), not USDC
-  const amountDisplay = order.isBuy
+  // For sell orders rawAmount is token count (6-decimal), not USDC
+  const amountDisplay = (order.side === YES_BUY || order.side === NO_BUY)
     ? fUsdc(order.rawAmount)
-    : `${(Number(order.rawAmount) / 1e6).toFixed(4)} YES`;
+    : order.side === YES_SELL
+      ? `${(Number(order.rawAmount) / 1e6).toFixed(4)} YES`
+      : `${(Number(order.rawAmount) / 1e6).toFixed(4)} NO`;
 
   return (
     <div className="bg-bg hover:bg-surface/20 transition-colors border-b border-border last:border-b-0">
@@ -225,13 +250,9 @@ function ActivityRow({ order }: { order: OrderEntry }) {
             <div className="flex items-center gap-2 flex-wrap">
               <span className={clsx(
                 "text-[9px] tracking-widest uppercase px-1.5 py-0.5 border font-mono",
-                order.isSell
-                  ? "border-amber-500/40 text-amber-400 bg-amber-500/5"
-                  : order.isBuy
-                    ? "border-accent/30 text-accent bg-accent/5"
-                    : "border-danger/30 text-danger bg-danger/5",
+                sideBadgeClass(order.side),
               )}>
-                {order.isSell ? "SELL YES" : order.isBuy ? "BUY YES" : "BUY NO"}
+                {sideLabel(order.side)}
               </span>
               <StatusBadge status={order.batchStatus} />
               <span className="text-[10px] text-muted-dim">{timeAgo(order.timestamp)}</span>
@@ -394,13 +415,9 @@ function PendingRow({ order }: { order: OrderEntry }) {
         <div className="flex items-center gap-2 flex-wrap">
           <span className={clsx(
             "text-[9px] tracking-widest uppercase px-1.5 py-0.5 border font-mono",
-            order.isSell
-              ? "border-amber-500/40 text-amber-400 bg-amber-500/5"
-              : order.isBuy
-                ? "border-accent/30 text-accent bg-accent/5"
-                : "border-danger/30 text-danger bg-danger/5",
+            sideBadgeClass(order.side),
           )}>
-            {order.isSell ? "SELL YES" : order.isBuy ? "BUY YES" : "BUY NO"}
+            {sideLabel(order.side)}
           </span>
           <span className={clsx(
             "text-[9px] tracking-widest uppercase px-1.5 py-0.5 border",
@@ -461,7 +478,7 @@ function ClosedPositionRow({
 
   // For buy positions still held, current value uses the outcome price.
   const outcomePrice = !order.isSell && order.currentYesPrice != null
-    ? (order.isBuy ? order.currentYesPrice : 1 - order.currentYesPrice)
+    ? (order.side === NO_BUY ? 1 - order.currentYesPrice : order.currentYesPrice)
     : null;
 
   const currentValue = order.shares != null && outcomePrice != null
@@ -511,7 +528,11 @@ function ClosedPositionRow({
           {/* Polymarket-style subtitle: "58.8 Yes at 34¢" */}
           <p className="text-[10px] text-muted-dim">
             {order.shares != null && order.shares > 0
-              ? `${order.shares.toFixed(1)} ${order.isSell ? "Yes sold" : order.isBuy ? "Yes" : "No"} at ${avgCents}`
+              ? `${order.shares.toFixed(1)} ${
+                  order.side === YES_SELL ? "Yes sold" :
+                  order.side === NO_SELL  ? "No sold"  :
+                  order.side === NO_BUY   ? "No"       : "Yes"
+                } at ${avgCents}`
               : avgCents}
             {!order.isSell && order.claimed && (
               <span className="ml-2 text-accent/50">· claimed ✓</span>
@@ -636,13 +657,9 @@ function PositionRow({
           <div className="flex items-center gap-2 flex-wrap">
             <span className={clsx(
               "text-[9px] tracking-widest uppercase px-1.5 py-0.5 border font-mono",
-              order.isSell
-                ? "border-amber-500/40 text-amber-400 bg-amber-500/5"
-                : order.isBuy
-                  ? "border-accent/30 text-accent bg-accent/5"
-                  : "border-danger/30 text-danger bg-danger/5",
+              sideBadgeClass(order.side),
             )}>
-              {order.isSell ? "SELL YES" : order.isBuy ? "BUY YES" : "BUY NO"}
+              {sideLabel(order.side)}
             </span>
             {isPending && (
               <span className={clsx(
@@ -860,20 +877,26 @@ export default function ProfileClient() {
 
       // storedOrders is newest-first (EventPageClient uses unshift; merge sorts desc)
       const entries: OrderEntry[] = storedOrders
-        .map((o) => ({
-          commitment:     o.commitment as `0x${string}`,
-          salt:           o.salt,
-          rawAmount:      BigInt(o.amount),
-          isBuy:          o.isBuy,
-          isSell:           o.isSell === true,
-          limitPrice:       BigInt(o.limitPrice),
-          batchId:          BigInt(o.batchId),
-          marketId:         (o.marketId ?? undefined) as `0x${string}` | undefined,
-          marketQuestion:   o.marketQuestion ?? undefined,
-          timestamp:        o.timestamp,
-          claimed:          o.claimed,
-          buyClearingPrice: o.buyClearingPrice ? BigInt(o.buyClearingPrice) : undefined,
-        }));
+        .map((o) => {
+          const side = typeof o.side === "number"
+            ? o.side
+            : legacySideToNum(o.isBuy, o.isSell === true);
+          return {
+            commitment:     o.commitment as `0x${string}`,
+            salt:           o.salt,
+            rawAmount:      BigInt(o.amount),
+            side,
+            isBuy:          side === YES_BUY || side === NO_BUY,
+            isSell:         side === YES_SELL || side === NO_SELL,
+            limitPrice:       BigInt(o.limitPrice),
+            batchId:          BigInt(o.batchId),
+            marketId:         (o.marketId ?? undefined) as `0x${string}` | undefined,
+            marketQuestion:   o.marketQuestion ?? undefined,
+            timestamp:        o.timestamp,
+            claimed:          o.claimed,
+            buyClearingPrice: o.buyClearingPrice ? BigInt(o.buyClearingPrice) : undefined,
+          };
+        });
 
       setOrders(entries);
       setLoading(false);
@@ -939,7 +962,7 @@ export default function ProfileClient() {
                 abi:          BATCH_VAULT_ABI,
                 functionName: "getPosition",
                 args:         [entry.batchId, entry.commitment],
-              }) as Promise<{ filledAmount: bigint; refundAmount: bigint; isBuy: boolean; claimed: boolean }>
+              }) as Promise<{ filledAmount: bigint; refundAmount: bigint; side: number; claimed: boolean }>
             );
 
             // usedNullifiers is authoritative for claimed state.
@@ -1152,13 +1175,17 @@ export default function ProfileClient() {
       const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
       if (!relayerUrl) throw new Error("NEXT_PUBLIC_RELAYER_URL is not set");
 
+      const claimSide = typeof myOrder.side === "number"
+        ? myOrder.side
+        : legacySideToNum(myOrder.isBuy, myOrder.isSell === true);
+
       const resp = await fetch(`${relayerUrl}/claim-proof`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           batchId:    order.batchId.toString(),
           marketId:   myOrder.marketId,
-          isBuy:      myOrder.isBuy,
+          side:       claimSide,
           amount:     myOrder.amount,
           limitPrice: myOrder.limitPrice,
           salt:       myOrder.salt,

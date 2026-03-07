@@ -1,6 +1,15 @@
+/// @notice Order side — mirrors all 4 Polymarket CLOB order types.
+///         Values match the OrderSide enum in BatchVault.sol.
+export enum OrderSide {
+  YES_BUY  = 0, // pay USDC → receive YES tokens  (EIP-3009 deferred)
+  YES_SELL = 1, // deposit YES tokens → receive USDC
+  NO_BUY   = 2, // pay USDC → receive NO tokens   (EIP-3009 deferred)
+  NO_SELL  = 3, // deposit NO tokens → receive USDC
+}
+
 /// @notice EIP-3009 TransferWithAuthorization components.
 ///         Signed off-chain by the user at order time; submitted by the relayer
-///         at settlement for filled buy orders only.
+///         at settlement for filled BUY orders (YES_BUY and NO_BUY) only.
 export interface TransferAuth {
   from:        `0x${string}`; // ephemeral wallet address (source of USDC pull)
   validAfter:  bigint;         // 0 = valid immediately
@@ -27,11 +36,11 @@ export interface RequeueAuth {
 
 export interface Order {
   trader:       `0x${string}`;
-  isBuy:        boolean;
-  amount:       bigint;        // USDC, 6 decimals
-  limitPrice:   bigint;        // 6-decimal fixed point (e.g. 650000n = $0.65)
+  side:         OrderSide;     // YES_BUY / YES_SELL / NO_BUY / NO_SELL (replaces isBuy)
+  amount:       bigint;        // USDC for BUY orders, token qty for SELL orders (6 decimals)
+  limitPrice:   bigint;        // 6-decimal fixed point (e.g. 650000n = $0.65 for YES)
   salt:         `0x${string}`;
-  transferAuth?: TransferAuth; // EIP-3009 auth for buy orders — collected at settlement
+  transferAuth?: TransferAuth; // EIP-3009 auth for BUY orders — collected at settlement
   requeueAuths?: RequeueAuth[]; // pre-signed sigs for auto-requeue (buy orders only)
 }
 
@@ -39,7 +48,7 @@ export interface Commitment {
   hash:   `0x${string}`;
   amount: bigint;
   index:  number;
-  // Note: no `trader` field — the new Commitment struct does not store trader address
+  // Note: no `trader` field — the Commitment struct does not store trader address
 }
 
 export interface BatchInfo {
@@ -48,12 +57,11 @@ export interface BatchInfo {
   openedAt: bigint;
   closedAt: bigint;
   status: BatchStatus;
-  totalDeposited: bigint;
+  totalDeposited: bigint;    // USDC authorized by YES buyers
+  totalDepositedNo: bigint;  // USDC authorized by NO buyers
+  totalSellYes: bigint;      // YES tokens deposited by YES sellers
+  totalSellNo: bigint;       // NO tokens deposited by NO sellers
   clearingPrice: bigint;
-  netBuyAmount: bigint;
-  yesTokensReceived: bigint;
-  filledSellYes: bigint;
-  totalFilledBuyVol: bigint;
   commitmentCount: bigint;
   commitmentRoot: `0x${string}`;
   claimMerkleRoot: `0x${string}`;
@@ -67,11 +75,10 @@ export enum BatchStatus {
 
 export interface ClearingResult {
   clearingPrice: bigint;
-  filledBuyVolume: bigint;
-  filledSellVolume: bigint;  // YES token count from filled sell orders
-  filledSellYes: bigint;     // same as filledSellVolume — explicit alias for clarity
-  netBuyAmount: bigint;
-  netSellYes: bigint;        // YES tokens to sell on Polymarket (sell-heavy batches)
+  filledYesBuyVol: bigint;   // USDC from filled YES_BUY orders
+  filledNoBuyVol: bigint;    // USDC from filled NO_BUY orders
+  filledYesSellQty: bigint;  // YES tokens from filled YES_SELL orders
+  filledNoSellQty: bigint;   // NO tokens from filled NO_SELL orders
   filledOrders: Order[];
   unfilledOrders: Order[];
 }
