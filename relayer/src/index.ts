@@ -1463,15 +1463,13 @@ async function recoverOpenBatches() {
     }
   }
 
-  await recoverSettlingBatches();
-  await recoverOpenBatches();
-
-  // Escape hatch: RECOVER_BATCH_ID=26 forces a specific stuck SETTLING batch to be
-  // retried, bypassing the event-scan (useful when the RPC silently dropped the log).
+  // Escape hatch: RECOVER_BATCH_ID=2 forces a specific stuck SETTLING/LOCKED batch to be
+  // retried immediately — runs BEFORE the slow getLogs scan so it fires within ~2s of startup
+  // regardless of how long the scan takes or what HTTP requests arrive mid-scan.
   const RECOVER_BATCH_ID_ENV = process.env.RECOVER_BATCH_ID;
   if (missingVars.length === 0 && RECOVER_BATCH_ID_ENV) {
     const forceBatchId = BigInt(RECOVER_BATCH_ID_ENV);
-    console.log(`[Relayer] RECOVER_BATCH_ID=${forceBatchId} — force-recovering batch...`);
+    console.log(`[Relayer] RECOVER_BATCH_ID=${forceBatchId} — force-recovering batch immediately...`);
     try {
       const batchInfo = await publicClient.readContract({
         address:      baseConfig.vaultAddress,
@@ -1480,10 +1478,7 @@ async function recoverOpenBatches() {
         args:         [forceBatchId],
       }) as { marketId: `0x${string}`; status: number };
 
-      // Accept SETTLING (1) and LOCKED (2) — processBatch now handles both.
-      // LOCKED batches were previously permanently-failed because the old code re-tried
-      // lockFunds (which reverts on LOCKED) → 3 quick failures → permanently failed.
-      // Now processBatch skips lockFunds for LOCKED batches, so we clear the flag.
+      // Accept SETTLING (1) and LOCKED (2) — processBatch handles both.
       if (batchInfo.status !== 1 && batchInfo.status !== 2) {
         console.log(`[Relayer] RECOVER_BATCH_ID: batch ${forceBatchId} status=${batchInfo.status} (not SETTLING/LOCKED) — skipping`);
       } else {
@@ -1494,42 +1489,29 @@ async function recoverOpenBatches() {
             await _failRedis.srem("predacy:failed_batches", forceBatchId.toString()).catch(() => {});
           }
         }
-        const marketId = batchInfo.marketId;
-        const key      = marketId.toLowerCase();
+        const marketId   = batchInfo.marketId;
+        const key        = marketId.toLowerCase();
         const phaseLabel = batchInfo.status === 2 ? "LOCKED" : "SETTLING";
-        const existingState = activeMarkets.get(key);
-        if (!existingState) {
-          // Market not tracked at all — create fresh state and settle.
-          const state = createMarketState(marketId);
-          state.currentBatchId  = forceBatchId;
-          state.settlingBatchId = forceBatchId;
-          state.processingBatch = true;
-          activeMarkets.set(key, state);
-          batchToMarket.set(forceBatchId.toString(), key);
-          console.log(`[Relayer] RECOVER_BATCH_ID: recovering ${phaseLabel} batch ${forceBatchId} for market ${marketId}`);
-          state.processor.processBatch(forceBatchId)
-            .then(() => { console.log(`[Relayer] RECOVER_BATCH_ID: settled batch ${forceBatchId}`); })
-            .catch(async (err) => { await onSettleFail(state, key, forceBatchId, err); })
-            .finally(() => { state.processingBatch = false; state.settlingBatchId = null; });
-        } else if (!existingState.processingBatch) {
-          // Market is tracked (e.g. by a different OPEN batch from recoverOpenBatches)
-          // but no settlement is in flight — force-settle the LOCKED batch on the existing state.
-          existingState.settlingBatchId = forceBatchId;
-          existingState.processingBatch = true;
-          batchToMarket.set(forceBatchId.toString(), key);
-          console.log(`[Relayer] RECOVER_BATCH_ID: recovering ${phaseLabel} batch ${forceBatchId} for market ${marketId} (market already tracked — injecting settlement)`);
-          existingState.processor.processBatch(forceBatchId)
-            .then(() => { console.log(`[Relayer] RECOVER_BATCH_ID: settled batch ${forceBatchId}`); })
-            .catch(async (err) => { await onSettleFail(existingState, key, forceBatchId, err); })
-            .finally(() => { existingState.processingBatch = false; existingState.settlingBatchId = null; });
-        } else {
-          console.log(`[Relayer] RECOVER_BATCH_ID: batch ${forceBatchId} already being processed — skipping`);
-        }
+        // activeMarkets is empty at this point (runs before scans) — always creates fresh state.
+        const state = createMarketState(marketId);
+        state.currentBatchId  = forceBatchId;
+        state.settlingBatchId = forceBatchId;
+        state.processingBatch = true;
+        activeMarkets.set(key, state);
+        batchToMarket.set(forceBatchId.toString(), key);
+        console.log(`[Relayer] RECOVER_BATCH_ID: recovering ${phaseLabel} batch ${forceBatchId} for market ${marketId}`);
+        state.processor.processBatch(forceBatchId)
+          .then(() => { console.log(`[Relayer] RECOVER_BATCH_ID: settled batch ${forceBatchId}`); })
+          .catch(async (err) => { await onSettleFail(state, key, forceBatchId, err); })
+          .finally(() => { state.processingBatch = false; state.settlingBatchId = null; });
       }
     } catch (err) {
       console.error(`[Relayer] RECOVER_BATCH_ID: failed to recover batch ${forceBatchId}:`, err);
     }
   }
+
+  await recoverSettlingBatches();
+  await recoverOpenBatches();
 
   if (missingVars.length === 0 && PRE_WARM_MARKET_ID) {
     console.log(`[Relayer] Pre-warming market ${PRE_WARM_MARKET_ID} (MARKET_ID env var)`);
