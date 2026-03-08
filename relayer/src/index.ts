@@ -1527,8 +1527,17 @@ async function recoverOpenBatches() {
     }
   }
 
-  await recoverSettlingBatches();
-  await recoverOpenBatches();
+  // Start polling immediately — don't block on recovery scans.
+  // recoverSettlingBatches / recoverOpenBatches run in the background; both
+  // check activeMarkets.has(key) before inserting, so there are no races.
+  setInterval(poll, 5_000);
+  console.log("[Relayer] Polling every 5 s (multi-market mode) — recovery scans running in background");
+
+  // Recovery scans: fire-and-forget so they don't delay the first poll tick.
+  recoverSettlingBatches().catch((err: any) =>
+    console.error("[Relayer] recoverSettlingBatches failed:", err.message));
+  recoverOpenBatches().catch((err: any) =>
+    console.error("[Relayer] recoverOpenBatches failed:", err.message));
 
   if (missingVars.length === 0 && PRE_WARM_MARKET_ID) {
     console.log(`[Relayer] Pre-warming market ${PRE_WARM_MARKET_ID} (MARKET_ID env var)`);
@@ -1543,7 +1552,4 @@ async function recoverOpenBatches() {
   } else {
     console.log("[Relayer] No MARKET_ID env var — markets will be opened on-demand when first order arrives");
   }
-
-  setInterval(poll, 5_000);
-  console.log("[Relayer] Polling every 5 s (multi-market mode)");
 })();
