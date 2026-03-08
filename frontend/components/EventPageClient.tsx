@@ -797,55 +797,65 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         } : {}),
       });
 
-      let startResp: Response | null = null;
-      let lastFetchError: Error | null = null;
-      for (let retry = 0; retry < 3; retry++) {
-        if (retry > 0) await new Promise((r) => setTimeout(r, 2000 * retry));
-        try {
-          startResp = await fetch(`${relayerUrl}/claim-proof`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: claimBody,
-          });
-          lastFetchError = null;
-          break;
-        } catch (fetchErr: any) {
-          lastFetchError = fetchErr;
-          // Network error — retry
+      // Helper: POST /claim-proof and return the jobId (retries on network error).
+      const submitClaimJob = async (): Promise<string> => {
+        let resp: Response | null = null;
+        let lastErr: Error | null = null;
+        for (let r = 0; r < 3; r++) {
+          if (r > 0) await new Promise((res) => setTimeout(res, 3000 * r));
+          try {
+            resp = await fetch(`${relayerUrl}/claim-proof`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: claimBody,
+            });
+            lastErr = null;
+            break;
+          } catch (e: any) { lastErr = e; }
         }
-      }
-      if (!startResp) {
-        throw new Error(
-          `Could not reach relayer after 3 attempts. ` +
-          `Check your internet connection and try again. ` +
-          `(${lastFetchError?.message ?? "Network error"})`
+        if (!resp) throw new Error(
+          `Could not reach relayer — check your connection and retry. (${lastErr?.message ?? "Network error"})`
         );
-      }
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          throw new Error((err as any).error ?? `Claim request failed (${resp.status})`);
+        }
+        const { jobId: id } = await resp.json();
+        if (!id) throw new Error("Relayer did not return a job ID — please retry");
+        return id as string;
+      };
 
-      if (!startResp.ok) {
-        const err = await startResp.json().catch(() => ({}));
-        throw new Error(err.error ?? `Claim request failed (${startResp.status})`);
-      }
-
-      const { jobId } = await startResp.json();
-      if (!jobId) throw new Error("Relayer did not return a job ID — please retry");
+      let jobId = await submitClaimJob();
 
       // Poll for proof completion (ZK proof takes ~60-90 s on Railway).
       // Up to 60 polls × 3 s = 3 minutes before timing out.
-      // Network errors during polling are swallowed (retry next tick) rather than aborting the claim.
+      // - Network errors during polling are swallowed (Railway may be briefly restarting).
+      // - If the job vanishes (404 = Railway restarted and lost in-memory jobs), re-submit.
       type ClaimJobResult = {
         status: "pending" | "done" | "error";
         txHash?: string; wrapDigest?: string; wrappedToken?: string;
         ctfAddress?: string; tokenAmount?: string; wrapError?: string; error?: string;
       };
       let claimResult: ClaimJobResult | null = null;
+      let consecutiveNotFound = 0;
       for (let attempt = 0; attempt < 60; attempt++) {
         await new Promise((r) => setTimeout(r, 3000));
         try {
           const statusResp = await fetch(
             `${relayerUrl}/claim-proof/status?jobId=${encodeURIComponent(jobId)}`,
           );
-          if (!statusResp.ok) continue; // transient — keep polling
+          if (statusResp.status === 404) {
+            // Job not found — Railway may have restarted and lost the in-memory job map.
+            // After 3 consecutive 404s (9 s), re-submit the claim to get a fresh jobId.
+            consecutiveNotFound++;
+            if (consecutiveNotFound >= 3) {
+              jobId = await submitClaimJob();
+              consecutiveNotFound = 0;
+            }
+            continue;
+          }
+          consecutiveNotFound = 0;
+          if (!statusResp.ok) continue; // other transient error — keep polling
           const statusData: ClaimJobResult = await statusResp.json();
           if (statusData.status === "done") { claimResult = statusData; break; }
           if (statusData.status === "error") {
@@ -853,11 +863,14 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
           }
           // status === "pending" — keep polling
         } catch (pollErr: any) {
-          // Network error during status poll — if it's an app-level error (from throw above) re-throw it
-          if (pollErr.message && !pollErr.message.includes("Failed to fetch") && !pollErr.message.includes("NetworkError")) {
+          // If it's an application-level error thrown above, re-throw it.
+          // Otherwise it's a network error — swallow and keep polling.
+          if (pollErr.message &&
+              !pollErr.message.includes("Failed to fetch") &&
+              !pollErr.message.includes("NetworkError") &&
+              !pollErr.message.includes("Load failed")) {
             throw pollErr;
           }
-          // Otherwise swallow — Railway may be briefly unavailable, keep polling
         }
       }
       if (!claimResult) throw new Error("Claim timed out after 3 minutes — please retry");
