@@ -456,6 +456,56 @@ export class BatchProcessor {
     return (this.walletClient.writeContract as (p: any) => Promise<`0x${string}`>)(params);
   }
 
+  /**
+   * Wait for USDC proceeds from a CLOB sell to arrive in the relayer wallet.
+   * Mirrors the YES-token balance poll in polymarketClient.buyYesForSettlement.
+   * settleBatch pulls USDC from the relayer — this must complete first.
+   */
+  private async _waitForUsdcProceeds(usdcExpected: bigint, label: string): Promise<void> {
+    if (!this.config.usdcAddress || usdcExpected === 0n) return;
+
+    const ERC20_BALANCE_ABI = [{
+      name: "balanceOf",
+      type: "function" as const,
+      inputs:  [{ name: "account", type: "address" }],
+      outputs: [{ name: "", type: "uint256" }],
+      stateMutability: "view",
+    }] as const;
+
+    const relayerAddress = this.walletClient.account!.address;
+    const getBalance = () => this.publicClient.readContract({
+      address:      this.config.usdcAddress as `0x${string}`,
+      abi:          ERC20_BALANCE_ABI,
+      functionName: "balanceOf",
+      args:         [relayerAddress],
+    }) as Promise<bigint>;
+
+    const preBal  = await getBalance();
+    // Accept ≥90% of expected to allow minor price/rounding differences
+    const target  = preBal + (usdcExpected * 9n / 10n);
+
+    const POLL_MS  = 2500;
+    const MAX_POLL = 12; // 30s total
+
+    for (let i = 0; i < MAX_POLL; i++) {
+      await new Promise(r => setTimeout(r, POLL_MS));
+      const bal = await getBalance();
+      console.log(`[BatchProcessor] ${label}: USDC check ${i + 1}/${MAX_POLL}: ${bal} (need ≥${target})`);
+      if (bal >= target) {
+        console.log(`[BatchProcessor] ${label}: USDC proceeds received ✓`);
+        return;
+      }
+    }
+
+    const finalBal = await getBalance();
+    if (finalBal < target) {
+      console.warn(
+        `[BatchProcessor] ${label}: USDC balance ${finalBal} < target ${target} after 30s ` +
+        `— settleBatch may fail (ERC20: transfer amount exceeds balance)`,
+      );
+    }
+  }
+
   constructor(config: RelayerConfig) {
     this.config = config;
     const account = privateKeyToAccount(config.relayerPrivateKey);
@@ -1218,8 +1268,8 @@ export class BatchProcessor {
     //   - Relayer wallet received finalExcessYes YES tokens (vault-provided) → sell on CLOB
     //   - Relayer wallet received finalExcessNo  NO  tokens (vault-provided) → sell on CLOB
     //
-    // Note: buys are blocking (FOK).  Excess sells are placed first (non-blocking) so
-    // that USDC proceeds can settle before settleBatch pulls them from the relayer.
+    // Note: buys are blocking (FOK + balance poll).  Excess sells now also block
+    // until USDC proceeds arrive in the relayer wallet before settleBatch is called.
 
     // Sell excess YES tokens on CLOB first (relayer needs the USDC before settleBatch)
     if (cachedYesToken && finalExcessYes > 0n && this.config.chainId === 137) {
@@ -1228,6 +1278,8 @@ export class BatchProcessor {
       try {
         const { orderId } = await this.polymarket.placeMarketSell(cachedYesToken, finalExcessYes);
         console.log(`[BatchProcessor] Excess YES sell placed: orderId=${orderId}`);
+        // Wait for USDC proceeds to arrive before calling settleBatch.
+        await this._waitForUsdcProceeds(usdcExpected, "excess YES sell");
       } catch (sellErr) {
         console.warn(`[BatchProcessor] Excess YES sell failed (settleBatch may revert if USDC not received):`, sellErr);
       }
@@ -1241,6 +1293,7 @@ export class BatchProcessor {
       try {
         const { orderId } = await this.polymarket.placeMarketSell(cachedNoToken, finalExcessNo);
         console.log(`[BatchProcessor] Excess NO sell placed: orderId=${orderId}`);
+        await this._waitForUsdcProceeds(usdcExpected, "excess NO sell");
       } catch (sellErr) {
         console.warn(`[BatchProcessor] Excess NO sell failed (settleBatch may revert if USDC not received):`, sellErr);
       }
