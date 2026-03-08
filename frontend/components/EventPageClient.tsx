@@ -973,17 +973,36 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     const storageKey = `predacy:orders:${walletAddress.toLowerCase()}`;
     const storedOrders: Array<{
       batchId: string; ephemeralKey?: string;
-      ctfTokenId?: string; proxyWalletAddress?: string;
+      ctfTokenId?: string | null; proxyWalletAddress?: string;
+      side?: number; marketId?: string;
     }> = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
 
     const myOrder = storedOrders.find((o) => o.batchId === batchId.toString());
-    if (!myOrder)                   throw new Error("Order not found in local storage");
-    if (!myOrder.ephemeralKey)      throw new Error("No ephemeral key — cannot sign transfer");
-    if (!myOrder.ctfTokenId)        throw new Error("No token ID stored — cannot identify tokens");
+    if (!myOrder)                    throw new Error("Order not found in local storage");
+    if (!myOrder.ephemeralKey)       throw new Error("No ephemeral key — cannot sign transfer");
     if (!myOrder.proxyWalletAddress) throw new Error("No ProxyWallet address stored");
 
     const proxyWallet = myOrder.proxyWalletAddress as `0x${string}`;
-    const tokenId     = BigInt(myOrder.ctfTokenId);
+
+    // Resolve token ID: use stored value if present, otherwise read from BatchVault on-chain.
+    // The on-chain fallback handles orders claimed before ctfTokenId storage was added.
+    let tokenId: bigint;
+    if (myOrder.ctfTokenId) {
+      tokenId = BigInt(myOrder.ctfTokenId);
+    } else if (myOrder.marketId) {
+      // side 0=YES_BUY → YES tokens; side 2=NO_BUY → NO tokens; default YES
+      const isYes = !myOrder.side || myOrder.side === 0;
+      const onChainId = await publicClient.readContract({
+        address:      contracts.batchVault,
+        abi:          BATCH_VAULT_ABI,
+        functionName: isYes ? "yesTokenIds" : "noTokenIds",
+        args:         [myOrder.marketId as `0x${string}`],
+      }) as bigint;
+      if (onChainId === 0n) throw new Error("Token ID not found on-chain — contact support");
+      tokenId = onChainId;
+    } else {
+      throw new Error("No token ID stored — cannot identify tokens");
+    }
 
     // Read actual balance — use this rather than computed amount in case of rounding.
     const balance = await publicClient.readContract({
