@@ -972,7 +972,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     const contracts = getContracts(ACTIVE_CHAIN.id);
     const storageKey = `predacy:orders:${walletAddress.toLowerCase()}`;
     const storedOrders: Array<{
-      batchId: string; ephemeralKey?: string;
+      batchId: string; ephemeralKey?: string; ephemeralAddress?: string;
       ctfTokenId?: string | null; proxyWalletAddress?: string;
       side?: number; marketId?: string;
     }> = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
@@ -1014,11 +1014,18 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     if (balance === 0n) throw new Error("No tokens in ProxyWallet — already transferred?");
 
     // Read ProxyWallet nonce for replay protection.
-    const proxyNonce = await publicClient.readContract({
-      address:      proxyWallet,
-      abi:          PROXY_WALLET_ABI,
-      functionName: "nonce",
-    }) as bigint;
+    // If the wallet isn't deployed yet, nonce() returns 0x — default to 0n.
+    // The relayer will deploy the wallet before submitting executeWithSig.
+    let proxyNonce: bigint;
+    try {
+      proxyNonce = await publicClient.readContract({
+        address:      proxyWallet,
+        abi:          PROXY_WALLET_ABI,
+        functionName: "nonce",
+      }) as bigint;
+    } catch {
+      proxyNonce = 0n; // wallet not deployed yet; relayer deploys it (nonce starts at 0)
+    }
 
     // Build CTF.safeTransferFrom(proxyWallet, walletAddress, tokenId, balance, "0x") calldata.
     const calldata = encodeFunctionData({
@@ -1055,10 +1062,11 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         proxyWallet,
-        to:      walletAddress,
-        tokenId: tokenId.toString(),
-        amount:  balance.toString(),
+        to:               walletAddress,
+        tokenId:          tokenId.toString(),
+        amount:           balance.toString(),
         sig,
+        ephemeralAddress: myOrder.ephemeralAddress, // relayer needs this to ensureDeployed
       }),
     });
 

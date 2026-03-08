@@ -627,7 +627,7 @@ const server = createServer((req, res) => {
     req.on("end", async () => {
       try {
         const data = JSON.parse(body);
-        const { proxyWallet, to, tokenId, amount, sig } = data;
+        const { proxyWallet, to, tokenId, amount, sig, ephemeralAddress } = data;
 
         if (!proxyWallet || !to || !tokenId || !amount || !sig) {
           send(400, { error: "Missing fields: proxyWallet, to, tokenId, amount, sig" });
@@ -638,6 +638,13 @@ const server = createServer((req, res) => {
         if (!ctfAddress) {
           send(503, { error: "CTF_ADDRESS not configured on relayer" });
           return;
+        }
+
+        // Deploy ProxyWallet if not already deployed (relayer pays MATIC).
+        // The owner signed a nonce=0 digest — a fresh deploy starts at nonce 0.
+        const pwm = getProxyWalletManager();
+        if (pwm && ephemeralAddress) {
+          await pwm.ensureDeployed(ephemeralAddress as `0x${string}`);
         }
 
         // Build CTF.safeTransferFrom(proxyWallet, to, tokenId, amount, "0x") calldata
