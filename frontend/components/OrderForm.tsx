@@ -5,7 +5,7 @@ import { createPublicClient, http, encodePacked, keccak256 } from "viem";
 import { clsx } from "clsx";
 import { computeCommitment, generateSalt } from "@/lib/commitmentHash";
 import { getErrorMessage } from "@/lib/validation";
-import { getContracts, CTF_ABI } from "@/lib/contracts";
+import { getContracts, CTF_ABI, BATCH_VAULT_ABI } from "@/lib/contracts";
 import { ACTIVE_CHAIN } from "@/lib/chain";
 import type { Market } from "@/lib/polymarket";
 
@@ -193,6 +193,7 @@ export default function OrderForm({
         let totalYes = 0n;
         let totalNo  = 0n;
         for (const condId of allIds) {
+          // Standard CTF token IDs (indexSet convention)
           const [yesBal, noBal] = await Promise.all([
             publicClient.readContract({
               address: contracts.ctf, abi: CTF_ABI, functionName: "balanceOf",
@@ -205,6 +206,32 @@ export default function OrderForm({
           ]);
           totalYes += yesBal;
           totalNo  += noBal;
+
+          // NegRisk token IDs (v10: stored on BatchVault, different from standard CTF IDs)
+          const [negRiskYesId, negRiskNoId] = await Promise.all([
+            publicClient.readContract({
+              address: contracts.batchVault, abi: BATCH_VAULT_ABI,
+              functionName: "yesTokenIds", args: [condId],
+            }) as Promise<bigint>,
+            publicClient.readContract({
+              address: contracts.batchVault, abi: BATCH_VAULT_ABI,
+              functionName: "noTokenIds", args: [condId],
+            }) as Promise<bigint>,
+          ]);
+          if (negRiskYesId !== 0n) {
+            const negRiskYesBal = await publicClient.readContract({
+              address: contracts.ctf, abi: CTF_ABI, functionName: "balanceOf",
+              args: [walletAddress, negRiskYesId],
+            }) as bigint;
+            totalYes += negRiskYesBal;
+          }
+          if (negRiskNoId !== 0n) {
+            const negRiskNoBal = await publicClient.readContract({
+              address: contracts.ctf, abi: CTF_ABI, functionName: "balanceOf",
+              args: [walletAddress, negRiskNoId],
+            }) as bigint;
+            totalNo += negRiskNoBal;
+          }
         }
         if (!cancelled) { setYesBalance(totalYes); setNoBalance(totalNo); }
       } catch (err) {
