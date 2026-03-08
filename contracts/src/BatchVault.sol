@@ -26,7 +26,7 @@ interface IUSDC {
     ) external;
 }
 
-/// @title BatchVault v9
+/// @title BatchVault v10
 /// @notice Private prediction market layer — supports all 4 Polymarket order types.
 ///
 /// Order types (mirrors Polymarket CLOB exactly):
@@ -40,8 +40,8 @@ interface IUSDC {
 ///     1. Pull USDC from YES/NO buyers via EIP-3009
 ///     2. Direct-match YES buyers ↔ YES sellers (internal swap)
 ///     3. Direct-match NO buyers ↔ NO sellers
-///     4. Remaining YES + NO demand → CTF.splitPosition (vault's own USDC)
-///     5. Excess YES + NO supply → CTF.mergePositions (returns USDC to vault)
+///     4. Standard CTF only: remaining balanced YES+NO demand → CTF.splitPosition
+///     5. Standard CTF only: excess balanced YES+NO supply → CTF.mergePositions
 ///     6. Send gap USDC to relayer (vault-funded; relayer buys tokens from CLOB)
 ///     7. Send finalExcess tokens to relayer (relayer sells on CLOB for USDC)
 ///     8. Assign per-commitment positions; compute commitmentRoot
@@ -50,6 +50,12 @@ interface IUSDC {
 ///     2. Pull gap tokens from relayer (bought with vault-provided USDC)
 ///     3. Pull USDC from relayer (from selling vault-provided excess tokens)
 ///     4. Build Merkle root; finalize batch
+///
+/// v10: NegRisk token ID overrides.
+///   Call setMarketTokenIds(marketId, yesId, noId) before opening a batch for a
+///   NegRisk (Polymarket multi-outcome) market. When set, the vault uses the CLOB
+///   token IDs directly — bypassing CTF.splitPosition/mergePositions — so users
+///   receive tradeable NegRisk YES/NO tokens rather than locked standard CTF positions.
 ///
 /// Net result: relayer never uses its own USDC capital.
 ///
@@ -181,6 +187,13 @@ contract BatchVault {
     mapping(address => uint256)  public nonces;
     mapping(bytes32 => bool)     public usedNullifiers;
 
+    // v10: NegRisk token ID overrides — set by relayer before opening batches for
+    // NegRisk (Polymarket multi-outcome) markets.  When non-zero, the vault uses
+    // these token IDs instead of computing from CTF.getPositionId, and skips
+    // CTF.splitPosition / mergePositions (gap fills handled via CLOB by relayer).
+    mapping(bytes32 marketId => uint256) public yesTokenIds;
+    mapping(bytes32 marketId => uint256) public noTokenIds;
+
     // ═══════════════════════════════════════════════════════════════════════
     // Events
     // ═══════════════════════════════════════════════════════════════════════
@@ -211,6 +224,7 @@ contract BatchVault {
     event PositionClaimed(uint256 indexed batchId, address indexed claimer, uint256 yesShares, uint256 noShares, uint256 usdcPayout, uint256 refund);
     event VerifierUpdated(address newVerifier);
     event ClaimVerifierUpdated(address newClaimVerifier);
+    event MarketTokenIdsSet(bytes32 indexed marketId, uint256 yesTokenId, uint256 noTokenId);
 
     // ═══════════════════════════════════════════════════════════════════════
     // Errors
@@ -499,33 +513,46 @@ contract BatchVault {
         uint256 directYesMatch = yesBuyersNeed < filledYesSellQty ? yesBuyersNeed : filledYesSellQty;
         uint256 directNoMatch  = noBuyersNeed  < filledNoSellQty  ? noBuyersNeed  : filledNoSellQty;
 
-        // 5. Cross-match via CTF split (remaining YES + NO demand → vault's USDC)
+        // 5. Cross-match via CTF split (remaining YES + NO demand → vault's USDC).
+        //    Skipped for NegRisk markets: split/merge would create standard CTF tokens
+        //    (non-tradeable on Polymarket CLOB).  All unmet demand becomes yesGap/noGap
+        //    and is filled by the relayer via the CLOB using vault-provided USDC.
         uint256 remainingYesDemand = yesBuyersNeed - directYesMatch;
         uint256 remainingNoDemand  = noBuyersNeed  - directNoMatch;
-        uint256 splitQty = remainingYesDemand < remainingNoDemand
-            ? remainingYesDemand : remainingNoDemand;
 
-        if (splitQty > 0) {
-            uint256[] memory partition = new uint256[](2);
-            partition[0] = 1; // YES = indexSet 1
-            partition[1] = 2; // NO  = indexSet 2
-            IConditionalTokens(ctf).splitPosition(
-                usdc, bytes32(0), batch.marketId, partition, splitQty
-            );
+        bool negRisk = yesTokenIds[batch.marketId] != 0;
+
+        uint256 splitQty = 0;
+        if (!negRisk) {
+            splitQty = remainingYesDemand < remainingNoDemand
+                ? remainingYesDemand : remainingNoDemand;
+            if (splitQty > 0) {
+                uint256[] memory partition = new uint256[](2);
+                partition[0] = 1; // YES = indexSet 1
+                partition[1] = 2; // NO  = indexSet 2
+                IConditionalTokens(ctf).splitPosition(
+                    usdc, bytes32(0), batch.marketId, partition, splitQty
+                );
+            }
         }
 
-        // 6. Cross-match excess sellers via CTF merge (excess YES + NO → USDC returned to vault)
+        // 6. Cross-match excess sellers via CTF merge (excess YES + NO → USDC returned to vault).
+        //    Also skipped for NegRisk markets: excess NegRisk tokens are sent to the relayer
+        //    (finalExcessYes / finalExcessNo) who sells them on the CLOB and returns USDC.
         uint256 excessYes = filledYesSellQty - directYesMatch;
         uint256 excessNo  = filledNoSellQty  - directNoMatch;
-        uint256 mergeQty  = excessYes < excessNo ? excessYes : excessNo;
 
-        if (mergeQty > 0) {
-            uint256[] memory partition = new uint256[](2);
-            partition[0] = 1;
-            partition[1] = 2;
-            IConditionalTokens(ctf).mergePositions(
-                usdc, bytes32(0), batch.marketId, partition, mergeQty
-            );
+        uint256 mergeQty = 0;
+        if (!negRisk) {
+            mergeQty = excessYes < excessNo ? excessYes : excessNo;
+            if (mergeQty > 0) {
+                uint256[] memory partition = new uint256[](2);
+                partition[0] = 1;
+                partition[1] = 2;
+                IConditionalTokens(ctf).mergePositions(
+                    usdc, bytes32(0), batch.marketId, partition, mergeQty
+                );
+            }
         }
 
         // 7. Compute gap and final excess
@@ -1001,6 +1028,8 @@ contract BatchVault {
     // ═══════════════════════════════════════════════════════════════════════
 
     function _getYesTokenId(bytes32 conditionId) internal view returns (uint256) {
+        // v10: return NegRisk CLOB token ID if registered by relayer
+        if (yesTokenIds[conditionId] != 0) return yesTokenIds[conditionId];
         bytes32 collectionId = IConditionalTokens(ctf).getCollectionId(
             bytes32(0), conditionId, 1  // YES = indexSet 1
         );
@@ -1008,6 +1037,8 @@ contract BatchVault {
     }
 
     function _getNoTokenId(bytes32 conditionId) internal view returns (uint256) {
+        // v10: return NegRisk CLOB token ID if registered by relayer
+        if (noTokenIds[conditionId] != 0) return noTokenIds[conditionId];
         bytes32 collectionId = IConditionalTokens(ctf).getCollectionId(
             bytes32(0), conditionId, 2  // NO = indexSet 2
         );
@@ -1047,6 +1078,23 @@ contract BatchVault {
         if (msg.sender != relayer) revert OnlyRelayer();
         claimVerifier = IBatchVerifier(newClaimVerifier);
         emit ClaimVerifierUpdated(newClaimVerifier);
+    }
+
+    /// @notice Register NegRisk (Polymarket CLOB) token IDs for a market.
+    ///
+    /// Must be called once per NegRisk market before the first batch for that market.
+    /// Once set, the vault will:
+    ///   - Use these token IDs for all ERC-1155 transfers (buyers receive NegRisk
+    ///     tokens; sellers must deposit NegRisk tokens).
+    ///   - Skip CTF.splitPosition and CTF.mergePositions — all unmet demand and
+    ///     excess supply route through the CLOB (via the relayer gap-fill mechanism).
+    ///
+    /// To reset to standard CTF mode, pass yesTokenId = 0 and noTokenId = 0.
+    function setMarketTokenIds(bytes32 marketId, uint256 yesTokenId, uint256 noTokenId) external {
+        if (msg.sender != relayer) revert OnlyRelayer();
+        yesTokenIds[marketId] = yesTokenId;
+        noTokenIds[marketId]  = noTokenId;
+        emit MarketTokenIdsSet(marketId, yesTokenId, noTokenId);
     }
 
     // ═══════════════════════════════════════════════════════════════════════

@@ -129,6 +129,12 @@ async function ensureMarket(marketId: `0x${string}`): Promise<MarketState> {
     state.openingBatch = true;
     activeMarkets.set(key, state);
     console.log(`[Relayer] New market ${marketId} — opening on-demand batch`);
+    // v10: register NegRisk token IDs so vault distributes tradeable tokens
+    try {
+      await state.processor.ensureMarketTokenIds(marketId);
+    } catch (err: any) {
+      console.warn(`[Relayer] ensureMarketTokenIds for ${marketId} failed (non-fatal):`, err.message);
+    }
     try {
       state.currentBatchId = await state.processor.openBatch(marketId);
       batchToMarket.set(state.currentBatchId.toString(), key);
@@ -1452,7 +1458,7 @@ async function recoverOpenBatches() {
   // Load permanently-failed batch IDs from Redis BEFORE scanning for SETTLING batches
   await initFailedBatchesStore();
 
-  // v7.3: ensure CTF setApprovalForAll(vault, true) + USDC approve(vault, max) are set once.
+  // v7.3+: ensure CTF setApprovalForAll(vault, true) + USDC approve(vault, max) are set once.
   // Required for relayer-intermediary settlement (pre-buy YES, provide USDC for net-sell).
   if (missingVars.length === 0 && baseConfig.chainId === polygon.id) {
     const tempProcessor = new BatchProcessor({ ...baseConfig, marketId: "0x0000000000000000000000000000000000000000000000000000000000000000" as `0x${string}` });
@@ -1460,6 +1466,17 @@ async function recoverOpenBatches() {
       await tempProcessor.ensureApprovals();
     } catch (err: any) {
       console.warn(`[Relayer] ensureApprovals failed (non-fatal — check CTF/USDC approval manually):`, err.message);
+    }
+
+    // v10: register NegRisk token IDs for each pre-configured market.
+    // Ensures the vault distributes tradeable NegRisk tokens (not locked standard CTF tokens).
+    if (PRE_WARM_MARKET_ID) {
+      const mktProcessor = new BatchProcessor({ ...baseConfig, marketId: PRE_WARM_MARKET_ID });
+      try {
+        await mktProcessor.ensureMarketTokenIds(PRE_WARM_MARKET_ID);
+      } catch (err: any) {
+        console.warn(`[Relayer] ensureMarketTokenIds failed for ${PRE_WARM_MARKET_ID} (non-fatal):`, err.message);
+      }
     }
   }
 

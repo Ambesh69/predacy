@@ -5,7 +5,7 @@ import { polygon, polygonAmoy } from "viem/chains";
 export const CONTRACTS = {
   // Polygon mainnet (live Polymarket)
   [polygon.id]: {
-    batchVault: "0xAC019a03130BA4c44B9652C91ba5fDDa8f30ee94" as `0x${string}`, // v9: two-phase zero-capital settlement (lockFunds + settleBatch)
+    batchVault: "0x8fD2B227E98F401F55B4252d34905C96eEEAEA1a" as `0x${string}`, // v10: NegRisk token IDs (yesTokenIds/noTokenIds) + skip splitPosition for NegRisk markets
     usdc: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174" as `0x${string}`,
     ctf:  "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045" as `0x${string}`,
   },
@@ -207,6 +207,21 @@ export const BATCH_VAULT_ABI = [
     stateMutability: "nonpayable",
   },
   // ── Read functions ────────────────────────────────────────────────────────
+  // v10: NegRisk token ID overrides (set by relayer via setMarketTokenIds)
+  {
+    name: "yesTokenIds",
+    type: "function",
+    inputs: [{ name: "marketId", type: "bytes32" }],
+    outputs: [{ name: "", type: "uint256" }],
+    stateMutability: "view",
+  },
+  {
+    name: "noTokenIds",
+    type: "function",
+    inputs: [{ name: "marketId", type: "bytes32" }],
+    outputs: [{ name: "", type: "uint256" }],
+    stateMutability: "view",
+  },
   {
     name: "getBatch",
     type: "function",
