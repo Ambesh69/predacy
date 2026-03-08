@@ -293,7 +293,7 @@ const ADAPTER_ABI = [
   },
 ] as const;
 
-// ConditionalTokens ERC-1155 ABI — minimal subset for relayer approval setup
+// ConditionalTokens ERC-1155 ABI — minimal subset for relayer approval setup + NegRisk split
 const CTF_ABI = [
   {
     name: "setApprovalForAll",
@@ -308,6 +308,54 @@ const CTF_ABI = [
     inputs:  [{ name: "account", type: "address" }, { name: "operator", type: "address" }],
     outputs: [{ name: "", type: "bool" }],
     stateMutability: "view",
+  },
+  // Read helpers — used to detect NegRisk token ID mismatch
+  {
+    name: "getCollectionId",
+    type: "function",
+    inputs: [
+      { name: "parentCollectionId", type: "bytes32" },
+      { name: "conditionId",        type: "bytes32"  },
+      { name: "indexSet",           type: "uint256"  },
+    ],
+    outputs: [{ name: "", type: "bytes32" }],
+    stateMutability: "view",
+  },
+  {
+    name: "getPositionId",
+    type: "function",
+    inputs: [
+      { name: "collateralToken", type: "address" },
+      { name: "collectionId",    type: "bytes32" },
+    ],
+    outputs: [{ name: "", type: "uint256" }],
+    stateMutability: "view",
+  },
+  // balanceOf — check relayer's token balance (both CLOB and vault token IDs)
+  {
+    name: "balanceOf",
+    type: "function",
+    inputs: [
+      { name: "account", type: "address" },
+      { name: "id",      type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "uint256" }],
+    stateMutability: "view",
+  },
+  // splitPosition — converts USDC collateral into YES + NO position tokens
+  // Used when vault token ID ≠ CLOB token ID (NegRisk markets)
+  {
+    name: "splitPosition",
+    type: "function",
+    inputs: [
+      { name: "collateralToken",     type: "address"   },
+      { name: "parentCollectionId",  type: "bytes32"   },
+      { name: "conditionId",         type: "bytes32"   },
+      { name: "partition",           type: "uint256[]" },
+      { name: "amount",              type: "uint256"   },
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
   },
 ] as const;
 
@@ -496,6 +544,8 @@ export class BatchProcessor {
       ["0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E", "CTFExchange"     ],
       ["0xC5d563A36AE78145C45a50134d48A1215220f80a", "NegRiskExchange"  ],
       ["0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296", "NegRiskAdapter"   ],
+      // CTF itself needs USDC approval so splitPosition can pull collateral from relayer
+      ["0x4D97DCd97eC945f40cF65F87097ACe5EA0476045", "CTF (splitPos)"   ],
     ] as const satisfies readonly (readonly [`0x${string}`, string])[];
 
     for (const [exchange, label] of EXCHANGE_APPROVALS) {
@@ -1059,15 +1109,36 @@ export class BatchProcessor {
     }
 
     // Buy gap YES tokens from CLOB using vault-provided USDC (blocking FOK)
+    // For NegRisk markets (where CLOB token ID ≠ vault token ID), use CTF.splitPosition instead.
     if (yesGap > 0n && cachedYesToken && this.config.chainId === 137) {
       const usdcForGap = (yesGap * effectiveClearingPrice) / PRICE_DEC;
-      console.log(`[BatchProcessor] YES gap: buying ${yesGap} YES tokens via CLOB (${usdcForGap} vault-provided USDC)`);
-      try {
-        await this.polymarket.buyYesForSettlement(cachedYesToken, yesGap, usdcForGap, this.config.ctfAddress!);
-        console.log(`[BatchProcessor] YES gap acquired ✓`);
-      } catch (err) {
-        console.error(`[BatchProcessor] CLOB YES gap buy failed — settleBatch will revert:`, err);
-        throw err;
+
+      // Detect NegRisk token ID mismatch: vault uses USDC-collateralized positions,
+      // but NegRisk CLOB tokens have a different derivation (different parent collection).
+      const vaultYesTokenId = await this._computeVaultYesTokenId(batchInfo.marketId);
+      const isNegRisk = vaultYesTokenId !== BigInt(cachedYesToken);
+
+      if (isNegRisk) {
+        console.log(
+          `[BatchProcessor] NegRisk market: CLOB tokenId=${cachedYesToken.slice(0, 10)}… ≠ ` +
+          `vault tokenId=${vaultYesTokenId.toString().slice(0, 10)}… → using CTF.splitPosition path`,
+        );
+        try {
+          await this._acquireVaultYesViaSplit(batchInfo.marketId, yesGap, cachedYesToken);
+          console.log(`[BatchProcessor] YES gap acquired via CTF.splitPosition ✓`);
+        } catch (err) {
+          console.error(`[BatchProcessor] splitPosition path failed — settleBatch will revert:`, err);
+          throw err;
+        }
+      } else {
+        console.log(`[BatchProcessor] YES gap: buying ${yesGap} YES tokens via CLOB (${usdcForGap} vault-provided USDC)`);
+        try {
+          await this.polymarket.buyYesForSettlement(cachedYesToken, yesGap, usdcForGap, this.config.ctfAddress!);
+          console.log(`[BatchProcessor] YES gap acquired ✓`);
+        } catch (err) {
+          console.error(`[BatchProcessor] CLOB YES gap buy failed — settleBatch will revert:`, err);
+          throw err;
+        }
       }
     } else if (yesGap > 0n && this.config.chainId !== 137) {
       console.log(`[BatchProcessor] Testnet: skipping CLOB YES gap buy (${yesGap} tokens) — mock CTF`);
@@ -1113,6 +1184,112 @@ export class BatchProcessor {
     }
 
     return { excludedOrders };
+  }
+
+  // ─── NegRisk helper methods ───────────────────────────────────────────────
+
+  /**
+   * Compute the vault's YES token ID for a given Polymarket conditionId.
+   *
+   * The vault uses USDC-collateralized CTF positions:
+   *   collectionId = CTF.getCollectionId(0x0, conditionId, 1)  // 1 = YES indexSet
+   *   positionId   = CTF.getPositionId(USDC, collectionId)
+   *
+   * This differs from NegRisk CLOB token IDs, which are derived from the
+   * NegRiskAdapter as parent collection (different derivation path).
+   */
+  private async _computeVaultYesTokenId(conditionId: `0x${string}`): Promise<bigint> {
+    const ctfAddr  = this.config.ctfAddress  as `0x${string}`;
+    const usdcAddr = this.config.usdcAddress as `0x${string}`;
+    const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000" as `0x${string}`;
+
+    const collectionId = await this.publicClient.readContract({
+      address:      ctfAddr,
+      abi:          CTF_ABI,
+      functionName: "getCollectionId",
+      args:         [ZERO_BYTES32, conditionId, 1n], // 1 = YES
+    }) as `0x${string}`;
+
+    return await this.publicClient.readContract({
+      address:      ctfAddr,
+      abi:          CTF_ABI,
+      functionName: "getPositionId",
+      args:         [usdcAddr, collectionId],
+    }) as bigint;
+  }
+
+  /**
+   * NegRisk YES gap acquisition path.
+   *
+   * Called when the CLOB YES token ID ≠ vault YES token ID (NegRisk market).
+   * The relayer already received `usdcForGap` USDC from the vault in lockFunds,
+   * which was used to buy CLOB NegRisk YES tokens in a previous step.
+   *
+   * Strategy:
+   *   1. Sell any held CLOB NegRisk YES tokens → recover USDC
+   *   2. CTF.splitPosition(USDC, 0x0, conditionId, [1,2], yesGap)
+   *      → pays `yesGap` USDC → creates `yesGap` vault YES + `yesGap` vault NO tokens
+   *   3. Relayer holds vault YES tokens (pulled by settleBatch) + vault NO tokens (kept)
+   *
+   * Economics: relayer may need to advance (yesGap × noPrice) USDC beyond vault-provided
+   * funds, but receives NO tokens of equivalent market value in return.
+   */
+  private async _acquireVaultYesViaSplit(
+    conditionId:  `0x${string}`,
+    yesGap:       bigint,
+    clobYesToken: string,
+  ): Promise<void> {
+    const ctfAddr      = this.config.ctfAddress  as `0x${string}`;
+    const usdcAddr     = this.config.usdcAddress as `0x${string}`;
+    const relayerAddr  = this.walletClient.account!.address;
+    const ZERO_BYTES32 = "0x0000000000000000000000000000000000000000000000000000000000000000" as `0x${string}`;
+
+    // Step 1: Sell any existing CLOB NegRisk YES tokens to recoup USDC for the split
+    const clobBalance = await this.publicClient.readContract({
+      address:      ctfAddr,
+      abi:          CTF_ABI,
+      functionName: "balanceOf",
+      args:         [relayerAddr, BigInt(clobYesToken)],
+    }) as bigint;
+
+    if (clobBalance > 0n) {
+      console.log(`[BatchProcessor] Selling ${clobBalance} NegRisk CLOB YES tokens to fund CTF split`);
+      try {
+        const { orderId } = await this.polymarket.placeMarketSell(clobYesToken, clobBalance);
+        console.log(`[BatchProcessor] NegRisk YES sell placed: orderId=${orderId} — waiting 5s for fill`);
+        // Give the CLOB order a few seconds to fill before proceeding to split
+        await new Promise((r) => setTimeout(r, 5000));
+      } catch (sellErr) {
+        console.warn(`[BatchProcessor] NegRisk YES sell failed (will use own USDC for split):`, sellErr);
+      }
+    } else {
+      console.log(`[BatchProcessor] No CLOB NegRisk YES tokens to sell (balance=0)`);
+    }
+
+    // Step 2: CTF.splitPosition(USDC, 0x0, conditionId, [YES=1, NO=2], yesGap)
+    // Costs `yesGap` USDC → mints `yesGap` vault YES tokens + `yesGap` vault NO tokens
+    console.log(
+      `[BatchProcessor] CTF.splitPosition: spending ${yesGap} USDC → ` +
+      `${yesGap} vault YES + ${yesGap} vault NO tokens`,
+    );
+    const splitHash = await this._write({
+      address:      ctfAddr,
+      abi:          CTF_ABI,
+      functionName: "splitPosition",
+      args: [
+        usdcAddr,
+        ZERO_BYTES32,
+        conditionId,
+        [1n, 2n],  // partition: YES=1, NO=2
+        yesGap,
+      ],
+      ...chainGas(this.config.chainId),
+    });
+    await this.publicClient.waitForTransactionReceipt({ hash: splitHash });
+    console.log(
+      `[BatchProcessor] splitPosition done (tx: ${splitHash}) — ` +
+      `relayer has ${yesGap} vault YES tokens (for settleBatch) + ${yesGap} vault NO tokens (kept)`,
+    );
   }
 
   /**
