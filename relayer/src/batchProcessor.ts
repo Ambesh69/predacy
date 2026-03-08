@@ -359,7 +359,7 @@ const CTF_ABI = [
   },
 ] as const;
 
-// ERC-20 ABI — minimal subset for USDC approval + allowance check
+// ERC-20 ABI — minimal subset for USDC approval + allowance + balance check
 const ERC20_ABI = [
   {
     name: "approve",
@@ -372,6 +372,13 @@ const ERC20_ABI = [
     name: "allowance",
     type: "function",
     inputs:  [{ name: "owner", type: "address" }, { name: "spender", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+    stateMutability: "view",
+  },
+  {
+    name: "balanceOf",
+    type: "function",
+    inputs:  [{ name: "account", type: "address" }],
     outputs: [{ name: "", type: "uint256" }],
     stateMutability: "view",
   },
@@ -1254,22 +1261,53 @@ export class BatchProcessor {
 
     if (clobBalance > 0n) {
       console.log(`[BatchProcessor] Selling ${clobBalance} NegRisk CLOB YES tokens to fund CTF split`);
-      try {
-        const { orderId } = await this.polymarket.placeMarketSell(clobYesToken, clobBalance);
-        console.log(`[BatchProcessor] NegRisk YES sell placed: orderId=${orderId} — waiting 5s for fill`);
-        // Give the CLOB order a few seconds to fill before proceeding to split
-        await new Promise((r) => setTimeout(r, 5000));
-      } catch (sellErr) {
-        console.warn(`[BatchProcessor] NegRisk YES sell failed (will use own USDC for split):`, sellErr);
+      const { orderId } = await this.polymarket.placeMarketSell(clobYesToken, clobBalance);
+      console.log(`[BatchProcessor] NegRisk YES sell placed: orderId=${orderId} — polling for fill (up to 30s)`);
+
+      // Poll until the CLOB YES token balance drops to 0 (FOK should fill instantly or not at all)
+      const deadline = Date.now() + 30_000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2000));
+        const remaining = await this.publicClient.readContract({
+          address: ctfAddr, abi: CTF_ABI, functionName: "balanceOf",
+          args: [relayerAddr, BigInt(clobYesToken)],
+        }) as bigint;
+        if (remaining === 0n) {
+          console.log(`[BatchProcessor] NegRisk YES sell filled ✓ (balance now 0)`);
+          break;
+        }
+        console.log(`[BatchProcessor] Waiting for CLOB fill… remaining=${remaining}`);
       }
     } else {
       console.log(`[BatchProcessor] No CLOB NegRisk YES tokens to sell (balance=0)`);
     }
 
-    // Step 2: CTF.splitPosition(USDC, 0x0, conditionId, [YES=1, NO=2], yesGap)
+    // Step 2: Verify the relayer has enough USDC for the full splitPosition cost
+    // splitPosition(USDC, 0x0, conditionId, [1,2], yesGap) costs exactly `yesGap` USDC (raw).
+    // The shortfall (if any) equals yesGap × noPrice, which the relayer recovers as NO tokens.
+    const usdcBalance = await this.publicClient.readContract({
+      address:      this.config.usdcAddress as `0x${string}`,
+      abi:          ERC20_ABI,
+      functionName: "balanceOf",
+      args:         [relayerAddr],
+    }) as bigint;
+
+    if (usdcBalance < yesGap) {
+      const shortfall = yesGap - usdcBalance;
+      throw new Error(
+        `[BatchProcessor] Relayer USDC insufficient for CTF.splitPosition: ` +
+        `have ${usdcBalance} ($${(Number(usdcBalance) / 1e6).toFixed(2)}), ` +
+        `need ${yesGap} ($${(Number(yesGap) / 1e6).toFixed(2)}), ` +
+        `shortfall ${shortfall} ($${(Number(shortfall) / 1e6).toFixed(2)}). ` +
+        `Send at least $${(Number(shortfall) / 1e6 + 0.5).toFixed(2)} USDC to relayer ` +
+        `wallet ${relayerAddr} then retry.`,
+      );
+    }
+
+    // Step 3: CTF.splitPosition(USDC, 0x0, conditionId, [YES=1, NO=2], yesGap)
     // Costs `yesGap` USDC → mints `yesGap` vault YES tokens + `yesGap` vault NO tokens
     console.log(
-      `[BatchProcessor] CTF.splitPosition: spending ${yesGap} USDC → ` +
+      `[BatchProcessor] CTF.splitPosition: spending ${yesGap} USDC ($${(Number(yesGap)/1e6).toFixed(4)}) → ` +
       `${yesGap} vault YES + ${yesGap} vault NO tokens`,
     );
     const splitHash = await this._write({

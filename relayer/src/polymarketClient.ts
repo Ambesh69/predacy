@@ -434,11 +434,16 @@ export class PolymarketClient {
     // Accept up to 1% below mid — ensures fill without excess slippage
     const limitPrice = parseFloat(Math.max(0.001, mid * 0.99).toFixed(4));
 
-    // For SELL: makerAmount = tokens to sell (must be multiple of 10 — 0.00001 token precision)
-    //           takerAmount = USDC to receive (must be multiple of 10000 — 0.01 USDC precision)
-    const makerAmount = (yesAmount / 10n) * 10n;
+    // For SELL orders: precision requirements are the REVERSE of BUY orders.
+    //   makerAmount = tokens to sell → max 2 decimal accuracy = multiple of 10000 (0.01 token)
+    //   takerAmount = USDC to receive → max 5 decimal accuracy = multiple of 10   (0.00001 USDC)
+    // Source: Polymarket API 400: "sell orders maker amount supports a max accuracy of 2 decimals,
+    //                              taker amount a max of 5 decimals"
+    const TOKEN_SELL_PREC = 10000n; // Round DOWN tokens (sell less rather than more than available)
+    const USDC_SELL_PREC  = 10n;
+    const makerAmount = (yesAmount / TOKEN_SELL_PREC) * TOKEN_SELL_PREC;
     const takerAmountRaw = BigInt(Math.round(Number(makerAmount) * limitPrice));
-    const takerAmount   = (takerAmountRaw / 10000n) * 10000n;
+    const takerAmount   = (takerAmountRaw / USDC_SELL_PREC) * USDC_SELL_PREC;
 
     const { body, orderId } = await this._buildSignedOrder(
       tokenId, makerAmount, takerAmount, SIDE_SELL, limitPrice, "FOK",
