@@ -184,6 +184,33 @@ async function ensureMarket(marketId: `0x${string}`): Promise<MarketState> {
   return state;
 }
 
+// ── Async claim job store ─────────────────────────────────────────────────────
+// POST /claim-proof returns a jobId immediately (ZK proof takes 60-90s on Railway).
+// The actual proof + on-chain submission run in the background.
+// Frontend polls GET /claim-proof/status?jobId=... until status is "done" or "error".
+interface ClaimJobResult {
+  txHash:        string;
+  wrapDigest?:   string;
+  wrappedToken?: string;
+  ctfAddress?:   string;
+  tokenAmount?:  string;
+  wrapError?:    string;
+}
+interface ClaimJob {
+  status:    "pending" | "done" | "error";
+  result?:   ClaimJobResult;
+  error?:    string;
+  createdAt: number;
+}
+const claimJobs = new Map<string, ClaimJob>();
+// Evict jobs older than 30 min to prevent unbounded memory growth
+setInterval(() => {
+  const cutoff = Date.now() - 30 * 60 * 1000;
+  for (const [id, job] of claimJobs) {
+    if (job.createdAt < cutoff) claimJobs.delete(id);
+  }
+}, 15 * 60 * 1000).unref();
+
 // ── HTTP server ────────────────────────────────────────────────────────────────
 
 const CORS_HEADERS = {
@@ -403,24 +430,40 @@ const server = createServer((req, res) => {
     return;
   }
 
+  // GET /claim-proof/status?jobId=...
+  //
+  // Poll the status of an async /claim-proof job.
+  // Returns: { status: "pending"|"done"|"error", txHash?, wrapDigest?, wrappedToken?,
+  //            ctfAddress?, tokenAmount?, wrapError?, error? }
+  if (req.method === "GET" && req.url?.startsWith("/claim-proof/status")) {
+    const jobId = new URL(req.url, "http://localhost").searchParams.get("jobId") ?? "";
+    const job = claimJobs.get(jobId);
+    if (!job) {
+      send(404, { error: "Job not found — may have expired (30 min TTL) or job ID is invalid" });
+      return;
+    }
+    send(200, {
+      status: job.status,
+      ...(job.result ?? {}),
+      ...(job.error ? { error: job.error } : {}),
+    });
+    return;
+  }
+
   // POST /claim-proof
   //
   // ZK claim: user sends their order preimage; relayer builds Merkle path,
-  // generates ZK proof, calls claimWithProof() on-chain, and returns txHash.
+  // generates ZK proof, calls claimWithProof() on-chain.
   //
   // Body: { batchId, marketId, side, amount, limitPrice, salt, recipient,
   //         proxyWallet?, ctfTokenId? }
   //   side: 0=YES_BUY, 1=YES_SELL, 2=NO_BUY, 3=NO_SELL (v8)
   //   proxyWallet: if set, tokens go to this ProxyWallet address
   //   ctfTokenId:  CTF ERC-1155 tokenId for the YES or NO outcome (decimal string)
-  //                Required when proxyWallet is set; used to deploy wrapper + build wrap digest.
   //
-  // Response: { ok: true, txHash, wrapDigest?, wrappedToken?, ctfAddress?, tokenAmount? }
-  //   When proxyWallet + ctfTokenId are provided, the response also includes:
-  //     wrapDigest:  inner digest for the 2-call wrap batch (sign with signMessage({ raw: ... }))
-  //     wrappedToken: WrappedCTFToken ERC-20 address
-  //     ctfAddress:  CTF ERC-1155 address
-  //     tokenAmount: token balance of ProxyWallet after claim (string, bigint-safe)
+  // Response: { ok: true, jobId }   ← returns IMMEDIATELY (ZK proof is async)
+  //   Poll GET /claim-proof/status?jobId=... until status is "done" or "error".
+  //   On "done": { status, txHash, wrapDigest?, wrappedToken?, ctfAddress?, tokenAmount? }
   //
   // Privacy: the relayer submits claimWithProof() as msg.sender — neither the
   // user's address nor which specific order is being claimed appears on-chain.
@@ -443,132 +486,162 @@ const server = createServer((req, res) => {
           return;
         }
 
-        const batchIdBig    = BigInt(batchId);
-        const amountBig     = BigInt(amount);
-        const limitPriceBig = BigInt(limitPrice);
+        // Create async job — respond immediately to avoid Railway HTTP proxy timeout.
+        // (ZK proof generation takes 60-90 seconds; Railway drops idle connections at ~60s)
+        const jobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
+        claimJobs.set(jobId, { status: "pending", createdAt: Date.now() });
+        send(202, { ok: true, jobId });
 
-        // 1. Fetch settled batch info from chain
-        const batchRaw = await publicClient.readContract({
-          address:      baseConfig.vaultAddress,
-          abi:          BATCH_VAULT_ABI,
-          functionName: "getBatch",
-          args:         [batchIdBig],
-        }) as {
-          status: number;
-          clearingPrice: bigint;
-          claimMerkleRoot: `0x${string}`;
-          commitmentCount: bigint;
-        };
-
-        // v9 BatchStatus: OPEN=0, SETTLING=1, LOCKED=2, SETTLED=3
-        if (batchRaw.status !== 3 /* SETTLED */) {
-          send(400, { error: `Batch ${batchId} is not yet settled (status=${batchRaw.status})` });
-          return;
-        }
-
-        // 2. Fetch all commitment hashes from chain
-        const commitmentCount = Number(batchRaw.commitmentCount);
-        const allCommitments: `0x${string}`[] = [];
-        for (let i = 0; i < commitmentCount; i++) {
-          const c = await publicClient.readContract({
-            address:      baseConfig.vaultAddress,
-            abi:          BATCH_VAULT_ABI,
-            functionName: "getCommitment",
-            args:         [batchIdBig, BigInt(i)],
-          }) as { hash: `0x${string}`; amount: bigint; claimed: boolean };
-          allCommitments.push(c.hash);
-        }
-
-        // 3. Generate ZK claim proof
-        const { OrderSide } = await import("./types.js");
-        const prover = new ZKClaimProver(baseConfig.useRealZk ?? false);
-        const { proof, publicInputs } = await prover.generateProof({
-          batchId:         batchIdBig,
-          claimMerkleRoot: batchRaw.claimMerkleRoot,
-          clearingPrice:   batchRaw.clearingPrice,
-          marketId:        marketId  as `0x${string}`,
-          side:            Number(side) as typeof OrderSide[keyof typeof OrderSide], // 0-3
-          amount:          amountBig,
-          limitPrice:      limitPriceBig,
-          salt:            salt      as `0x${string}`,
-          allCommitments,
-          recipient:       recipient as `0x${string}`,
-        });
-
-        // 4. Submit claimWithProof() on-chain (relayer is msg.sender — no trader address leaked)
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const txHash = await (walletClientGlobal.writeContract as (p: any) => Promise<`0x${string}`>)({
-          address:      baseConfig.vaultAddress,
-          abi:          BATCH_VAULT_ABI,
-          functionName: "claimWithProof",
-          args:         [batchIdBig, proof, publicInputs],
-          maxPriorityFeePerGas: 100_000_000_000n,  // 100 gwei
-          maxFeePerGas:         2_000_000_000_000n, // 2000 gwei — handles mainnet spikes
-        });
-
-        await publicClient.waitForTransactionReceipt({ hash: txHash });
-        console.log(`[Relayer] claimWithProof tx: ${txHash} (batch ${batchId}, recipient ${recipient})`);
-
-        // 5. If ProxyWallet + CTF token ID provided, build wrap digest for the frontend to sign.
-        //    Relayer deploys WrappedCTFToken if not already deployed (relayer pays gas).
-        //    The actual wrap is executed via POST /wrap-execute after the frontend signs.
-        const pwm = getProxyWalletManager();
-        if (proxyWallet && ctfTokenId && pwm && baseConfig.ctfAddress) {
+        // Process proof in background — res is already closed, result stored in claimJobs
+        (async () => {
           try {
-            const ctfTokenIdBig = BigInt(ctfTokenId);
-            const sideNum = Number(side);
+            const batchIdBig    = BigInt(batchId);
+            const amountBig     = BigInt(amount);
+            const limitPriceBig = BigInt(limitPrice);
 
-            // Ensure ProxyWallet is deployed (deploying it here is fine since tokens
-            // were sent to it by claimWithProof — they'd be stuck if wallet not deployed).
-            await pwm.ensureDeployed(proxyWallet as `0x${string}`);
+            // 1. Fetch settled batch info from chain
+            const batchRaw = await publicClient.readContract({
+              address:      baseConfig.vaultAddress,
+              abi:          BATCH_VAULT_ABI,
+              functionName: "getBatch",
+              args:         [batchIdBig],
+            }) as {
+              status: number;
+              clearingPrice: bigint;
+              claimMerkleRoot: `0x${string}`;
+              commitmentCount: bigint;
+            };
 
-            // Deploy WrappedCTFToken wrapper for this positionId if needed.
-            const tokenName   = (sideNum === 0) ? "wYES" : "wNO";
-            const tokenSymbol = tokenName;
-            const wrappedToken = await pwm.ensureWrapper(ctfTokenIdBig, tokenName, tokenSymbol);
-
-            // Read ProxyWallet's actual token balance (exact amount received from claim).
-            const tokenBalance = await publicClient.readContract({
-              address:      baseConfig.ctfAddress,
-              abi:          CTF_BALANCE_ABI,
-              functionName: "balanceOf",
-              args:         [proxyWallet as `0x${string}`, ctfTokenIdBig],
-            }) as bigint;
-
-            if (tokenBalance === 0n) {
-              // Order wasn't filled (limit below clearing price) — no tokens to wrap.
-              console.log(`[Relayer] ProxyWallet ${proxyWallet} has 0 tokens — skip wrap digest`);
-              send(200, { ok: true, txHash });
+            // v9 BatchStatus: OPEN=0, SETTLING=1, LOCKED=2, SETTLED=3
+            if (batchRaw.status !== 3 /* SETTLED */) {
+              claimJobs.set(jobId, {
+                status: "error",
+                error:  `Batch ${batchId} is not yet settled (status=${batchRaw.status})`,
+                createdAt: Date.now(),
+              });
               return;
             }
 
-            // Build the 2-call wrap batch digest for the frontend to sign.
-            const wrapDigest = await pwm.buildWrapDigest(
-              proxyWallet  as `0x${string}`,
-              baseConfig.ctfAddress,
-              wrappedToken,
-              tokenBalance,
-            );
+            // 2. Fetch all commitment hashes from chain
+            const commitmentCount = Number(batchRaw.commitmentCount);
+            const allCommitments: `0x${string}`[] = [];
+            for (let i = 0; i < commitmentCount; i++) {
+              const c = await publicClient.readContract({
+                address:      baseConfig.vaultAddress,
+                abi:          BATCH_VAULT_ABI,
+                functionName: "getCommitment",
+                args:         [batchIdBig, BigInt(i)],
+              }) as { hash: `0x${string}`; amount: bigint; claimed: boolean };
+              allCommitments.push(c.hash);
+            }
 
-            console.log(`[Relayer] wrap digest ready for proxy ${proxyWallet}: ${tokenBalance} tokens`);
-            send(200, {
-              ok:           true,
-              txHash,
-              wrapDigest,
-              wrappedToken,
-              ctfAddress:   baseConfig.ctfAddress,
-              tokenAmount:  tokenBalance.toString(),
+            // 3. Generate ZK claim proof
+            const { OrderSide } = await import("./types.js");
+            const prover = new ZKClaimProver(baseConfig.useRealZk ?? false);
+            const { proof, publicInputs } = await prover.generateProof({
+              batchId:         batchIdBig,
+              claimMerkleRoot: batchRaw.claimMerkleRoot,
+              clearingPrice:   batchRaw.clearingPrice,
+              marketId:        marketId  as `0x${string}`,
+              side:            Number(side) as typeof OrderSide[keyof typeof OrderSide], // 0-3
+              amount:          amountBig,
+              limitPrice:      limitPriceBig,
+              salt:            salt      as `0x${string}`,
+              allCommitments,
+              recipient:       recipient as `0x${string}`,
             });
-          } catch (wrapErr: any) {
-            // Non-fatal: claim succeeded, wrap setup failed. Frontend can retry /wrap-execute later.
-            console.error("[Relayer] wrap digest setup failed (claim OK):", wrapErr?.message ?? wrapErr);
-            send(200, { ok: true, txHash, wrapError: wrapErr?.message ?? "Wrap setup failed" });
-          }
-          return;
-        }
 
-        send(200, { ok: true, txHash });
+            // 4. Submit claimWithProof() on-chain (relayer is msg.sender — no trader address leaked)
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const txHash = await (walletClientGlobal.writeContract as (p: any) => Promise<`0x${string}`>)({
+              address:      baseConfig.vaultAddress,
+              abi:          BATCH_VAULT_ABI,
+              functionName: "claimWithProof",
+              args:         [batchIdBig, proof, publicInputs],
+              maxPriorityFeePerGas: 100_000_000_000n,  // 100 gwei
+              maxFeePerGas:         2_000_000_000_000n, // 2000 gwei — handles mainnet spikes
+            });
+
+            await publicClient.waitForTransactionReceipt({ hash: txHash });
+            console.log(`[Relayer] claimWithProof tx: ${txHash} (batch ${batchId}, recipient ${recipient})`);
+
+            // 5. If ProxyWallet + CTF token ID provided, build wrap digest for the frontend to sign.
+            //    Relayer deploys WrappedCTFToken if not already deployed (relayer pays gas).
+            //    The actual wrap is executed via POST /wrap-execute after the frontend signs.
+            const pwm = getProxyWalletManager();
+            if (proxyWallet && ctfTokenId && pwm && baseConfig.ctfAddress) {
+              try {
+                const ctfTokenIdBig = BigInt(ctfTokenId);
+                const sideNum = Number(side);
+
+                // Ensure ProxyWallet is deployed (deploying it here is fine since tokens
+                // were sent to it by claimWithProof — they'd be stuck if wallet not deployed).
+                await pwm.ensureDeployed(proxyWallet as `0x${string}`);
+
+                // Deploy WrappedCTFToken wrapper for this positionId if needed.
+                const tokenName   = (sideNum === 0) ? "wYES" : "wNO";
+                const tokenSymbol = tokenName;
+                const wrappedToken = await pwm.ensureWrapper(ctfTokenIdBig, tokenName, tokenSymbol);
+
+                // Read ProxyWallet's actual token balance (exact amount received from claim).
+                const tokenBalance = await publicClient.readContract({
+                  address:      baseConfig.ctfAddress,
+                  abi:          CTF_BALANCE_ABI,
+                  functionName: "balanceOf",
+                  args:         [proxyWallet as `0x${string}`, ctfTokenIdBig],
+                }) as bigint;
+
+                if (tokenBalance === 0n) {
+                  // Order wasn't filled (limit below clearing price) — no tokens to wrap.
+                  console.log(`[Relayer] ProxyWallet ${proxyWallet} has 0 tokens — skip wrap digest`);
+                  claimJobs.set(jobId, { status: "done", result: { txHash }, createdAt: Date.now() });
+                  return;
+                }
+
+                // Build the 2-call wrap batch digest for the frontend to sign.
+                const wrapDigest = await pwm.buildWrapDigest(
+                  proxyWallet  as `0x${string}`,
+                  baseConfig.ctfAddress,
+                  wrappedToken,
+                  tokenBalance,
+                );
+
+                console.log(`[Relayer] wrap digest ready for proxy ${proxyWallet}: ${tokenBalance} tokens`);
+                claimJobs.set(jobId, {
+                  status: "done",
+                  result: {
+                    txHash,
+                    wrapDigest,
+                    wrappedToken,
+                    ctfAddress:  baseConfig.ctfAddress,
+                    tokenAmount: tokenBalance.toString(),
+                  },
+                  createdAt: Date.now(),
+                });
+              } catch (wrapErr: any) {
+                // Non-fatal: claim succeeded, wrap setup failed. Frontend can retry /wrap-execute later.
+                console.error("[Relayer] wrap digest setup failed (claim OK):", wrapErr?.message ?? wrapErr);
+                claimJobs.set(jobId, {
+                  status: "done",
+                  result: { txHash, wrapError: wrapErr?.message ?? "Wrap setup failed" },
+                  createdAt: Date.now(),
+                });
+              }
+              return;
+            }
+
+            claimJobs.set(jobId, { status: "done", result: { txHash }, createdAt: Date.now() });
+          } catch (e: any) {
+            console.error("[Relayer] /claim-proof background job error:", e?.message ?? e);
+            claimJobs.set(jobId, {
+              status: "error",
+              error:  e?.message ?? "Claim proof failed",
+              createdAt: Date.now(),
+            });
+          }
+        })();
       } catch (e: any) {
+        // Only reached for synchronous errors (JSON parse failure, etc.) before job was created
         console.error("[Relayer] /claim-proof error:", e?.message ?? e);
         send(400, { error: e?.message ?? "Claim proof failed" });
       }

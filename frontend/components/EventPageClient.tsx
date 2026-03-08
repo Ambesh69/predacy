@@ -774,10 +774,9 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       if (!relayerUrl) throw new Error("NEXT_PUBLIC_RELAYER_URL is not set");
 
       // POST order preimage + desired recipient to relayer.
-      // Relayer generates ZK proof and submits claimWithProof on-chain (relayer = msg.sender).
-      // When proxyWallet + ctfTokenId are set, relayer also deploys the wrapper and returns
-      // a wrapDigest for Alice to sign (wrap ERC-1155 → ERC-20 in the ProxyWallet).
-      const resp = await fetch(`${relayerUrl}/claim-proof`, {
+      // Returns { jobId } immediately — ZK proof generation runs in background on Railway.
+      // We then poll GET /claim-proof/status?jobId=... until done (avoids Railway 60s timeout).
+      const startResp = await fetch(`${relayerUrl}/claim-proof`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -798,17 +797,44 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         }),
       });
 
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({}));
-        throw new Error(err.error ?? `Claim request failed (${resp.status})`);
+      if (!startResp.ok) {
+        const err = await startResp.json().catch(() => ({}));
+        throw new Error(err.error ?? `Claim request failed (${startResp.status})`);
       }
 
-      const claimResult = await resp.json();
+      const { jobId } = await startResp.json();
+      if (!jobId) throw new Error("Relayer did not return a job ID — please retry");
+
+      // Poll for proof completion (ZK proof takes ~60-90 s on Railway).
+      // Up to 60 polls × 3 s = 3 minutes before timing out.
+      type ClaimJobResult = {
+        status: "pending" | "done" | "error";
+        txHash?: string; wrapDigest?: string; wrappedToken?: string;
+        ctfAddress?: string; tokenAmount?: string; wrapError?: string; error?: string;
+      };
+      let claimResult: ClaimJobResult | null = null;
+      for (let attempt = 0; attempt < 60; attempt++) {
+        await new Promise((r) => setTimeout(r, 3000));
+        const statusResp = await fetch(
+          `${relayerUrl}/claim-proof/status?jobId=${encodeURIComponent(jobId)}`,
+        );
+        if (!statusResp.ok) continue; // transient — keep polling
+        const statusData: ClaimJobResult = await statusResp.json();
+        if (statusData.status === "done") { claimResult = statusData; break; }
+        if (statusData.status === "error") {
+          throw new Error(statusData.error ?? "Claim proof failed");
+        }
+        // status === "pending" — keep polling
+      }
+      if (!claimResult) throw new Error("Claim timed out after 3 minutes — please retry");
+
       const { txHash, wrapDigest, wrappedToken, ctfAddress: wrapCtfAddress, tokenAmount } = claimResult;
 
-      const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash as `0x${string}` });
-      if (receipt.status === "reverted") {
-        throw new Error("Claim transaction reverted — the batch may not be fully settled yet. Try again in a few seconds.");
+      if (txHash) {
+        const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash as `0x${string}` });
+        if (receipt.status === "reverted") {
+          throw new Error("Claim transaction reverted — the batch may not be fully settled yet. Try again in a few seconds.");
+        }
       }
 
       // If relayer returned a wrapDigest, sign it with the ephemeral key and call /wrap-execute.
