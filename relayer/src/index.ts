@@ -140,19 +140,32 @@ async function ensureMarket(marketId: `0x${string}`): Promise<MarketState> {
       batchToMarket.set(state.currentBatchId.toString(), key);
       console.log(`[Relayer] Opened batch ${state.currentBatchId} for market ${marketId}`);
     } catch (err: any) {
-      if (err.message?.includes("batch already open")) {
-        // A batch was already open (relayer restart or concurrent /warm) — read from chain
-        state.currentBatchId = await publicClient.readContract({
+      // openBatch reverts when a batch is already open for this market.
+      // Alchemy/Polygon often strips the revert reason from the error (returns bare
+      // "execution reverted"), so we can't reliably match on error message text.
+      // Instead: always attempt to read the existing batch ID from chain first.
+      // If a valid batch exists, recover it; otherwise treat as a real failure.
+      try {
+        const existingId = await publicClient.readContract({
           address: baseConfig.vaultAddress,
           abi:     BATCH_VAULT_ABI,
           functionName: "getCurrentBatchId",
           args:    [marketId],
         }) as bigint;
-        batchToMarket.set(state.currentBatchId.toString(), key);
-        console.log(`[Relayer] Recovered existing batch ${state.currentBatchId} for market ${marketId}`);
-      } else {
-        console.error(`[Relayer] openBatch for market ${marketId} failed:`, err);
-        activeMarkets.delete(key); // Clean up failed state
+        if (existingId > 0n) {
+          state.currentBatchId = existingId;
+          batchToMarket.set(state.currentBatchId.toString(), key);
+          console.log(`[Relayer] Recovered existing batch ${state.currentBatchId} for market ${marketId}`);
+        } else {
+          console.error(`[Relayer] openBatch for market ${marketId} failed, no existing batch:`, err.message);
+          activeMarkets.delete(key);
+          throw err;
+        }
+      } catch (inner: any) {
+        if (inner === err) throw err; // re-throw original if inner is same error
+        console.error(`[Relayer] openBatch for market ${marketId} failed:`, err.message);
+        console.error(`[Relayer] Fallback getCurrentBatchId also failed:`, inner.message);
+        activeMarkets.delete(key);
         throw err;
       }
     } finally {
@@ -1140,17 +1153,24 @@ async function onSettleFail(state: MarketState, marketKey: string, batchId: bigi
         batchToMarket.set(state.currentBatchId.toString(), marketKey);
         console.log(`[Relayer] Force-opened batch ${state.currentBatchId} (skipped unresolvable ${batchId})`);
       } catch (e: any) {
-        if (e.message?.includes("batch already open")) {
-          state.currentBatchId = await publicClient.readContract({
+        // Same pattern as ensureMarket: Alchemy strips revert reasons, so don't rely on message text.
+        try {
+          const existingId = await publicClient.readContract({
             address: baseConfig.vaultAddress,
             abi:     BATCH_VAULT_ABI,
             functionName: "getCurrentBatchId",
             args:    [marketId],
           }) as bigint;
-          batchToMarket.set(state.currentBatchId.toString(), marketKey);
-          console.log(`[Relayer] Next batch already open: ${state.currentBatchId}`);
-        } else {
+          if (existingId > 0n) {
+            state.currentBatchId = existingId;
+            batchToMarket.set(state.currentBatchId.toString(), marketKey);
+            console.log(`[Relayer] Next batch already open: ${state.currentBatchId}`);
+          } else {
+            console.error("[Relayer] openBatch (force-skip) failed:", e);
+          }
+        } catch (inner: any) {
           console.error("[Relayer] openBatch (force-skip) failed:", e);
+          console.error("[Relayer] Fallback getCurrentBatchId also failed:", inner.message);
         }
       } finally { state.openingBatch = false; }
     }
