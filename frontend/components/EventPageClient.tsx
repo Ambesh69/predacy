@@ -464,6 +464,8 @@ function cleanClaimError(raw: string): string {
   if (raw.includes("CommitmentMismatch"))  return "Order data doesn't match the on-chain record.";
   if (raw.includes("not found in local storage")) return "Order data missing from this browser — cannot claim.";
   if (raw.includes("transaction reverted")) return "Claim reverted — batch may not be fully settled. Try again.";
+  if (raw.includes("Could not reach relayer")) return "Relayer unreachable — check your connection and retry.";
+  if (raw.includes("timed out after 3 minutes")) return "Claim is taking longer than expected — please retry.";
   // Trim verbose viem boilerplate
   if (raw.length > 100) return "Claim failed — please try again.";
   return raw;
@@ -777,26 +779,48 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       // POST order preimage + desired recipient to relayer.
       // Returns { jobId } immediately — ZK proof generation runs in background on Railway.
       // We then poll GET /claim-proof/status?jobId=... until done (avoids Railway 60s timeout).
-      const startResp = await fetch(`${relayerUrl}/claim-proof`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          batchId:    batchId.toString(),
-          marketId:   myOrder.marketId,
-          side:       orderSide,
-          amount:     myOrder.amount,
-          limitPrice: myOrder.limitPrice,
-          salt:       myOrder.salt,
-          recipient,
-          // ProxyWallet fields — present only when ephemeral key exists
-          ...(proxyWalletAddress ? {
-            proxyWallet:      proxyWalletAddress,
-            ephemeralAddress: myOrder.ephemeralAddress,
-            // CTF tokenId lets relayer deploy wrapper + build wrap digest
-            ctfTokenId:       myOrder.ctfTokenId ?? undefined,
-          } : {}),
-        }),
+      // Retry the initial POST up to 3× in case of a transient network error (e.g. Railway restart).
+      const claimBody = JSON.stringify({
+        batchId:    batchId.toString(),
+        marketId:   myOrder.marketId,
+        side:       orderSide,
+        amount:     myOrder.amount,
+        limitPrice: myOrder.limitPrice,
+        salt:       myOrder.salt,
+        recipient,
+        // ProxyWallet fields — present only when ephemeral key exists
+        ...(proxyWalletAddress ? {
+          proxyWallet:      proxyWalletAddress,
+          ephemeralAddress: myOrder.ephemeralAddress,
+          // CTF tokenId lets relayer deploy wrapper + build wrap digest
+          ctfTokenId:       myOrder.ctfTokenId ?? undefined,
+        } : {}),
       });
+
+      let startResp: Response | null = null;
+      let lastFetchError: Error | null = null;
+      for (let retry = 0; retry < 3; retry++) {
+        if (retry > 0) await new Promise((r) => setTimeout(r, 2000 * retry));
+        try {
+          startResp = await fetch(`${relayerUrl}/claim-proof`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: claimBody,
+          });
+          lastFetchError = null;
+          break;
+        } catch (fetchErr: any) {
+          lastFetchError = fetchErr;
+          // Network error — retry
+        }
+      }
+      if (!startResp) {
+        throw new Error(
+          `Could not reach relayer after 3 attempts. ` +
+          `Check your internet connection and try again. ` +
+          `(${lastFetchError?.message ?? "Network error"})`
+        );
+      }
 
       if (!startResp.ok) {
         const err = await startResp.json().catch(() => ({}));
@@ -808,6 +832,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
 
       // Poll for proof completion (ZK proof takes ~60-90 s on Railway).
       // Up to 60 polls × 3 s = 3 minutes before timing out.
+      // Network errors during polling are swallowed (retry next tick) rather than aborting the claim.
       type ClaimJobResult = {
         status: "pending" | "done" | "error";
         txHash?: string; wrapDigest?: string; wrappedToken?: string;
@@ -816,16 +841,24 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       let claimResult: ClaimJobResult | null = null;
       for (let attempt = 0; attempt < 60; attempt++) {
         await new Promise((r) => setTimeout(r, 3000));
-        const statusResp = await fetch(
-          `${relayerUrl}/claim-proof/status?jobId=${encodeURIComponent(jobId)}`,
-        );
-        if (!statusResp.ok) continue; // transient — keep polling
-        const statusData: ClaimJobResult = await statusResp.json();
-        if (statusData.status === "done") { claimResult = statusData; break; }
-        if (statusData.status === "error") {
-          throw new Error(statusData.error ?? "Claim proof failed");
+        try {
+          const statusResp = await fetch(
+            `${relayerUrl}/claim-proof/status?jobId=${encodeURIComponent(jobId)}`,
+          );
+          if (!statusResp.ok) continue; // transient — keep polling
+          const statusData: ClaimJobResult = await statusResp.json();
+          if (statusData.status === "done") { claimResult = statusData; break; }
+          if (statusData.status === "error") {
+            throw new Error(statusData.error ?? "Claim proof failed");
+          }
+          // status === "pending" — keep polling
+        } catch (pollErr: any) {
+          // Network error during status poll — if it's an app-level error (from throw above) re-throw it
+          if (pollErr.message && !pollErr.message.includes("Failed to fetch") && !pollErr.message.includes("NetworkError")) {
+            throw pollErr;
+          }
+          // Otherwise swallow — Railway may be briefly unavailable, keep polling
         }
-        // status === "pending" — keep polling
       }
       if (!claimResult) throw new Error("Claim timed out after 3 minutes — please retry");
 
