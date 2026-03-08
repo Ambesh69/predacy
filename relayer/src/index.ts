@@ -772,6 +772,59 @@ const server = createServer((req, res) => {
     return;
   }
 
+  // POST /admin/recover-batch?batchId=N
+  // Directly retrigger processBatch for a LOCKED/SETTLING batch by ID.
+  // Use when the startup recovery scan misses a stuck batch.
+  if (req.method === "POST" && req.url?.startsWith("/admin/recover-batch")) {
+    const url     = new URL(req.url, "http://localhost");
+    const batchId = url.searchParams.get("batchId");
+    if (!batchId) { send(400, { error: "Missing query param: batchId" }); return; }
+    const batchIdBig = BigInt(batchId);
+    (async () => {
+      try {
+        const batchInfo = await publicClient.readContract({
+          address: baseConfig.vaultAddress, abi: BATCH_VAULT_ABI,
+          functionName: "getBatch", args: [batchIdBig],
+        }) as { marketId: `0x${string}`; status: number };
+
+        const LOCKED = 2, SETTLING = 1;
+        if (batchInfo.status !== LOCKED && batchInfo.status !== SETTLING) {
+          send(400, { error: `Batch ${batchId} status=${batchInfo.status} (not LOCKED/SETTLING)` });
+          return;
+        }
+
+        const marketId = batchInfo.marketId;
+        const key      = marketId.toLowerCase();
+        let state = activeMarkets.get(key);
+        if (!state) {
+          state = createMarketState(marketId);
+          state.currentBatchId  = batchIdBig;
+          activeMarkets.set(key, state);
+          batchToMarket.set(batchId, key);
+        }
+        if (state.processingBatch) {
+          send(409, { error: `Batch ${batchId} is already being processed` });
+          return;
+        }
+        state.settlingBatchId = batchIdBig;
+        state.processingBatch = true;
+        const phaseLabel = batchInfo.status === LOCKED ? "LOCKED (CLOB retry)" : "SETTLING";
+        console.log(`[Relayer] /admin/recover-batch: manually recovering ${phaseLabel} batch ${batchId}`);
+        send(200, { ok: true, batchId, status: phaseLabel });
+        state.processor.processBatch(batchIdBig)
+          .then(() => {
+            state!.settleFailures.delete(batchId);
+            console.log(`[Relayer] /admin/recover-batch: batch ${batchId} settled ✓`);
+          })
+          .catch(async (err) => { await onSettleFail(state!, key, batchIdBig, err); })
+          .finally(() => { state!.processingBatch = false; state!.settlingBatchId = null; });
+      } catch (e: any) {
+        send(500, { error: e.message });
+      }
+    })();
+    return;
+  }
+
   // GET /history/:walletAddress
   // Returns order summaries for a wallet. Requires a one-time EIP-191 signature
   // over a fixed message to prove the requester controls the wallet.
