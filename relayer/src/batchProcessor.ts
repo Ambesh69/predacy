@@ -494,27 +494,37 @@ export class BatchProcessor {
 
     const relayerAddress = this.walletClient.account!.address;
 
-    // ── CTF: setApprovalForAll(vault, true) ─────────────────────────────────
-    const isCtfApproved = await this.publicClient.readContract({
-      address:      this.config.ctfAddress,
-      abi:          CTF_ABI,
-      functionName: "isApprovedForAll",
-      args:         [relayerAddress, this.config.vaultAddress],
-    }) as boolean;
+    // ── CTF: setApprovalForAll(operator, true) for all operators that pull tokens ──
+    // The vault pulls gap tokens in settleBatch; CTFExchange + NegRiskExchange pull
+    // tokens when the relayer places CLOB SELL orders (selling excess / NegRisk tokens).
+    const CTF_OPERATOR_APPROVALS = [
+      [this.config.vaultAddress,                          "vault"           ],
+      ["0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E" as `0x${string}`, "CTFExchange"    ],
+      ["0xC5d563A36AE78145C45a50134d48A1215220f80a" as `0x${string}`, "NegRiskExchange"],
+    ] as const satisfies readonly (readonly [`0x${string}`, string])[];
 
-    if (!isCtfApproved) {
-      console.log("[BatchProcessor] ensureApprovals: setting CTF setApprovalForAll(vault, true)");
-      const hash = await this._write({
+    for (const [operator, label] of CTF_OPERATOR_APPROVALS) {
+      const isApproved = await this.publicClient.readContract({
         address:      this.config.ctfAddress,
         abi:          CTF_ABI,
-        functionName: "setApprovalForAll",
-        args:         [this.config.vaultAddress, true],
-        ...chainGas(this.config.chainId),
-      });
-      await this.publicClient.waitForTransactionReceipt({ hash });
-      console.log(`[BatchProcessor] CTF approval set (tx: ${hash})`);
-    } else {
-      console.log("[BatchProcessor] ensureApprovals: CTF already approved ✓");
+        functionName: "isApprovedForAll",
+        args:         [relayerAddress, operator],
+      }) as boolean;
+
+      if (!isApproved) {
+        console.log(`[BatchProcessor] ensureApprovals: setting CTF setApprovalForAll(${label}, true)`);
+        const hash = await this._write({
+          address:      this.config.ctfAddress,
+          abi:          CTF_ABI,
+          functionName: "setApprovalForAll",
+          args:         [operator, true],
+          ...chainGas(this.config.chainId),
+        });
+        await this.publicClient.waitForTransactionReceipt({ hash });
+        console.log(`[BatchProcessor] CTF approval set for ${label} (tx: ${hash})`);
+      } else {
+        console.log(`[BatchProcessor] ensureApprovals: CTF already approved for ${label} ✓`);
+      }
     }
 
     // ── USDC: approve(vault, max) — vault pulls USDC from relayer in settleBatch ──
