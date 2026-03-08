@@ -5,6 +5,7 @@ import Link from "next/link";
 import EventCard from "@/components/EventCard";
 import WalletButton from "@/components/WalletButton";
 import { MOCK_MARKETS, getEvents, type PolyEvent } from "@/lib/polymarket";
+import { getRelayerUrl } from "@/lib/relayerUrl";
 import {
   filterAndSortEvents,
   getDiscoveryCategories,
@@ -39,7 +40,7 @@ export default function HomePage() {
   // Fetch all markets with active batches from the relayer's /health endpoint.
   // Any market the relayer is tracking gets the "LIVE" badge.
   useEffect(() => {
-    const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
+    const relayerUrl = getRelayerUrl();
     if (!relayerUrl) return;
     (async () => {
       try {

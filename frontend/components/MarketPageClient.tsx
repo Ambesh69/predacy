@@ -12,6 +12,7 @@ import PositionsPanel from "@/components/PositionsPanel";
 import PriceChart from "@/components/PriceChart";
 import WalletButton from "@/components/WalletButton";
 import { getMarket, MOCK_MARKETS, type Market } from "@/lib/polymarket";
+import { getRelayerUrl } from "@/lib/relayerUrl";
 import {
   BATCH_VAULT_ABI,
   CTF_ABI,
@@ -173,7 +174,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
 
   // ── Pre-warm: open a batch for this market before the user submits an order ──
   useEffect(() => {
-    const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
+    const relayerUrl = getRelayerUrl();
     if (!relayerUrl || !id) return;
     fetch(`${relayerUrl}/warm`, {
       method: "POST",
@@ -420,7 +421,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
             const v = parseInt(transferSig.slice(130, 132), 16);
             const transferAuth = { validAfter: validAfter.toString(), validBefore: validBefore.toString(), nonce: transferNonce, v, r, s };
 
-            const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
+            const relayerUrl = getRelayerUrl();
             if (!relayerUrl) throw new Error("NEXT_PUBLIC_RELAYER_URL is not set");
 
             const resp = await fetch(`${relayerUrl}/order`, {
@@ -729,7 +730,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       // If settlement ever fails, the user can import ephemeralKey into MetaMask and sweep USDC back.
 
       // 8. POST to relayer
-      const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
+      const relayerUrl = getRelayerUrl();
       if (!relayerUrl) throw new Error("NEXT_PUBLIC_RELAYER_URL is not set");
 
       const resp = await fetch(`${relayerUrl}/order`, {
@@ -867,7 +868,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     });
 
     // Step 4 — POST to relayer (no transferAuth for sell orders)
-    const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
+    const relayerUrl = getRelayerUrl();
     if (!relayerUrl) throw new Error("NEXT_PUBLIC_RELAYER_URL is not set");
 
     const resp = await fetch(`${relayerUrl}/order`, {
@@ -971,7 +972,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       if (!myOrder) throw new Error("Order preimage not found in local storage — cannot claim");
       if (!myOrder.marketId) throw new Error("Order is missing marketId — cannot claim");
 
-      const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
+      const relayerUrl = getRelayerUrl();
       if (!relayerUrl) throw new Error("NEXT_PUBLIC_RELAYER_URL is not set");
 
       // POST order preimage + desired recipient to relayer.

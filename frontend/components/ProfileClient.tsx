@@ -9,6 +9,7 @@ import {
 } from "viem";
 import { clsx } from "clsx";
 import { BATCH_VAULT_ABI, ERC20_ABI, BatchStatus, getContracts } from "@/lib/contracts";
+import { getRelayerUrl } from "@/lib/relayerUrl";
 import { ACTIVE_CHAIN } from "@/lib/chain";
 
 const YES_BUY = 0, YES_SELL = 1, NO_BUY = 2, NO_SELL = 3;
@@ -828,7 +829,7 @@ export default function ProfileClient() {
       //     Signature is stored in localStorage permanently — Alice signs once per device, never again.
       //     Fixed message (no timestamp) means the same signature works forever.
       try {
-        const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
+        const relayerUrl = getRelayerUrl();
         const wallet     = wallets[0];
         if (relayerUrl && wallet) {
           const addr     = walletAddress.toLowerCase();
@@ -1172,7 +1173,7 @@ export default function ProfileClient() {
       if (!myOrder)           throw new Error("Order preimage not found in local storage — cannot claim");
       if (!myOrder.marketId)  throw new Error("Order is missing marketId — cannot claim");
 
-      const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
+      const relayerUrl = getRelayerUrl();
       if (!relayerUrl) throw new Error("NEXT_PUBLIC_RELAYER_URL is not set");
 
       const claimSide = typeof myOrder.side === "number"

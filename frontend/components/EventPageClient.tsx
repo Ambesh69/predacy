@@ -15,6 +15,7 @@ import OrderForm from "@/components/OrderForm";
 import PositionsPanel from "@/components/PositionsPanel";
 import OrderbookPanel from "@/components/OrderbookPanel";
 import type { Market } from "@/lib/polymarket";
+import { getRelayerUrl } from "@/lib/relayerUrl";
 import {
   filterAndDeduplicateMarkets,
   outcomeLabel,
@@ -523,7 +524,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   // for up to 10 minutes. Stops when a terminal status ('requeued'/'failed') arrives.
   useEffect(() => {
     if (!pendingRequeueCommitment) return;
-    const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
+    const relayerUrl = getRelayerUrl();
     if (!relayerUrl) return;
 
     let cancelled = false;
@@ -602,7 +603,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   // ── Pre-warm batch for selected market ──────────────────────────────────────
   useEffect(() => {
     if (!selectedMarketId) return;
-    const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
+    const relayerUrl = getRelayerUrl();
     if (!relayerUrl) return;
     fetch(`${relayerUrl}/warm`, {
       method: "POST",
@@ -770,7 +771,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         ) as `0x${string}`;
       }
 
-      const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
+      const relayerUrl = getRelayerUrl();
       if (!relayerUrl) throw new Error("NEXT_PUBLIC_RELAYER_URL is not set");
 
       // POST order preimage + desired recipient to relayer.
@@ -1080,7 +1081,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     const sig = await ephemeralAccount.signMessage({ message: { raw: digest } });
 
     // POST to relayer — relayer calls ProxyWallet.executeWithSig and pays MATIC.
-    const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
+    const relayerUrl = getRelayerUrl();
     if (!relayerUrl) throw new Error("NEXT_PUBLIC_RELAYER_URL is not set");
 
     const resp = await fetch(`${relayerUrl}/proxy-transfer`, {
@@ -1280,7 +1281,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
 
       // Submit chunks sequentially — each await blocks until relayer confirms on-chain,
       // ensuring the ephemeral nonce increments correctly for subsequent chunks.
-      const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
+      const relayerUrl = getRelayerUrl();
       if (!relayerUrl) throw new Error("NEXT_PUBLIC_RELAYER_URL is not set");
 
       let actualBatchId = batch.batchId.toString();
@@ -1394,7 +1395,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       message: { commitment: params.commitment, amount: params.amount, nonce, deadline },
     });
 
-    const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
+    const relayerUrl = getRelayerUrl();
     if (!relayerUrl) throw new Error("NEXT_PUBLIC_RELAYER_URL is not set");
     const resp = await fetch(`${relayerUrl}/order`, {
       method: "POST",

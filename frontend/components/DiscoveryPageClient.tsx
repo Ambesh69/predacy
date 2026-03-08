@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { getRelayerUrl } from "@/lib/relayerUrl";
 import { usePathname, useRouter } from "next/navigation";
 import DiscoveryControls from "@/components/DiscoveryControls";
 import EventCard from "@/components/EventCard";
@@ -47,7 +48,7 @@ export default function DiscoveryPageClient({
   const pathname = usePathname();
 
   useEffect(() => {
-    const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
+    const relayerUrl = getRelayerUrl();
     if (!relayerUrl) return;
     fetch(`${relayerUrl}/health`)
       .then((r) => (r.ok ? r.json() : null))
