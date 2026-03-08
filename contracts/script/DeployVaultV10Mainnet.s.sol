@@ -35,8 +35,12 @@ contract DeployVaultV10Mainnet is Script {
     address constant REAL_CTF  = 0x4D97DCd97eC945f40cF65F87097ACe5EA0476045; // Gnosis CTF
 
     // ── Reuse v9 verifiers (ZK circuits unchanged in v10) ───────────────────
-    // PublicInputAdapter wrapping HonkVerifier (batch clearing, 37 public inputs)
-    address constant ADAPTER_V9   = 0x6D7FA6692f0Ea7306E6289e5D045B455bbA85aF1;
+    // PublicInputAdapter wrapping HonkVerifier (batch clearing, 38 public inputs)
+    // NOTE: 0x6D7FA6692... was the original v9 adapter (37 inputs — wrong, do NOT use).
+    //       Redeployed in commit 8262579 to fix off-by-one (38 inputs = 32 commitmentRoot
+    //       fields + clearing_price + filledYesBuyVol + filledNoBuyVol + filledYesSellQty
+    //       + filledNoSellQty + orderCount).
+    address constant ADAPTER_V9   = 0x8f6829E931E278d47Ec160847C1037864AfB1cC7;
     // ClaimHonkVerifier (ZK claim proofs, 11 public inputs)
     address constant CLAIM_VER_V9 = 0xa555AAb4E1BE1a002EDe3150818650B3fE2164A1;
 
