@@ -498,9 +498,12 @@ export class BatchProcessor {
     // The vault pulls gap tokens in settleBatch; CTFExchange + NegRiskExchange pull
     // tokens when the relayer places CLOB SELL orders (selling excess / NegRisk tokens).
     const CTF_OPERATOR_APPROVALS = [
-      [this.config.vaultAddress,                          "vault"           ],
-      ["0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E" as `0x${string}`, "CTFExchange"    ],
-      ["0xC5d563A36AE78145C45a50134d48A1215220f80a" as `0x${string}`, "NegRiskExchange"],
+      [this.config.vaultAddress,                                        "vault"           ],
+      ["0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E" as `0x${string}`, "CTFExchange"     ],
+      ["0xC5d563A36AE78145C45a50134d48A1215220f80a" as `0x${string}`, "NegRiskExchange" ],
+      // NegRiskAdapter also needs CTF approval: it is the contract that actually calls
+      // CTF.safeTransferFrom when routing NegRisk SELL orders through the exchange
+      ["0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296" as `0x${string}`, "NegRiskAdapter"  ],
     ] as const satisfies readonly (readonly [`0x${string}`, string])[];
 
     for (const [operator, label] of CTF_OPERATOR_APPROVALS) {
