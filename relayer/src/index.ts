@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { createServer } from "node:http";
-import { createPublicClient, http, parseAbiItem, recoverMessageAddress } from "viem";
+import { createPublicClient, http, parseAbiItem, recoverMessageAddress, encodeFunctionData } from "viem";
 import { polygon, polygonAmoy } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 import { createWalletClient } from "viem";
@@ -603,6 +603,103 @@ const server = createServer((req, res) => {
       } catch (e: any) {
         console.error("[Relayer] /wrap-execute error:", e?.message ?? e);
         send(400, { error: e?.message ?? "Wrap execution failed" });
+      }
+    });
+    return;
+  }
+
+  // POST /proxy-transfer
+  // Transfer CTF ERC-1155 tokens from a ProxyWallet to any recipient.
+  // The owner (ephemeral EOA) signs a single-call meta-tx digest offline;
+  // the relayer submits ProxyWallet.executeWithSig() and pays MATIC gas.
+  //
+  // Body: { proxyWallet, to, tokenId, amount, sig }
+  //   proxyWallet: ProxyWallet contract address holding the tokens
+  //   to:          recipient address (user's main wallet)
+  //   tokenId:     CTF ERC-1155 positionId (decimal string)
+  //   amount:      token amount (decimal string, use balanceOf for exact value)
+  //   sig:         65-byte ECDSA signature from ephemeral EOA over the digest:
+  //                keccak256(abi.encode(nonce, chainId, proxyWallet, ctfAddress, 0, keccak256(calldata)))
+  //                signed with signMessage (eth_sign prefix, not EIP-712)
+  if (req.method === "POST" && req.url === "/proxy-transfer") {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", async () => {
+      try {
+        const data = JSON.parse(body);
+        const { proxyWallet, to, tokenId, amount, sig } = data;
+
+        if (!proxyWallet || !to || !tokenId || !amount || !sig) {
+          send(400, { error: "Missing fields: proxyWallet, to, tokenId, amount, sig" });
+          return;
+        }
+
+        const ctfAddress = baseConfig.ctfAddress;
+        if (!ctfAddress) {
+          send(503, { error: "CTF_ADDRESS not configured on relayer" });
+          return;
+        }
+
+        // Build CTF.safeTransferFrom(proxyWallet, to, tokenId, amount, "0x") calldata
+        const CTF_SAFE_TRANSFER_ABI = [{
+          name: "safeTransferFrom",
+          type: "function" as const,
+          inputs: [
+            { name: "from",   type: "address" },
+            { name: "to",     type: "address" },
+            { name: "id",     type: "uint256" },
+            { name: "amount", type: "uint256" },
+            { name: "data",   type: "bytes"   },
+          ],
+          outputs:         [],
+          stateMutability: "nonpayable",
+        }] as const;
+
+        const calldata = encodeFunctionData({
+          abi:          CTF_SAFE_TRANSFER_ABI,
+          functionName: "safeTransferFrom",
+          args: [
+            proxyWallet as `0x${string}`,
+            to          as `0x${string}`,
+            BigInt(tokenId),
+            BigInt(amount),
+            "0x",
+          ],
+        });
+
+        // Call ProxyWallet.executeWithSig(ctfAddress, 0, calldata, sig)
+        // The contract verifies the ephemeral EOA signed the meta-tx digest.
+        const EXECUTE_WITH_SIG_ABI = [{
+          name:            "executeWithSig",
+          type:            "function" as const,
+          inputs:          [
+            { name: "to",    type: "address" },
+            { name: "value", type: "uint256" },
+            { name: "data",  type: "bytes"   },
+            { name: "sig",   type: "bytes"   },
+          ],
+          outputs:         [{ name: "result", type: "bytes" }],
+          stateMutability: "nonpayable",
+        }] as const;
+
+        const { request } = await publicClient.simulateContract({
+          address:      proxyWallet as `0x${string}`,
+          abi:          EXECUTE_WITH_SIG_ABI,
+          functionName: "executeWithSig",
+          args:         [ctfAddress, 0n, calldata, sig as `0x${string}`],
+          account:      walletClientGlobal.account,
+        });
+        const txHash = await walletClientGlobal.writeContract(request as any);
+        await publicClient.waitForTransactionReceipt({ hash: txHash });
+
+        console.log(
+          `[Relayer] proxy-transfer: tokenId=${tokenId} amount=${amount} ` +
+          `from ${proxyWallet} → ${to} tx: ${txHash}`
+        );
+        send(200, { ok: true, txHash });
+      } catch (e: any) {
+        console.error("[Relayer] /proxy-transfer error:", e?.message ?? e);
+        send(400, { error: e?.message ?? "Transfer failed" });
       }
     });
     return;

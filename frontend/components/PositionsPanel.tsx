@@ -69,6 +69,8 @@ interface PositionsPanelProps {
   onMarketIdsFound?:          (ids: `0x${string}`[]) => void;
   /** Sweep USDC from an unfilled ephemeral wallet back to the real wallet via EIP-3009 */
   onSweepUnfilled?:           (ephemeralKey: string, ephemeralAddress: string, amount: bigint) => Promise<void>;
+  /** Transfer CTF tokens from ProxyWallet to the user's main wallet via relayer meta-tx */
+  onTransferFromProxy?:       (batchId: bigint) => Promise<void>;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -152,11 +154,16 @@ interface PositionRowProps {
   onClose?:       () => void; // pre-fills SELL form for this position
   /** Set when tokens were routed to a ProxyWallet for Railgun shielding */
   proxyWalletAddress?: `0x${string}`;
+  /** Transfer tokens from ProxyWallet to main wallet via relayer meta-tx */
+  onTransfer?:     () => void;
+  isTransferring?: boolean;
+  transferError?:  string;
 }
 
 function PositionRow({
   batchId, position, side, clearingPrice, marketQuestion, shares,
   onClaim, isClaiming, claimError, isActive, onClose, proxyWalletAddress,
+  onTransfer, isTransferring, transferError,
 }: PositionRowProps) {
 
   const isSell      = side === YES_SELL || side === NO_SELL;
@@ -237,20 +244,41 @@ function PositionRow({
           )}
         </div>
       ) : (
-        // Buy order, claimed — show CLOSE POSITION or Railgun shield prompt
+        // Buy order, claimed — show CLOSE POSITION or Railgun/transfer options
         <div className="space-y-1.5">
           {proxyWalletAddress ? (
-            // Privacy flow: tokens are in ProxyWallet, ready to shield into Railgun
+            // Privacy flow: tokens are in ProxyWallet
             <div className="space-y-1">
               <div className="flex items-center gap-1.5">
                 <span className="text-[9px] text-accent/60 tracking-widest uppercase">CLAIMED ✓</span>
-                <span className="text-[9px] text-accent/40">· Tokens in ProxyWallet</span>
+                <span className="text-[9px] text-accent/40">· In ProxyWallet</span>
               </div>
-              <p className="text-[9px] text-muted leading-relaxed">
-                Tokens sent to your ProxyWallet. Shield to Railgun to complete privacy.
-              </p>
+              {/* Move to wallet — transfers CTF ERC-1155 to main wallet for selling */}
+              {onTransfer && (
+                <button
+                  onClick={onTransfer}
+                  disabled={isTransferring}
+                  className={clsx(
+                    "w-full py-1.5 border text-[10px] tracking-widest uppercase transition-colors",
+                    isTransferring
+                      ? "border-border text-muted-dim cursor-not-allowed"
+                      : "border-border-bright text-muted hover:border-text/30 hover:text-text",
+                  )}
+                >
+                  {isTransferring ? (
+                    <span className="flex items-center justify-center gap-1.5">
+                      <span className="w-2 h-2 border border-current border-t-transparent rounded-full animate-spin" />
+                      MOVING…
+                    </span>
+                  ) : "MOVE TO WALLET"}
+                </button>
+              )}
+              {transferError && (
+                <p className="text-[9px] text-danger leading-snug">{transferError}</p>
+              )}
+              {/* Shield to Railgun — full privacy path */}
               <a
-                href={`https://app.railgun.org`}
+                href="https://app.railgun.org"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="block w-full py-1.5 border border-accent/30 text-accent text-[10px] tracking-widest uppercase text-center hover:border-accent/60 hover:bg-accent/5 transition-colors"
@@ -457,17 +485,20 @@ export default function PositionsPanel({
   onClosePosition,
   onMarketIdsFound,
   onSweepUnfilled,
+  onTransferFromProxy,
 }: PositionsPanelProps) {
   const [historicalPositions, setHistoricalPositions] = useState<HistoricalPosition[]>([]);
   const [allStoredOrders,     setAllStoredOrders]     = useState<Array<{
     batchId: string; side: number; amount: string; marketQuestion?: string;
     timestamp?: number; clearingPrice?: bigint; shares?: number; batchStatus?: BatchStatus;
   }>>([]);
-  const [scanning,      setScanning]      = useState(false);
-  const [claimingBatchId, setClaimingBatchId] = useState<bigint | null>(null);
-  const [claimErrors,   setClaimErrors]   = useState<Record<string, string>>({});
-  const [mainTab,       setMainTab]       = useState<"positions" | "activity">("positions");
-  const [posTab,        setPosTab]        = useState<"active" | "closed">("active");
+  const [scanning,         setScanning]         = useState(false);
+  const [claimingBatchId,  setClaimingBatchId]  = useState<bigint | null>(null);
+  const [claimErrors,      setClaimErrors]      = useState<Record<string, string>>({});
+  const [transferringId,   setTransferringId]   = useState<bigint | null>(null);
+  const [transferErrors,   setTransferErrors]   = useState<Record<string, string>>({});
+  const [mainTab,          setMainTab]          = useState<"positions" | "activity">("positions");
+  const [posTab,           setPosTab]           = useState<"active" | "closed">("active");
 
   // Current-batch position (fetched when settled)
   const [currentPosition, setCurrentPosition] = useState<{
@@ -730,6 +761,30 @@ export default function PositionsPanel({
     }
   };
 
+  const handleTransfer = async (batchId: bigint) => {
+    if (!onTransferFromProxy) return;
+    setTransferringId(batchId);
+    const key = batchId.toString();
+    setTransferErrors((prev) => { const n = { ...prev }; delete n[key]; return n; });
+    try {
+      await onTransferFromProxy(batchId);
+      // After transfer, tokens are in main wallet — clear proxyWalletAddress from the position
+      setHistoricalPositions((prev) =>
+        prev.map((hp) => hp.batchId === batchId
+          ? { ...hp, proxyWalletAddress: undefined }
+          : hp
+        )
+      );
+      scanHistory();
+    } catch (e: any) {
+      if (e?.code !== 4001) {
+        setTransferErrors((prev) => ({ ...prev, [key]: e.message ?? "Transfer failed" }));
+      }
+    } finally {
+      setTransferringId(null);
+    }
+  };
+
   // ── Derived data ─────────────────────────────────────────────────────────────
 
   // Current batch: does the user have a sealed order this session?
@@ -940,6 +995,13 @@ export default function PositionsPanel({
                     claimError={claimErrors[hp.batchId.toString()]}
                     isActive={!hp.position.claimed}
                     proxyWalletAddress={hp.proxyWalletAddress}
+                    onTransfer={
+                      hp.position.claimed && hp.proxyWalletAddress && onTransferFromProxy
+                        ? () => handleTransfer(hp.batchId)
+                        : undefined
+                    }
+                    isTransferring={transferringId === hp.batchId}
+                    transferError={transferErrors[hp.batchId.toString()]}
                     onClose={
                       (hp.side === YES_BUY || hp.side === NO_BUY) && hp.position.claimed && !hp.proxyWalletAddress && onClosePosition
                         ? () => onClosePosition(computeYesAmount(hp.position.filledAmount, hp.clearingPrice), hp.clearingPrice)

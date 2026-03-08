@@ -5,6 +5,7 @@ import Link from "next/link";
 import { clsx } from "clsx";
 import {
   createPublicClient, createWalletClient, custom, http, parseAbiItem, pad, toHex,
+  keccak256, encodeAbiParameters, encodeFunctionData,
 } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
@@ -22,7 +23,7 @@ import {
 } from "@/lib/marketUtils";
 import {
   BATCH_VAULT_ABI, CTF_ABI, ERC20_ABI, MOCK_USDC_ABI, TRANSFER_WITH_AUTH_ABI,
-  PROXY_WALLET_FACTORY_ABI, BatchStatus, getContracts,
+  PROXY_WALLET_FACTORY_ABI, PROXY_WALLET_ABI, BatchStatus, getContracts,
 } from "@/lib/contracts";
 import { computeCommitment } from "@/lib/commitmentHash";
 import {
@@ -960,6 +961,111 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       .catch(() => { /* tx is on-chain, just slow — balance will refresh on next poll */ });
   };
 
+  // ── Transfer CTF tokens from ProxyWallet to main wallet ──────────────────────
+  // Called when user clicks "MOVE TO WALLET" on a ProxyWallet-claimed position.
+  // Signs a ProxyWallet meta-tx with the ephemeral key from localStorage and
+  // posts to /proxy-transfer — the relayer submits executeWithSig (pays gas).
+  // After success the tokens land in the user's main wallet for selling.
+  const handleTransferFromProxy = async (batchId: bigint) => {
+    if (!walletAddress) throw new Error("Wallet not connected");
+
+    const contracts = getContracts(ACTIVE_CHAIN.id);
+    const storageKey = `predacy:orders:${walletAddress.toLowerCase()}`;
+    const storedOrders: Array<{
+      batchId: string; ephemeralKey?: string;
+      ctfTokenId?: string; proxyWalletAddress?: string;
+    }> = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
+
+    const myOrder = storedOrders.find((o) => o.batchId === batchId.toString());
+    if (!myOrder)                   throw new Error("Order not found in local storage");
+    if (!myOrder.ephemeralKey)      throw new Error("No ephemeral key — cannot sign transfer");
+    if (!myOrder.ctfTokenId)        throw new Error("No token ID stored — cannot identify tokens");
+    if (!myOrder.proxyWalletAddress) throw new Error("No ProxyWallet address stored");
+
+    const proxyWallet = myOrder.proxyWalletAddress as `0x${string}`;
+    const tokenId     = BigInt(myOrder.ctfTokenId);
+
+    // Read actual balance — use this rather than computed amount in case of rounding.
+    const balance = await publicClient.readContract({
+      address:      contracts.ctf,
+      abi:          CTF_ABI,
+      functionName: "balanceOf",
+      args:         [proxyWallet, tokenId],
+    }) as bigint;
+    if (balance === 0n) throw new Error("No tokens in ProxyWallet — already transferred?");
+
+    // Read ProxyWallet nonce for replay protection.
+    const proxyNonce = await publicClient.readContract({
+      address:      proxyWallet,
+      abi:          PROXY_WALLET_ABI,
+      functionName: "nonce",
+    }) as bigint;
+
+    // Build CTF.safeTransferFrom(proxyWallet, walletAddress, tokenId, balance, "0x") calldata.
+    const calldata = encodeFunctionData({
+      abi:          CTF_ABI,
+      functionName: "safeTransferFrom",
+      args:         [proxyWallet, walletAddress, tokenId, balance, "0x"],
+    });
+
+    // Build single-call meta-tx digest matching ProxyWallet._metaTxDigest():
+    //   keccak256(abi.encode(nonce, chainId, proxyWallet, ctfAddress, 0, keccak256(data)))
+    const digest = keccak256(encodeAbiParameters(
+      [
+        { type: "uint256" }, // nonce
+        { type: "uint256" }, // chainId
+        { type: "address" }, // address(this) = proxyWallet
+        { type: "address" }, // to            = ctfAddress
+        { type: "uint256" }, // value          = 0
+        { type: "bytes32" }, // keccak256(data)
+      ],
+      [proxyNonce, BigInt(ACTIVE_CHAIN.id), proxyWallet, contracts.ctf, 0n, keccak256(calldata)],
+    ));
+
+    // Sign with ephemeral key using signMessage (viem adds eth_sign prefix —
+    // ProxyWallet._recoverEthSign adds the same prefix before recovering).
+    const ephemeralAccount = privateKeyToAccount(myOrder.ephemeralKey as `0x${string}`);
+    const sig = await ephemeralAccount.signMessage({ message: { raw: digest } });
+
+    // POST to relayer — relayer calls ProxyWallet.executeWithSig and pays MATIC.
+    const relayerUrl = process.env.NEXT_PUBLIC_RELAYER_URL;
+    if (!relayerUrl) throw new Error("NEXT_PUBLIC_RELAYER_URL is not set");
+
+    const resp = await fetch(`${relayerUrl}/proxy-transfer`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        proxyWallet,
+        to:      walletAddress,
+        tokenId: tokenId.toString(),
+        amount:  balance.toString(),
+        sig,
+      }),
+    });
+
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.error ?? `Transfer failed (${resp.status})`);
+    }
+
+    const { txHash } = await resp.json();
+    await publicClient.waitForTransactionReceipt({ hash: txHash as `0x${string}` });
+
+    // Clear proxyWalletAddress from localStorage — tokens are now in main wallet.
+    try {
+      const allOrders: Array<Record<string, unknown>> = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
+      localStorage.setItem(storageKey, JSON.stringify(
+        allOrders.map((o) => o.batchId === batchId.toString()
+          ? { ...o, proxyWalletAddress: null }
+          : o
+        )
+      ));
+    } catch { /* ignore */ }
+
+    setBalanceVersion(v => v + 1);
+    pushToast("Tokens moved to your wallet — you can now place a SELL order.", "success");
+  };
+
   // OrderSide constants (must match BatchVault v8 OrderSide enum)
   const YES_BUY  = 0;
   const YES_SELL = 1;
@@ -1621,6 +1727,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                     onClosePosition={handleClosePosition}
                     onMarketIdsFound={setHistoricalMarketIds}
                     onSweepUnfilled={handleSweepUnfilled}
+                    onTransferFromProxy={handleTransferFromProxy}
                   />
                   </>
                 ) : (

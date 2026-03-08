@@ -78,6 +78,38 @@ export const CTF_ABI = [
     outputs: [{ name: "", type: "uint256" }],
     stateMutability: "view",
   },
+  {
+    name: "safeTransferFrom",
+    type: "function",
+    inputs: [
+      { name: "from",   type: "address" },
+      { name: "to",     type: "address" },
+      { name: "id",     type: "uint256" },
+      { name: "amount", type: "uint256" },
+      { name: "data",   type: "bytes"   },
+    ],
+    outputs:         [],
+    stateMutability: "nonpayable",
+  },
+] as const;
+
+// ── ProxyWallet ABI — subset for meta-tx transfer ─────────────────────────────
+
+export const PROXY_WALLET_ABI = [
+  {
+    name:            "nonce",
+    type:            "function",
+    inputs:          [],
+    outputs:         [{ name: "", type: "uint256" }],
+    stateMutability: "view",
+  },
+  {
+    name:            "owner",
+    type:            "function",
+    inputs:          [],
+    outputs:         [{ name: "", type: "address" }],
+    stateMutability: "view",
+  },
 ] as const;
 
 // ── BatchVault ABI (subset needed by frontend) — v9: two-phase settlement ────
