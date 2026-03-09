@@ -191,7 +191,7 @@ function PositionRow({
             {shares != null && shares > 0 && (
               <span className="text-muted-dim"><span className="text-text font-mono">{sharesDisp}</span> shares</span>
             )}
-            <span className="text-muted-dim">cost <span className="text-text font-mono">{fUsdc(position.filledAmount)}</span></span>
+            <span className="text-muted-dim">{isSell ? "rcvd" : "cost"} <span className="text-text font-mono">{fUsdc(position.filledAmount)}</span></span>
           </>
         )}
         {position.refundAmount > 0n && (
