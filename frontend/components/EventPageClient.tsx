@@ -1102,7 +1102,18 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       functionName: "balanceOf",
       args:         [proxyWallet, tokenId],
     }) as bigint;
-    if (balance === 0n) throw new Error("No tokens in ProxyWallet — already transferred?");
+    if (balance === 0n) {
+      // Tokens already moved (e.g. prior transfer tx succeeded but receipt polling
+      // timed out and returned an error — so proxyWalletAddress was never cleared).
+      // Treat as success: just wipe proxyWalletAddress so the UI shows CLOSE POSITION.
+      const allOrders: Array<Record<string, unknown>> = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
+      localStorage.setItem(storageKey, JSON.stringify(
+        allOrders.map((o) => o.batchId === batchId.toString() ? { ...o, proxyWalletAddress: null } : o)
+      ));
+      setBalanceVersion(v => v + 1);
+      pushToast("Tokens already in your wallet — ready to sell.", "success");
+      return;
+    }
 
     // Read ProxyWallet nonce for replay protection.
     // If the wallet isn't deployed yet, nonce() returns 0x — default to 0n.
@@ -1167,7 +1178,14 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     }
 
     const { txHash } = await resp.json();
-    await publicClient.waitForTransactionReceipt({ hash: txHash as `0x${string}` });
+    // Receipt polling — treat timeout as success (tx is already submitted).
+    try {
+      await publicClient.waitForTransactionReceipt({ hash: txHash as `0x${string}`, timeout: 120_000 });
+    } catch (receiptErr: any) {
+      const msg: string = receiptErr?.message ?? "";
+      if (!msg.includes("could not be found") && !msg.includes("not be processed")) throw receiptErr;
+      // Timeout — tx is in-flight, continue to clear proxyWalletAddress
+    }
 
     // Clear proxyWalletAddress from localStorage — tokens are now in main wallet.
     try {
