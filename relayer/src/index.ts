@@ -564,7 +564,18 @@ const server = createServer((req, res) => {
               maxFeePerGas:         2_000_000_000_000n, // 2000 gwei — handles mainnet spikes
             });
 
-            await publicClient.waitForTransactionReceipt({ hash: txHash });
+            // Wait up to 120 s for the receipt. If polling times out the tx is already
+            // in-flight and the nullifier will be set on-chain — treat as submitted-OK.
+            try {
+              await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 120_000 });
+            } catch (receiptErr: any) {
+              const msg: string = receiptErr?.message ?? "";
+              if (msg.includes("could not be found") || msg.includes("not be processed")) {
+                console.warn(`[Relayer] claimWithProof receipt timeout for ${txHash} — tx submitted, treating as done`);
+              } else {
+                throw receiptErr; // real error (e.g. revert) — propagate to outer catch
+              }
+            }
             console.log(`[Relayer] claimWithProof tx: ${txHash} (batch ${batchId}, recipient ${recipient})`);
 
             // 5. If ProxyWallet + CTF token ID provided, build wrap digest for the frontend to sign.
@@ -785,7 +796,7 @@ const server = createServer((req, res) => {
           account:      walletClientGlobal.account,
         });
         const txHash = await walletClientGlobal.writeContract(request as any);
-        await publicClient.waitForTransactionReceipt({ hash: txHash });
+        await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 120_000 });
 
         console.log(
           `[Relayer] proxy-transfer: tokenId=${tokenId} amount=${amount} ` +

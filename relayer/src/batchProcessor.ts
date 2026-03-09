@@ -607,7 +607,7 @@ export class BatchProcessor {
           args:         [operator, true],
           ...chainGas(this.config.chainId),
         });
-        await this.publicClient.waitForTransactionReceipt({ hash });
+        await this.publicClient.waitForTransactionReceipt({ hash, timeout: 120_000 });
         console.log(`[BatchProcessor] CTF approval set for ${label} (tx: ${hash})`);
       } else {
         console.log(`[BatchProcessor] ensureApprovals: CTF already approved for ${label} ✓`);
@@ -634,7 +634,7 @@ export class BatchProcessor {
         args:         [this.config.vaultAddress, MAX_UINT],
         ...chainGas(this.config.chainId),
       });
-      await this.publicClient.waitForTransactionReceipt({ hash });
+      await this.publicClient.waitForTransactionReceipt({ hash, timeout: 120_000 });
       console.log(`[BatchProcessor] USDC max approval set for vault (tx: ${hash})`);
     } else {
       console.log("[BatchProcessor] ensureApprovals: USDC allowance already sufficient ✓");
@@ -669,7 +669,7 @@ export class BatchProcessor {
           args:         [exchange, MAX_UINT],
           ...chainGas(this.config.chainId),
         });
-        await this.publicClient.waitForTransactionReceipt({ hash });
+        await this.publicClient.waitForTransactionReceipt({ hash, timeout: 120_000 });
         console.log(`[BatchProcessor] USDC max approval set for ${label} (tx: ${hash})`);
       } else {
         console.log(`[BatchProcessor] ensureApprovals: USDC allowance for ${label} already sufficient ✓`);
@@ -758,7 +758,7 @@ export class BatchProcessor {
       args:         [marketId, clobYesTokenId, clobNoTokenId],
       ...chainGas(this.config.chainId),
     });
-    await this.publicClient.waitForTransactionReceipt({ hash });
+    await this.publicClient.waitForTransactionReceipt({ hash, timeout: 120_000 });
     console.log(`[BatchProcessor] ensureMarketTokenIds: setMarketTokenIds tx: ${hash} ✓`);
   }
 
@@ -814,7 +814,7 @@ export class BatchProcessor {
       ...chainGas(this.config.chainId),
     });
 
-    await this.publicClient.waitForTransactionReceipt({ hash });
+    await this.publicClient.waitForTransactionReceipt({ hash, timeout: 120_000 });
     console.log(`[BatchProcessor] ${fnName} tx: ${hash} (trader=${signer} hidden)`);
 
     // Store order keyed by commitment hash — used for matching at settlement.
@@ -867,7 +867,7 @@ export class BatchProcessor {
       ...chainGas(this.config.chainId),
     });
 
-    await this.publicClient.waitForTransactionReceipt({ hash });
+    await this.publicClient.waitForTransactionReceipt({ hash, timeout: 120_000 });
     console.log(`[BatchProcessor] ${fnName} tx: ${hash} (seller=${signer})`);
 
     // Sell orders: no TransferAuth (tokens deposited, not USDC)
@@ -907,7 +907,7 @@ export class BatchProcessor {
       ...chainGas(this.config.chainId),
     });
 
-    await this.publicClient.waitForTransactionReceipt({ hash });
+    await this.publicClient.waitForTransactionReceipt({ hash, timeout: 120_000 });
 
     const batchId = await this.publicClient.readContract({
       address: this.config.vaultAddress,
@@ -929,7 +929,7 @@ export class BatchProcessor {
       args: [this.config.marketId],
       ...chainGas(this.config.chainId),
     });
-    await this.publicClient.waitForTransactionReceipt({ hash });
+    await this.publicClient.waitForTransactionReceipt({ hash, timeout: 120_000 });
     console.log(`[BatchProcessor] closeBatch tx: ${hash} (market: ${this.config.marketId})`);
   }
 
@@ -1197,7 +1197,7 @@ export class BatchProcessor {
         args: [BigInt(orders.length)],
         ...chainGas(this.config.chainId),
       });
-      await this.publicClient.waitForTransactionReceipt({ hash: adapterHash });
+      await this.publicClient.waitForTransactionReceipt({ hash: adapterHash, timeout: 120_000 });
       console.log(`[BatchProcessor] PublicInputAdapter ready (tx: ${adapterHash})`);
     }
 
@@ -1269,7 +1269,7 @@ export class BatchProcessor {
         ],
         ...chainGas(this.config.chainId),
       });
-      await this.publicClient.waitForTransactionReceipt({ hash: lockHash });
+      await this.publicClient.waitForTransactionReceipt({ hash: lockHash, timeout: 120_000 });
       console.log(`[BatchProcessor] lockFunds tx: ${lockHash} — batch ${batchId} is LOCKED`);
     } else {
       console.log(`[BatchProcessor] Phase 1: skipped (batch ${batchId} already LOCKED)`);
@@ -1363,7 +1363,7 @@ export class BatchProcessor {
       ...chainGas(this.config.chainId),
     });
 
-    await this.publicClient.waitForTransactionReceipt({ hash: settleHash });
+    await this.publicClient.waitForTransactionReceipt({ hash: settleHash, timeout: 120_000 });
     console.log(`[BatchProcessor] Batch ${batchId} settled! tx: ${settleHash}`);
 
     // Clean up order store
@@ -1458,7 +1458,7 @@ export class BatchProcessor {
           ...chainGas(this.config.chainId),
         });
 
-        await this.publicClient.waitForTransactionReceipt({ hash });
+        await this.publicClient.waitForTransactionReceipt({ hash, timeout: 120_000 });
 
         // Determine the new batch ID (the currently-open batch for this market)
         const newBatchId = await this.publicClient.readContract({
