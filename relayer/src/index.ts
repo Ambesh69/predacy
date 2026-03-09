@@ -1344,7 +1344,7 @@ async function sealBatch(state: MarketState, marketId: `0x${string}`, marketKey:
 const poll = async () => {
   if (missingVars.length > 0) return;
   try {
-    const toBlock = await publicClient.getBlockNumber();
+    const toBlock = (await publicClient.getBlockNumber()) - 2n; // avoid dRPC "Unknown block" (code 26) for chain-tip blocks
     if (toBlock < fromBlock) return;
 
     const [closedLogs, settledLogs] = await Promise.all([
