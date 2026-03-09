@@ -491,7 +491,7 @@ library ZKTranscriptLib {
         uint256 vkHash,
         uint256 publicInputsSize,
         uint256 logN
-    ) external pure returns (ZKTranscript memory t) {
+    ) internal pure returns (ZKTranscript memory t) {
         Fr previousChallenge;
         (t.relationParameters, previousChallenge) =
             generateRelationParametersChallenges(proof, publicInputs, vkHash, publicInputsSize, previousChallenge);
