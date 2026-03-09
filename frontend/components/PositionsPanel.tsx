@@ -713,7 +713,9 @@ export default function PositionsPanel({
           // timeout caused the claim job to error before persisting it), derive it now
           // from the ephemeral address so "MOVE TO WALLET / SHIELD VIA RAILGUN" appears.
           // Runs even when claimed was already true from localStorage (order.claimed===true).
-          if (claimed && !order.proxyWalletAddress && order.ephemeralAddress && PROXY_WALLET_FACTORY) {
+          // NOTE: skip when proxyWalletAddress===null — that means tokens were already
+          // moved to the main wallet (handleTransferFromProxy sets null on success).
+          if (claimed && order.proxyWalletAddress === undefined && order.ephemeralAddress && PROXY_WALLET_FACTORY) {
             try {
               const derived = await publicClient.readContract({
                 address:      PROXY_WALLET_FACTORY,
