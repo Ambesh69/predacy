@@ -348,7 +348,7 @@ function MultiOutcomeChart({ markets, selectedMarketId }: { markets: Market[]; s
           </div>
         ) : (
           <svg viewBox={`0 0 ${VW} ${VH}`} width="100%" height="100%"
-            preserveAspectRatio="none"
+            preserveAspectRatio="xMidYMid meet"
             style={{ display: "block", cursor: "crosshair" }}
             onMouseMove={handleMouseMove}
             onMouseLeave={() => setHoverX(null)}
@@ -379,7 +379,27 @@ function MultiOutcomeChart({ markets, selectedMarketId }: { markets: Market[]; s
                 <g key={i}>
                   <path d={path} fill="none" stroke={line.color}
                     strokeWidth={isSelected ? "2.8" : "1.35"} strokeLinejoin="round" strokeLinecap="round"
+                    vectorEffect="non-scaling-stroke"
                     opacity={isSelected || !selectedMarketId ? 0.95 : 0.32} />
+                  <path
+                    d={path}
+                    fill="none"
+                    stroke={line.color}
+                    strokeWidth={isSelected ? "1.8" : "1.2"}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    vectorEffect="non-scaling-stroke"
+                    strokeDasharray="5 22"
+                    strokeOpacity={isSelected || !selectedMarketId ? 0.52 : 0.2}
+                  >
+                    <animate
+                      attributeName="stroke-dashoffset"
+                      from="0"
+                      to="-108"
+                      dur={isSelected ? "3.4s" : "5.1s"}
+                      repeatCount="indefinite"
+                    />
+                  </path>
                   {last && !inPlot && (
                     <g>
                       {/* Pulsating outer ring */}
