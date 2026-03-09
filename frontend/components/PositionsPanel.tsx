@@ -4,12 +4,18 @@ import { useState, useEffect, useCallback } from "react";
 import { createPublicClient, http, keccak256, encodeAbiParameters } from "viem";
 import { clsx } from "clsx";
 import { BATCH_VAULT_ABI, PROXY_WALLET_FACTORY_ABI, BatchStatus, getContracts } from "@/lib/contracts";
-import { ACTIVE_CHAIN } from "@/lib/chain";
+import { ACTIVE_CHAIN, IS_MAINNET } from "@/lib/chain";
 
 const publicClient = createPublicClient({
   chain: ACTIVE_CHAIN,
   transport: http(),
 });
+
+// ProxyWalletFactory address — env var preferred, falls back to known mainnet address.
+const PROXY_WALLET_FACTORY = (
+  process.env.NEXT_PUBLIC_PROXY_WALLET_FACTORY ||
+  (IS_MAINNET ? "0x7608A95420c107503837dE35E25bf360bEe82f38" : undefined)
+) as `0x${string}` | undefined;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -705,10 +711,9 @@ export default function PositionsPanel({
                 // the "MOVE TO WALLET / SHIELD VIA RAILGUN" buttons re-appear.
                 if (!order.proxyWalletAddress && order.ephemeralAddress) {
                   try {
-                    const proxyFactoryAddress = process.env.NEXT_PUBLIC_PROXY_WALLET_FACTORY as `0x${string}` | undefined;
-                    if (proxyFactoryAddress) {
+                    if (PROXY_WALLET_FACTORY) {
                       const derived = await publicClient.readContract({
-                        address:      proxyFactoryAddress,
+                        address:      PROXY_WALLET_FACTORY,
                         abi:          PROXY_WALLET_FACTORY_ABI,
                         functionName: "computeAddress",
                         args:         [order.ephemeralAddress as `0x${string}`],
