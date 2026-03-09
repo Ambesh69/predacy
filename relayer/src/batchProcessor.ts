@@ -952,6 +952,45 @@ export class BatchProcessor {
    *   Net result: relayer never uses its own USDC capital.
    *   All USDC for gap fills comes from user deposits routed through the vault.
    */
+  /**
+   * Wait for a tx receipt, but fall back to on-chain status verification if
+   * receipt polling times out or returns "not found" (RPC node lag).
+   *
+   * @param hash        - tx hash to wait for
+   * @param batchId     - batch being processed (for on-chain status check)
+   * @param okStatus    - BatchStatus value that confirms the tx succeeded (2=LOCKED, 4=SETTLED)
+   * @param label       - log label for diagnostics
+   */
+  private async _waitReceiptOrVerify(
+    hash:     `0x${string}`,
+    batchId:  bigint,
+    okStatus: number,
+    label:    string,
+  ): Promise<void> {
+    try {
+      await this.publicClient.waitForTransactionReceipt({ hash, timeout: 120_000 });
+    } catch (err: any) {
+      const msg: string = err?.message ?? "";
+      if (!msg.includes("could not be found") && !msg.includes("not be processed")) {
+        throw err; // real error (revert, network failure) — propagate
+      }
+      // Receipt polling timed out — verify on-chain status instead.
+      console.warn(`[BatchProcessor] ${label} receipt timeout for ${hash} — verifying on-chain status`);
+      const batchInfo = await this.publicClient.readContract({
+        address:      this.config.vaultAddress,
+        abi:          BATCH_VAULT_ABI,
+        functionName: "getBatch",
+        args:         [batchId],
+      }) as { status: number };
+      if (batchInfo.status !== okStatus) {
+        throw new Error(
+          `[BatchProcessor] ${label} receipt timeout and on-chain status=${batchInfo.status} ≠ expected ${okStatus} — tx may have failed`,
+        );
+      }
+      console.log(`[BatchProcessor] ${label} confirmed via on-chain status (${okStatus}) ✓`);
+    }
+  }
+
   async processBatch(batchId: bigint): Promise<{ excludedOrders: Array<{ order: Order; commitment: `0x${string}` }> }> {
     console.log(`[BatchProcessor] Processing batch ${batchId}`);
 
@@ -1269,7 +1308,7 @@ export class BatchProcessor {
         ],
         ...chainGas(this.config.chainId),
       });
-      await this.publicClient.waitForTransactionReceipt({ hash: lockHash, timeout: 120_000 });
+      await this._waitReceiptOrVerify(lockHash, batchId, 2 /* LOCKED */, "lockFunds");
       console.log(`[BatchProcessor] lockFunds tx: ${lockHash} — batch ${batchId} is LOCKED`);
     } else {
       console.log(`[BatchProcessor] Phase 1: skipped (batch ${batchId} already LOCKED)`);
@@ -1363,7 +1402,7 @@ export class BatchProcessor {
       ...chainGas(this.config.chainId),
     });
 
-    await this.publicClient.waitForTransactionReceipt({ hash: settleHash, timeout: 120_000 });
+    await this._waitReceiptOrVerify(settleHash, batchId, 4 /* SETTLED */, "settleBatch");
     console.log(`[BatchProcessor] Batch ${batchId} settled! tx: ${settleHash}`);
 
     // Clean up order store
