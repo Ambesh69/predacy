@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { createPublicClient, http, keccak256, encodeAbiParameters } from "viem";
 import { clsx } from "clsx";
-import { BATCH_VAULT_ABI, BatchStatus, getContracts } from "@/lib/contracts";
+import { BATCH_VAULT_ABI, PROXY_WALLET_FACTORY_ABI, BatchStatus, getContracts } from "@/lib/contracts";
 import { ACTIVE_CHAIN } from "@/lib/chain";
 
 const publicClient = createPublicClient({
@@ -699,6 +699,30 @@ export default function PositionsPanel({
                     all.map((o) => o.batchId === order.batchId ? { ...o, claimed: true } : o)
                   ));
                 } catch { /* ignore */ }
+
+                // Recovery: if the claim job errored before storing proxyWalletAddress
+                // (e.g. receipt timeout), derive it now from the ephemeral address so
+                // the "MOVE TO WALLET / SHIELD VIA RAILGUN" buttons re-appear.
+                if (!order.proxyWalletAddress && order.ephemeralAddress) {
+                  try {
+                    const proxyFactoryAddress = process.env.NEXT_PUBLIC_PROXY_WALLET_FACTORY as `0x${string}` | undefined;
+                    if (proxyFactoryAddress) {
+                      const derived = await publicClient.readContract({
+                        address:      proxyFactoryAddress,
+                        abi:          PROXY_WALLET_FACTORY_ABI,
+                        functionName: "computeAddress",
+                        args:         [order.ephemeralAddress as `0x${string}`],
+                      }) as `0x${string}`;
+                      order.proxyWalletAddress = derived;
+                      // Persist so future scans don't need to re-derive
+                      const sk = `predacy:orders:${walletAddress.toLowerCase()}`;
+                      const all: Array<Record<string, unknown>> = JSON.parse(localStorage.getItem(sk) ?? "[]");
+                      localStorage.setItem(sk, JSON.stringify(
+                        all.map((o) => o.batchId === order.batchId ? { ...o, proxyWalletAddress: derived } : o)
+                      ));
+                    }
+                  } catch { /* ignore — will just show CLOSE POSITION as fallback */ }
+                }
               }
             } catch { /* leave as unclaimed */ }
           }
