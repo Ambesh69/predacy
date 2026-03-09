@@ -310,6 +310,13 @@ const ADAPTER_ABI = [
     outputs: [],
     stateMutability: "nonpayable",
   },
+  {
+    name: "pendingOrderCount",
+    type: "function",
+    inputs: [],
+    outputs: [{ name: "", type: "uint256" }],
+    stateMutability: "view",
+  },
 ] as const;
 
 // ConditionalTokens ERC-1155 ABI — minimal subset for relayer approval setup + NegRisk split
@@ -1236,7 +1243,26 @@ export class BatchProcessor {
         args: [BigInt(orders.length)],
         ...chainGas(this.config.chainId),
       });
-      await this.publicClient.waitForTransactionReceipt({ hash: adapterHash, timeout: 120_000 });
+      try {
+        await this.publicClient.waitForTransactionReceipt({ hash: adapterHash, timeout: 120_000 });
+      } catch (err: any) {
+        const msg: string = err?.message ?? "";
+        if (!msg.includes("could not be found") && !msg.includes("not be processed")) throw err;
+        // Receipt polling timed out — verify adapter state directly
+        console.warn(`[BatchProcessor] setPendingOrderCount receipt timeout for ${adapterHash} — verifying adapter state`);
+        const onChainCount = await this.publicClient.readContract({
+          address: this.config.adapterAddress!,
+          abi:     ADAPTER_ABI,
+          functionName: "pendingOrderCount",
+          args:    [],
+        }) as bigint;
+        if (onChainCount !== BigInt(orders.length)) {
+          throw new Error(
+            `[BatchProcessor] setPendingOrderCount receipt timeout and adapter pendingOrderCount=${onChainCount} ≠ expected ${orders.length}`,
+          );
+        }
+        console.log(`[BatchProcessor] setPendingOrderCount confirmed via adapter state (${onChainCount}) ✓`);
+      }
       console.log(`[BatchProcessor] PublicInputAdapter ready (tx: ${adapterHash})`);
     }
 
