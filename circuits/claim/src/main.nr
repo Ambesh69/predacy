@@ -20,7 +20,7 @@
 //   nullifier_lo        - low  128 bits of nullifier
 //   recipient           - address that receives the payout (chosen by prover, as Field)
 //   fills               - whether the order filled
-//   fill_amount         - USDC or tokens received
+//   fill_amount         - USDC for BUY orders; token qty for SELL orders (contract converts to USDC)
 //   refund_amount       - assets returned if unfilled
 //   side_out            - order side echoed from private input (0=YES_BUY,1=YES_SELL,2=NO_BUY,3=NO_SELL)
 //
@@ -266,11 +266,10 @@ fn main(
             assert(fill_amount == amount, "fill_amount must equal order amount for filled buy");
             assert(refund_amount == 0, "refund_amount must be 0 for filled buy");
         } else {
-            // Filled sell: USDC proceeds = amount * effective_price / PRICE_DECIMALS
-            // YES_SELL uses clearing_price; NO_SELL uses no_price
-            let effective_price: u64 = if side == YES_SELL { clearing_price } else { no_price };
-            let expected_usdc: u64 = (amount * effective_price) / PRICE_DECIMALS;
-            assert(fill_amount == expected_usdc, "fill_amount mismatch for filled sell");
+            // Filled sell: fill_amount = token qty (contract converts to USDC at clearing price).
+            // BatchVault._executePayout does: usdcPayout = (fillAmount * clearingPrice) / PRICE_DECIMALS
+            // so the public input must carry the raw token qty, not the pre-computed USDC amount.
+            assert(fill_amount == amount, "fill_amount must equal token qty for filled sell");
             assert(refund_amount == 0, "refund_amount must be 0 for filled sell");
         }
     } else {
