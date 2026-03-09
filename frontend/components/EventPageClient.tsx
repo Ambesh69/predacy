@@ -741,7 +741,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   const handleClosePosition = useCallback((yesAmount: bigint, clearingPrice: bigint) => {
     setSellPrefill(yesAmount);
     setCloseBuyClearingPrice(clearingPrice);
-    setActiveTab("order");
+    setLeftTab("outcomes"); // Switch left panel back to outcomes so user sees trade form
   }, []);
 
   // ── Claim position via ZK proof (relayer submits on-chain — no wallet tx needed) ──
@@ -1688,53 +1688,55 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
             <OrderbookPanel market={selectedMarket} />
           ) : leftTab === "positions" ? (
             isConnected && walletAddress ? (
-              {/* Requeue notification banner */}
-              {requeueNotif && (
-                <div className={clsx(
-                  "px-4 py-3 border-b border-border flex items-start gap-3",
-                  requeueNotif.type === "requeued" ? "bg-accent/5" : "bg-red-900/10",
-                )}>
-                  <div className="flex-1 space-y-0.5">
-                    {requeueNotif.type === "requeued" ? (
-                      <>
-                        <p className="text-[10px] text-accent tracking-widest uppercase">Order Requeued</p>
-                        <p className="text-[11px] text-muted-dim">
-                          Your limit was outside this batch&apos;s clearing price. Your order has been automatically moved to
-                          {requeueNotif.toBatch ? ` Batch #${requeueNotif.toBatch}` : " the next batch"}.
-                          {requeueNotif.remainingAuths === 0 && " This is your last auto-requeue — if excluded again, the order expires."}
-                        </p>
-                      </>
-                    ) : (
-                      <>
-                        <p className="text-[10px] tracking-widest uppercase" style={{ color: "#FF6B6B" }}>Order Expired</p>
-                        <p className="text-[11px] text-muted-dim">
-                          Your limit price was consistently outside the clearing price. The order has been dropped. Place a new order closer to the current market price.
-                        </p>
-                      </>
-                    )}
+              <>
+                {/* Requeue notification banner */}
+                {requeueNotif && (
+                  <div className={clsx(
+                    "px-4 py-3 border-b border-border flex items-start gap-3",
+                    requeueNotif.type === "requeued" ? "bg-accent/5" : "bg-red-900/10",
+                  )}>
+                    <div className="flex-1 space-y-0.5">
+                      {requeueNotif.type === "requeued" ? (
+                        <>
+                          <p className="text-[10px] text-accent tracking-widest uppercase">Order Requeued</p>
+                          <p className="text-[11px] text-muted-dim">
+                            Your limit was outside this batch&apos;s clearing price. Your order has been automatically moved to
+                            {requeueNotif.toBatch ? ` Batch #${requeueNotif.toBatch}` : " the next batch"}.
+                            {requeueNotif.remainingAuths === 0 && " This is your last auto-requeue — if excluded again, the order expires."}
+                          </p>
+                        </>
+                      ) : (
+                        <>
+                          <p className="text-[10px] tracking-widest uppercase" style={{ color: "#FF6B6B" }}>Order Expired</p>
+                          <p className="text-[11px] text-muted-dim">
+                            Your limit price was consistently outside the clearing price. The order has been dropped. Place a new order closer to the current market price.
+                          </p>
+                        </>
+                      )}
+                    </div>
+                    <button
+                      onClick={() => setRequeueNotif(null)}
+                      className="text-muted hover:text-text transition-colors text-lg leading-none mt-0.5"
+                      aria-label="Dismiss"
+                    >×</button>
                   </div>
-                  <button
-                    onClick={() => setRequeueNotif(null)}
-                    className="text-muted hover:text-text transition-colors text-lg leading-none mt-0.5"
-                    aria-label="Dismiss"
-                  >×</button>
-                </div>
-              )}
-              <PositionsPanel
-                walletAddress={walletAddress}
-                marketId={selectedMarketId}
-                currentBatchId={batch.batchId}
-                currentBatchStatus={batch.status}
-                currentBatchClearingPrice={batch.clearingPrice}
-                currentBatchCommitments={commitments
-                  .filter((c) => c.trader === walletAddress)
-                  .map((c) => ({ hash: c.hash, amount: c.amount }))}
-                onClaim={handleClaimPosition}
-                onClosePosition={handleClosePosition}
-                onMarketIdsFound={setHistoricalMarketIds}
-                onSweepUnfilled={handleSweepUnfilled}
-                onTransferFromProxy={handleTransferFromProxy}
-              />
+                )}
+                <PositionsPanel
+                  walletAddress={walletAddress}
+                  marketId={selectedMarketId}
+                  currentBatchId={batch.batchId}
+                  currentBatchStatus={batch.status}
+                  currentBatchClearingPrice={batch.clearingPrice}
+                  currentBatchCommitments={commitments
+                    .filter((c) => c.trader === walletAddress)
+                    .map((c) => ({ hash: c.hash, amount: c.amount }))}
+                  onClaim={handleClaimPosition}
+                  onClosePosition={handleClosePosition}
+                  onMarketIdsFound={setHistoricalMarketIds}
+                  onSweepUnfilled={handleSweepUnfilled}
+                  onTransferFromProxy={handleTransferFromProxy}
+                />
+              </>
             ) : (
               <div className="flex-1 flex flex-col items-center justify-center gap-3 p-6">
                 <p className="text-muted text-xs text-center">Connect your wallet to view positions</p>
