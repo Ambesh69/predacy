@@ -175,10 +175,10 @@ body::after {
 }
 
 @keyframes cardShimmer {
-  0% { transform: translateX(-140%); opacity: 0; }
-  12% { opacity: 0.35; }
-  46% { opacity: 0.12; }
-  100% { transform: translateX(180%); opacity: 0; }
+  0% { transform: translateX(-165%); opacity: 0; }
+  16% { opacity: 0.75; }
+  44% { opacity: 0.3; }
+  100% { transform: translateX(210%); opacity: 0; }
 }
 
 .ticker-content {
@@ -190,23 +190,25 @@ body::after {
 .active-markets-grid .shimmer-card .market-card::after {
   content: '';
   position: absolute;
-  inset: -1px;
+  inset: -2px;
   background: linear-gradient(
     110deg,
-    transparent 35%,
-    rgba(255, 255, 255, 0.06) 47%,
-    rgba(78, 163, 255, 0.18) 52%,
-    rgba(44, 232, 198, 0.12) 56%,
-    transparent 68%
+    transparent 28%,
+    rgba(255, 255, 255, 0.14) 44%,
+    rgba(78, 163, 255, 0.34) 51%,
+    rgba(44, 232, 198, 0.28) 57%,
+    rgba(255, 255, 255, 0.1) 62%,
+    transparent 74%
   );
   transform: translateX(-140%);
   pointer-events: none;
   mix-blend-mode: screen;
-  animation: cardShimmer 7.2s ease-in-out infinite;
+  filter: saturate(1.35) brightness(1.05);
+  animation: cardShimmer 4.4s cubic-bezier(0.22, 0.61, 0.36, 1) infinite;
 }
 
 .active-markets-grid .shimmer-card .market-card:hover::after {
-  animation-duration: 4.8s;
+  animation-duration: 3.1s;
 }
 
 /* Input styles */

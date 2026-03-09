@@ -200,8 +200,24 @@ export default function PriceChart({ tokenId, currentPrice }: PriceChartProps) {
               strokeWidth="1.5"
               strokeLinejoin="round"
               strokeLinecap="round"
+              vectorEffect="non-scaling-stroke"
               strokeOpacity="0.7"
             />
+          )}
+          {hasData && (
+            <path
+              d={noLine}
+              fill="none"
+              stroke={NO_COLOR}
+              strokeWidth="1.15"
+              strokeLinejoin="round"
+              strokeLinecap="round"
+              vectorEffect="non-scaling-stroke"
+              strokeOpacity="0.4"
+              strokeDasharray="4 16"
+            >
+              <animate attributeName="stroke-dashoffset" from="0" to="-84" dur="4.6s" repeatCount="indefinite" />
+            </path>
           )}
 
           {/* YES line — drawn on top */}
@@ -213,7 +229,23 @@ export default function PriceChart({ tokenId, currentPrice }: PriceChartProps) {
               strokeWidth="1.5"
               strokeLinejoin="round"
               strokeLinecap="round"
+              vectorEffect="non-scaling-stroke"
             />
+          )}
+          {hasData && (
+            <path
+              d={yesLine}
+              fill="none"
+              stroke={YES_COLOR}
+              strokeWidth="1.15"
+              strokeLinejoin="round"
+              strokeLinecap="round"
+              vectorEffect="non-scaling-stroke"
+              strokeOpacity="0.46"
+              strokeDasharray="4 15"
+            >
+              <animate attributeName="stroke-dashoffset" from="0" to="-84" dur="3.9s" repeatCount="indefinite" />
+            </path>
           )}
 
           {/* No-data state */}
@@ -235,6 +267,18 @@ export default function PriceChart({ tokenId, currentPrice }: PriceChartProps) {
                 stroke={YES_COLOR} strokeWidth="0.75" strokeDasharray="2,3" strokeOpacity="0.5"
               />
               <circle cx={yesLast.x.toFixed(1)} cy={yesLast.y.toFixed(1)} r="2.5" fill={YES_COLOR} />
+              <circle
+                cx={yesLast.x.toFixed(1)}
+                cy={yesLast.y.toFixed(1)}
+                r="2.6"
+                fill="none"
+                stroke={YES_COLOR}
+                strokeOpacity="0.7"
+                strokeWidth="1"
+              >
+                <animate attributeName="r" from="2.6" to="7.8" dur="2.3s" repeatCount="indefinite" />
+                <animate attributeName="stroke-opacity" from="0.6" to="0" dur="2.3s" repeatCount="indefinite" />
+              </circle>
               <text
                 x={(W - PAD.r + 8).toFixed(1)} y={(yesLast.y + 4).toFixed(1)}
                 fill={YES_COLOR} fontSize="11" fontFamily={MONO}
@@ -253,6 +297,18 @@ export default function PriceChart({ tokenId, currentPrice }: PriceChartProps) {
                 stroke={NO_COLOR} strokeWidth="0.75" strokeDasharray="2,3" strokeOpacity="0.5"
               />
               <circle cx={noLast.x.toFixed(1)} cy={noLast.y.toFixed(1)} r="2.5" fill={NO_COLOR} />
+              <circle
+                cx={noLast.x.toFixed(1)}
+                cy={noLast.y.toFixed(1)}
+                r="2.6"
+                fill="none"
+                stroke={NO_COLOR}
+                strokeOpacity="0.66"
+                strokeWidth="1"
+              >
+                <animate attributeName="r" from="2.6" to="7.8" dur="2.7s" repeatCount="indefinite" />
+                <animate attributeName="stroke-opacity" from="0.58" to="0" dur="2.7s" repeatCount="indefinite" />
+              </circle>
               {/* Only show NO label if it doesn't overlap YES label */}
               {Math.abs(noLast.y - yesLast.y) > 14 && (
                 <text

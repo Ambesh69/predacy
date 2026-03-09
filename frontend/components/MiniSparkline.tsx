@@ -115,7 +115,21 @@ export default function MiniSparkline({ tokenId, currentPrice }: Props) {
           strokeWidth="1.5"
           strokeLinejoin="round"
           strokeLinecap="round"
+          vectorEffect="non-scaling-stroke"
         />
+        <path
+          d={linePath}
+          fill="none"
+          stroke={color}
+          strokeWidth="1.1"
+          strokeLinejoin="round"
+          strokeLinecap="round"
+          vectorEffect="non-scaling-stroke"
+          strokeOpacity="0.45"
+          strokeDasharray="3 12"
+        >
+          <animate attributeName="stroke-dashoffset" from="0" to="-48" dur="3.8s" repeatCount="indefinite" />
+        </path>
         {/* Current-price dot */}
         <circle
           cx={lastPt.x.toFixed(1)}
@@ -123,6 +137,18 @@ export default function MiniSparkline({ tokenId, currentPrice }: Props) {
           r="2"
           fill={color}
         />
+        <circle
+          cx={lastPt.x.toFixed(1)}
+          cy={lastPt.y.toFixed(1)}
+          r="2.2"
+          fill="none"
+          stroke={color}
+          strokeWidth="0.9"
+          strokeOpacity="0.65"
+        >
+          <animate attributeName="r" from="2.2" to="5.6" dur="2.2s" repeatCount="indefinite" />
+          <animate attributeName="stroke-opacity" from="0.65" to="0" dur="2.2s" repeatCount="indefinite" />
+        </circle>
       </svg>
 
       {/* 24 h delta badge */}
