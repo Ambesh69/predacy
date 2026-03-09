@@ -16,8 +16,10 @@ const chainId = parseInt(process.env.CHAIN_ID ?? "80002");
 const chain   = chainId === polygon.id ? polygon : polygonAmoy;
 
 const baseConfig = {
+  // polygon-rpc.com routes through 1rpc.io (same "tenant disabled" restrictions on eth_getLogs).
+  // polygon.drpc.org is a free public RPC that supports eth_getLogs without an API key.
   rpcUrl:            process.env.RPC_URL ?? (chainId === polygon.id
-    ? "https://polygon-rpc.com/"
+    ? "https://polygon.drpc.org"
     : "https://rpc-amoy.polygon.technology/"),
   chainId,
   vaultAddress:      (process.env.VAULT_ADDRESS      ?? "0x0000000000000000000000000000000000000000") as `0x${string}`,
