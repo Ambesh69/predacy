@@ -705,31 +705,30 @@ export default function PositionsPanel({
                     all.map((o) => o.batchId === order.batchId ? { ...o, claimed: true } : o)
                   ));
                 } catch { /* ignore */ }
-
-                // Recovery: if the claim job errored before storing proxyWalletAddress
-                // (e.g. receipt timeout), derive it now from the ephemeral address so
-                // the "MOVE TO WALLET / SHIELD VIA RAILGUN" buttons re-appear.
-                if (!order.proxyWalletAddress && order.ephemeralAddress) {
-                  try {
-                    if (PROXY_WALLET_FACTORY) {
-                      const derived = await publicClient.readContract({
-                        address:      PROXY_WALLET_FACTORY,
-                        abi:          PROXY_WALLET_FACTORY_ABI,
-                        functionName: "computeAddress",
-                        args:         [order.ephemeralAddress as `0x${string}`],
-                      }) as `0x${string}`;
-                      order.proxyWalletAddress = derived;
-                      // Persist so future scans don't need to re-derive
-                      const sk = `predacy:orders:${walletAddress.toLowerCase()}`;
-                      const all: Array<Record<string, unknown>> = JSON.parse(localStorage.getItem(sk) ?? "[]");
-                      localStorage.setItem(sk, JSON.stringify(
-                        all.map((o) => o.batchId === order.batchId ? { ...o, proxyWalletAddress: derived } : o)
-                      ));
-                    }
-                  } catch { /* ignore — will just show CLOSE POSITION as fallback */ }
-                }
               }
             } catch { /* leave as unclaimed */ }
+          }
+
+          // Recovery: if claimed but proxyWalletAddress was never stored (e.g. receipt
+          // timeout caused the claim job to error before persisting it), derive it now
+          // from the ephemeral address so "MOVE TO WALLET / SHIELD VIA RAILGUN" appears.
+          // Runs even when claimed was already true from localStorage (order.claimed===true).
+          if (claimed && !order.proxyWalletAddress && order.ephemeralAddress && PROXY_WALLET_FACTORY) {
+            try {
+              const derived = await publicClient.readContract({
+                address:      PROXY_WALLET_FACTORY,
+                abi:          PROXY_WALLET_FACTORY_ABI,
+                functionName: "computeAddress",
+                args:         [order.ephemeralAddress as `0x${string}`],
+              }) as `0x${string}`;
+              order.proxyWalletAddress = derived;
+              // Persist so future scans don't need to re-derive
+              const sk = `predacy:orders:${walletAddress.toLowerCase()}`;
+              const all: Array<Record<string, unknown>> = JSON.parse(localStorage.getItem(sk) ?? "[]");
+              localStorage.setItem(sk, JSON.stringify(
+                all.map((o) => o.batchId === order.batchId ? { ...o, proxyWalletAddress: derived } : o)
+              ));
+            } catch { /* ignore — will just show CLOSE POSITION as fallback */ }
           }
 
           const clearingPrice = batchRaw.clearingPrice ?? 0n;
