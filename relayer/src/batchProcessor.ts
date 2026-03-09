@@ -1,4 +1,4 @@
-import { createPublicClient, createWalletClient, http, encodeAbiParameters, keccak256 } from "viem";
+import { createPublicClient, createWalletClient, http, fallback, encodeAbiParameters, keccak256 } from "viem";
 import { polygon, polygonAmoy } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 import { computeClearingPrice, computeFillsAtPrice } from "./clearingPrice.js";
@@ -511,14 +511,29 @@ export class BatchProcessor {
     const account = privateKeyToAccount(config.relayerPrivateKey);
     const chain = config.chainId === polygon.id ? polygon : polygonAmoy;
 
+    // Build a fallback transport so transient RPC errors (410 GRPC cancellation, etc.)
+    // automatically retry on the next endpoint. On mainnet we layer two proven free RPCs;
+    // the primary is always config.rpcUrl (Railway env var) so ops can override.
+    // NOTE: polygon-rpc.com / 1rpc.io block eth_getLogs from Railway IPs (401 tenant disabled).
+    const MAINNET_FALLBACKS = ["https://polygon.drpc.org", "https://polygon.meowrpc.com"];
+    const buildTransport = () => {
+      if (config.chainId === polygon.id) {
+        const primary = config.rpcUrl;
+        const extras = MAINNET_FALLBACKS.filter((u) => u !== primary);
+        return fallback([http(primary), ...extras.map((u) => http(u))], { rank: false });
+      }
+      return http(config.rpcUrl);
+    };
+    const transport = buildTransport();
+
     this.publicClient = createPublicClient({
       chain,
-      transport: http(config.rpcUrl),
+      transport,
     });
 
     this.walletClient = createWalletClient({
       chain,
-      transport: http(config.rpcUrl),
+      transport,
       account,
     });
 
