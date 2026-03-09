@@ -348,7 +348,7 @@ function MultiOutcomeChart({ markets, selectedMarketId }: { markets: Market[]; s
           </div>
         ) : (
           <svg viewBox={`0 0 ${VW} ${VH}`} width="100%" height="100%"
-            preserveAspectRatio="xMidYMid meet"
+            preserveAspectRatio="none"
             style={{ display: "block", cursor: "crosshair" }}
             onMouseMove={handleMouseMove}
             onMouseLeave={() => setHoverX(null)}
@@ -510,8 +510,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   const [faucetLoading, setFaucetLoading] = useState(false);
   const [balanceVersion, setBalanceVersion] = useState(0);
   const [orderSealed, setOrderSealed] = useState(false);
-  const [activeTab, setActiveTab] = useState<"order" | "positions">("order");
-  const [leftTab, setLeftTab]     = useState<"outcomes" | "orderbook">("outcomes");
+  const [leftTab, setLeftTab]     = useState<"outcomes" | "positions" | "orderbook">("outcomes");
   const [claimLoading, setClaimLoading] = useState(false);
   const [historicalMarketIds, setHistoricalMarketIds] = useState<`0x${string}`[]>([]);
   // Pre-fill for SELL mode when user clicks "CLOSE POSITION" on a claimed entry.
@@ -689,11 +688,10 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     return () => { cancelled = true; clearInterval(iv); };
   }, [selectedMarketId]);
 
-  // Auto-switch to My Positions when the batch settles so the user sees the
-  // claim button immediately without having to refresh or click a tab.
+  // Auto-switch left panel to My Positions when batch settles so claim CTA is visible.
   useEffect(() => {
     if (batch.status === BatchStatus.SETTLED && isConnected) {
-      setActiveTab("positions");
+      setLeftTab("positions");
     }
   }, [batch.status, isConnected]);
 
@@ -1416,7 +1414,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
 
       if (isSplit) pushToast(`Order split across ${K} batches for lower price impact`, "success");
       setOrderSealed(true);
-      setActiveTab("positions");
+      setLeftTab("positions");
       // Poll requeue status for the last chunk (most recently committed).
       setRequeueNotif(null);
       setPendingRequeueCommitment(chunkOrders[chunkOrders.length - 1].chunkCommitment.toLowerCase());
@@ -1511,7 +1509,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       } catch { /* ignore */ }
     }
     setOrderSealed(true);
-    setActiveTab("positions");
+    setLeftTab("positions");
   };
 
   // ── Faucet ───────────────────────────────────────────────────────────────────
@@ -1558,7 +1556,6 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   const selNoPriceRaw = selectedMarket ? parseFloat(selectedMarket.outcomePrices?.[1] ?? "0") : 0;
   const selNoPrice    = selNoPriceRaw >= 0.999 ? (1 - selNoPriceRaw) : selNoPriceRaw;
   const selYesProb  = Math.round(selYesPrice * 100);
-  const selBarColor = selYesProb > 60 ? "#00FFB3" : selYesProb < 20 ? "#FF3355" : "#4D83FF";
 
   return (
     <div className="h-screen flex flex-col overflow-hidden">
@@ -1591,7 +1588,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         </div>
       </header>
 
-      {/* Event title */}
+      {/* Event title + selected outcome context */}
       <div className="border-b border-border px-6 py-4">
         <div className="flex items-center gap-2 mb-1.5 flex-wrap">
           {event.category && (
@@ -1605,6 +1602,27 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         <h1 className="text-xl font-black text-text tracking-tight leading-snug" style={{ fontFamily: "var(--font-display)" }}>
           {event.title}
         </h1>
+        <div className="mt-2.5 flex flex-wrap items-center gap-2.5 border border-border bg-surface/35 px-3 py-2">
+          <span className="text-[10px] text-muted tracking-widest uppercase">Selected</span>
+          <span className="text-sm font-bold text-text">
+            {selectedMarket ? outcomeLabel(selectedMarket) : "Select an outcome"}
+          </span>
+          {selectedMarket && (
+            <>
+              <span className="text-muted">•</span>
+              <span className="text-sm font-black text-text tabular-nums" style={{ fontFamily: "var(--font-display)" }}>
+                {selYesProb}% chance
+              </span>
+              <span className="text-muted">•</span>
+              <span className="text-[11px] text-accent tabular-nums">
+                YES {fmtCents(selYesPrice)}
+              </span>
+              <span className="text-[11px] text-danger tabular-nums">
+                NO {fmtCents(selNoPrice)}
+              </span>
+            </>
+          )}
+        </div>
       </div>
 
       {/* Chain error */}
@@ -1615,7 +1633,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         </div>
       )}
 
-      {/* Two-column: outcome list | trading panel */}
+      {/* Exploration + trading layout */}
       <div className="flex flex-1 min-h-0 flex-col xl:flex-row xl:divide-x xl:divide-border">
 
         {/* ── Left column: compact chart + scrollable outcome list ──────── */}
@@ -1624,7 +1642,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
           {/* Chart only shown on Outcomes tab — hide when Orderbook active to give it full height */}
           {leftTab === "outcomes" && <MultiOutcomeChart markets={event.markets} selectedMarketId={selectedMarket?.conditionId} />}
 
-          {/* Subheader with Outcomes / Orderbook tab toggle */}
+          {/* Subheader with Outcomes / My Positions / Orderbook tab toggle */}
           <div className="px-5 py-2.5 border-b border-border flex items-center justify-between flex-shrink-0">
             <span className="text-[10px] text-muted tracking-widest uppercase">
               {sorted.length} Outcomes
@@ -1639,6 +1657,16 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                 )}
               >
                 Outcomes
+              </button>
+              <button
+                type="button"
+                onClick={() => setLeftTab("positions")}
+                className={clsx(
+                  "px-3 py-1 border-l border-border transition-colors",
+                  leftTab === "positions" ? "text-text bg-surface/60" : "text-muted-dim hover:text-muted"
+                )}
+              >
+                My Positions
               </button>
               <button
                 type="button"
@@ -1658,6 +1686,66 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
 
           {leftTab === "orderbook" ? (
             <OrderbookPanel market={selectedMarket} />
+          ) : leftTab === "positions" ? (
+            isConnected && walletAddress ? (
+              {/* Requeue notification banner */}
+              {requeueNotif && (
+                <div className={clsx(
+                  "px-4 py-3 border-b border-border flex items-start gap-3",
+                  requeueNotif.type === "requeued" ? "bg-accent/5" : "bg-red-900/10",
+                )}>
+                  <div className="flex-1 space-y-0.5">
+                    {requeueNotif.type === "requeued" ? (
+                      <>
+                        <p className="text-[10px] text-accent tracking-widest uppercase">Order Requeued</p>
+                        <p className="text-[11px] text-muted-dim">
+                          Your limit was outside this batch&apos;s clearing price. Your order has been automatically moved to
+                          {requeueNotif.toBatch ? ` Batch #${requeueNotif.toBatch}` : " the next batch"}.
+                          {requeueNotif.remainingAuths === 0 && " This is your last auto-requeue — if excluded again, the order expires."}
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        <p className="text-[10px] tracking-widest uppercase" style={{ color: "#FF6B6B" }}>Order Expired</p>
+                        <p className="text-[11px] text-muted-dim">
+                          Your limit price was consistently outside the clearing price. The order has been dropped. Place a new order closer to the current market price.
+                        </p>
+                      </>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => setRequeueNotif(null)}
+                    className="text-muted hover:text-text transition-colors text-lg leading-none mt-0.5"
+                    aria-label="Dismiss"
+                  >×</button>
+                </div>
+              )}
+              <PositionsPanel
+                walletAddress={walletAddress}
+                marketId={selectedMarketId}
+                currentBatchId={batch.batchId}
+                currentBatchStatus={batch.status}
+                currentBatchClearingPrice={batch.clearingPrice}
+                currentBatchCommitments={commitments
+                  .filter((c) => c.trader === walletAddress)
+                  .map((c) => ({ hash: c.hash, amount: c.amount }))}
+                onClaim={handleClaimPosition}
+                onClosePosition={handleClosePosition}
+                onMarketIdsFound={setHistoricalMarketIds}
+                onSweepUnfilled={handleSweepUnfilled}
+                onTransferFromProxy={handleTransferFromProxy}
+              />
+            ) : (
+              <div className="flex-1 flex flex-col items-center justify-center gap-3 p-6">
+                <p className="text-muted text-xs text-center">Connect your wallet to view positions</p>
+                <button
+                  onClick={login}
+                  className="border border-border-bright text-text text-[11px] tracking-widest uppercase px-4 py-2 hover:border-text/30 transition-colors"
+                >
+                  Connect Wallet
+                </button>
+              </div>
+            )
           ) : (
           <div className="divide-y divide-border/40">
             {sorted.length === 0 && (
@@ -1741,127 +1829,35 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         </div>{/* end left column */}
 
         {/* ── Trading panel ────────────────────────────────────────────────── */}
-        <div className="w-[340px] xl:w-[380px] flex-shrink-0 flex flex-col overflow-hidden">
+        <div className="w-full xl:w-[380px] xl:flex-shrink-0 flex flex-col overflow-hidden border-t border-border xl:border-t-0">
 
           {selectedMarket ? (
             <>
-              {/* Selected outcome header */}
-              <div className="px-4 py-3 border-b border-border">
-                <div className="flex items-center gap-2 mb-1">
-                  <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: selBarColor }} />
-                  <span className="text-xs text-muted tracking-widest uppercase">{event.title}</span>
+              <div className="px-4 py-3 border-b border-border bg-surface/20">
+                <p className="text-[11px] text-muted tracking-widest uppercase">Trade</p>
+                <div className="mt-2">
+                  <label className="text-[10px] text-muted tracking-widest uppercase block mb-1">Outcome</label>
+                  <select
+                    value={selectedMarket.conditionId}
+                    onChange={(e) => {
+                      const next = sorted.find((m) => m.conditionId === e.target.value);
+                      if (!next) return;
+                      setSelectedMarket(next);
+                      setOrderSealed(false);
+                    }}
+                    className="w-full bg-surface border border-border text-[12px] text-text px-2.5 py-2 focus:outline-none focus:border-border-bright"
+                  >
+                    {sorted.map((market) => (
+                      <option key={market.conditionId} value={market.conditionId}>
+                        {outcomeLabel(market)}
+                      </option>
+                    ))}
+                  </select>
                 </div>
-                <p className="text-sm font-bold text-text leading-snug">{outcomeLabel(selectedMarket)}</p>
-                <div className="flex items-center gap-2 mt-1.5">
-                  <span className="text-2xl font-black" style={{ fontFamily: "var(--font-display)", color: selBarColor }}>
-                    {fmtPct(selYesPrice)}
-                  </span>
-                  <span className="text-[10px] text-muted tracking-widest uppercase">chance</span>
-                  <div className="ml-auto flex items-center gap-1.5">
-                    <span className="text-[10px] px-1.5 py-0.5 border font-mono" style={{ borderColor: "#00FFB340", color: "#00FFB3", background: "#00FFB308" }}>
-                      YES {fmtCents(selYesPrice)}
-                    </span>
-                    <span className="text-[10px] px-1.5 py-0.5 border font-mono"
-                      style={{ borderColor: "#FF335540", color: "#FF3355", background: "#FF335508" }}>
-                      NO {fmtCents(selNoPrice)}
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Order / My Positions tab bar */}
-              <div className="border-b border-border px-4 flex items-center">
-                <button
-                  type="button"
-                  onClick={() => { setActiveTab("order"); setOrderSealed(false); setRequeueNotif(null); setPendingRequeueCommitment(null); }}
-                  className={clsx(
-                    "px-3 py-3 text-[10px] tracking-widest uppercase transition-colors border-b-2",
-                    activeTab === "order"
-                      ? "border-text/40 text-text"
-                      : "border-transparent text-muted hover:text-text"
-                  )}
-                >
-                  Order
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab("positions")}
-                  className={clsx(
-                    "px-3 py-3 text-[10px] tracking-widest uppercase transition-colors border-b-2",
-                    activeTab === "positions"
-                      ? "border-text/40 text-text"
-                      : "border-transparent text-muted hover:text-text"
-                  )}
-                >
-                  My Positions
-                </button>
               </div>
 
               {/* Tab content — scrolls internally, BatchTimer pinned below */}
               <div className="flex-1 min-h-0 overflow-y-auto">
-              {activeTab === "positions" ? (
-                isConnected && walletAddress ? (
-                  <>
-                  {/* Requeue notification banner */}
-                  {requeueNotif && (
-                    <div className={clsx(
-                      "px-4 py-3 border-b border-border flex items-start gap-3",
-                      requeueNotif.type === "requeued" ? "bg-accent/5" : "bg-red-900/10",
-                    )}>
-                      <div className="flex-1 space-y-0.5">
-                        {requeueNotif.type === "requeued" ? (
-                          <>
-                            <p className="text-[10px] text-accent tracking-widest uppercase">Order Requeued</p>
-                            <p className="text-[11px] text-muted-dim">
-                              Your limit was outside this batch&apos;s clearing price. Your order has been automatically moved to
-                              {requeueNotif.toBatch ? ` Batch #${requeueNotif.toBatch}` : " the next batch"}.
-                              {requeueNotif.remainingAuths === 0 && " This is your last auto-requeue — if excluded again, the order expires."}
-                            </p>
-                          </>
-                        ) : (
-                          <>
-                            <p className="text-[10px] tracking-widest uppercase" style={{ color: "#FF6B6B" }}>Order Expired</p>
-                            <p className="text-[11px] text-muted-dim">
-                              Your limit price was consistently outside the clearing price. The order has been dropped. Place a new order closer to the current market price.
-                            </p>
-                          </>
-                        )}
-                      </div>
-                      <button
-                        onClick={() => setRequeueNotif(null)}
-                        className="text-muted hover:text-text transition-colors text-lg leading-none mt-0.5"
-                        aria-label="Dismiss"
-                      >×</button>
-                    </div>
-                  )}
-                  <PositionsPanel
-                    walletAddress={walletAddress}
-                    marketId={selectedMarketId}
-                    currentBatchId={batch.batchId}
-                    currentBatchStatus={batch.status}
-                    currentBatchClearingPrice={batch.clearingPrice}
-                    currentBatchCommitments={commitments
-                      .filter((c) => c.trader === walletAddress)
-                      .map((c) => ({ hash: c.hash, amount: c.amount }))}
-                    onClaim={handleClaimPosition}
-                    onClosePosition={handleClosePosition}
-                    onMarketIdsFound={setHistoricalMarketIds}
-                    onSweepUnfilled={handleSweepUnfilled}
-                    onTransferFromProxy={handleTransferFromProxy}
-                  />
-                  </>
-                ) : (
-                  <div className="flex-1 flex flex-col items-center justify-center gap-3 p-6">
-                    <p className="text-muted text-xs text-center">Connect your wallet to view positions</p>
-                    <button
-                      onClick={login}
-                      className="border border-border-bright text-text text-[11px] tracking-widest uppercase px-4 py-2 hover:border-text/30 transition-colors"
-                    >
-                      Connect Wallet
-                    </button>
-                  </div>
-                )
-              ) : (
                 <>
                   {/* Order sealed confirmation */}
                   {orderSealed && (
@@ -1895,7 +1891,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                             : "no cross"}.
                         </p>
                         <button
-                          onClick={() => setActiveTab("positions")}
+                          onClick={() => setLeftTab("positions")}
                           className="text-[10px] text-accent tracking-widest uppercase hover:underline"
                         >
                           VIEW MY POSITIONS →
@@ -1942,7 +1938,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                     </div>
                   )}
                 </>
-              )}
+              
               </div>{/* end flex-1 scrollable tab content */}
 
               {/* Compact batch timer — pinned at bottom of trading panel */}

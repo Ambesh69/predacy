@@ -366,7 +366,8 @@ export default function OrderForm({
           type="button"
           onClick={() => setMode("buy")}
           className={clsx(
-            "px-4 py-2.5 text-[11px] tracking-widest uppercase font-medium border-b-2 transition-colors",
+            "px-4 py-2.5 text-[11px]",
+            "tracking-widest uppercase font-medium border-b-2 transition-colors",
             mode === "buy" ? "border-accent text-accent" : "border-transparent text-muted hover:text-text"
           )}
         >
@@ -376,7 +377,8 @@ export default function OrderForm({
           type="button"
           onClick={() => setMode("sell")}
           className={clsx(
-            "px-4 py-2.5 text-[11px] tracking-widest uppercase font-medium border-b-2 border-l border-border transition-colors",
+            "px-4 py-2.5 text-[11px]",
+            "tracking-widest uppercase font-medium border-b-2 border-l border-border transition-colors",
             mode === "sell" ? "border-danger text-danger" : "border-transparent text-muted hover:text-text"
           )}
         >
@@ -588,20 +590,15 @@ export default function OrderForm({
                     {submitStep === "approving" ? "APPROVING CTF…" : "SIGNING ORDER…"}
                   </span>
                 ) : (
-                  `SEAL ${orderType === "market" ? "MKT" : "LMT"} SELL ${sellYes ? "YES" : "NO"} — ${amountDisplay || "0"} tokens`
+                  `Sell ${sellYes ? "YES" : "NO"}`
                 )}
               </button>
             )}
-            {isConnected && batchOpen && (() => {
-              const bal = sellYes ? yesBalance : noBalance;
-              return (
-                <p className="text-center text-[10px] text-muted-dim mt-2">
-                  {bal === 0n
-                    ? `No ${sellYes ? "YES" : "NO"} tokens in wallet — buy ${sellYes ? "YES" : "NO"} first.`
-                    : "1 tx (CTF approve, if needed) + 1 signature"}
-                </p>
-              );
-            })()}
+            {isConnected && batchOpen && amountNum > 0 && (
+              <p className="text-center text-[10px] text-muted-dim mt-2 tabular-nums">
+                Receive ${receiveUSDC.toFixed(2)} • Avg {(fillPrice * 100).toFixed(1)}¢
+              </p>
+            )}
           </div>
         </form>
       )}
@@ -819,13 +816,13 @@ export default function OrderForm({
                     {submitStep === "approving" ? "FUNDING EPHEMERAL…" : "SIGNING ORDER…"}
                   </span>
                 ) : (
-                  `SEAL ${orderType === "market" ? "MKT" : "LMT"} ${isBuy ? "BUY YES" : "BUY NO"} — $${amountDisplay || "0"}`
+                  isBuy ? "Buy YES" : "Buy NO"
                 )}
               </button>
             )}
-            {isConnected && batchOpen && (
-              <p className="text-center text-[10px] text-muted-dim mt-2">
-                1 tx (fund ephemeral) + 3 in-browser sigs — no MetaMask popups
+            {isConnected && batchOpen && amountNum > 0 && (
+              <p className="text-center text-[10px] text-muted-dim mt-2 tabular-nums">
+                Cost ${amountNum.toFixed(2)} • Est payout ${toWin.toFixed(2)}
               </p>
             )}
           </div>

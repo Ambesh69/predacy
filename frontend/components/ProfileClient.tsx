@@ -370,7 +370,7 @@ function SparklineChart({ points, positive }: { points: number[]; positive: bool
     // Single point or no data — render a flat line
     const color = positive ? "#22c55e" : "#ef4444";
     return (
-      <svg viewBox="0 0 200 60" className="w-full h-full" preserveAspectRatio="xMidYMid meet">
+      <svg viewBox="0 0 200 60" className="w-full h-full" preserveAspectRatio="none">
         <line x1="0" y1="30" x2="200" y2="30" stroke={color} strokeWidth="1.5" strokeOpacity="0.4" />
       </svg>
     );
@@ -394,7 +394,7 @@ function SparklineChart({ points, positive }: { points: number[]; positive: bool
   const gradId = `spark-${positive ? "pos" : "neg"}`;
 
   return (
-    <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-full" preserveAspectRatio="xMidYMid meet">
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-full" preserveAspectRatio="none">
       <defs>
         <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor={color} stopOpacity="0.25" />
