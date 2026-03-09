@@ -796,7 +796,18 @@ const server = createServer((req, res) => {
           account:      walletClientGlobal.account,
         });
         const txHash = await walletClientGlobal.writeContract(request as any);
-        await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 120_000 });
+        // Wait up to 120 s. If receipt polling times out the tx is already submitted
+        // and will land — treat as success so the frontend clears the proxyWalletAddress.
+        try {
+          await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 120_000 });
+        } catch (receiptErr: any) {
+          const msg: string = receiptErr?.message ?? "";
+          if (msg.includes("could not be found") || msg.includes("not be processed")) {
+            console.warn(`[Relayer] proxy-transfer receipt timeout for ${txHash} — tx submitted, treating as done`);
+          } else {
+            throw receiptErr;
+          }
+        }
 
         console.log(
           `[Relayer] proxy-transfer: tokenId=${tokenId} amount=${amount} ` +
