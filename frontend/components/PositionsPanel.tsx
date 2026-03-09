@@ -83,8 +83,21 @@ function computeYesAmount(filledAmount: bigint, clearingPrice: bigint): bigint {
   return filledAmount * 1_000_000n / clearingPrice;
 }
 
-function computeShares(filledAmount: bigint, clearingPrice: bigint): number {
-  if (clearingPrice === 0n || filledAmount === 0n) return 0;
+/**
+ * Compute the number of outcome tokens for display.
+ *
+ * Contract semantics (from BatchVault.sol Position struct):
+ *   BUY  orders: filledAmount = USDC spent       → shares = filledAmount / clearingPrice
+ *   SELL orders: filledAmount = token qty filled  → shares = filledAmount / 1e6  (already in tokens)
+ */
+function computeShares(filledAmount: bigint, clearingPrice: bigint, isSell: boolean): number {
+  if (filledAmount === 0n) return 0;
+  if (isSell) {
+    // filledAmount is token quantity (6-decimal). Just convert to human-readable.
+    return Number(filledAmount) / 1_000_000;
+  }
+  // BUY: filledAmount is USDC (6-decimal), clearingPrice is price per token (6-decimal).
+  if (clearingPrice === 0n) return 0;
   return Number(filledAmount * 1_000_000n / clearingPrice) / 1_000_000;
 }
 
@@ -169,6 +182,11 @@ function PositionRow({
   const isSell      = side === YES_SELL || side === NO_SELL;
   const avgCents    = clearingPrice > 0n ? (Number(clearingPrice) / 1e4).toFixed(1) : "—";
   const sharesDisp  = shares != null ? shares.toFixed(1) : "—";
+  // For SELL orders: filledAmount is token qty (6-dec), so USDC received = filledAmount * clearingPrice / 1e6.
+  // For BUY orders: filledAmount is already USDC (6-dec).
+  const usdcDisplay = isSell && clearingPrice > 0n
+    ? fUsdc(position.filledAmount * clearingPrice / 1_000_000n)
+    : fUsdc(position.filledAmount);
 
   return (
     <div className="px-4 py-3 border-b border-border/40 last:border-b-0 space-y-2">
@@ -191,7 +209,7 @@ function PositionRow({
             {shares != null && shares > 0 && (
               <span className="text-muted-dim"><span className="text-text font-mono">{sharesDisp}</span> shares</span>
             )}
-            <span className="text-muted-dim">{isSell ? "rcvd" : "cost"} <span className="text-text font-mono">{fUsdc(position.filledAmount)}</span></span>
+            <span className="text-muted-dim">{isSell ? "rcvd" : "cost"} <span className="text-text font-mono">{usdcDisplay}</span></span>
           </>
         )}
         {position.refundAmount > 0n && (
@@ -686,7 +704,7 @@ export default function PositionsPanel({
           }
 
           const clearingPrice = batchRaw.clearingPrice ?? 0n;
-          const shares = computeShares(posRaw.filledAmount, clearingPrice);
+          const shares = computeShares(posRaw.filledAmount, clearingPrice, !isBuyOrder);
 
           // Enrich activity row
           const idx = rawActivity.findIndex((r) => r.batchId === order.batchId);
