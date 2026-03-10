@@ -519,10 +519,11 @@ export class BatchProcessor {
     const chain = config.chainId === polygon.id ? polygon : polygonAmoy;
 
     // Build a fallback transport so transient RPC errors (410 GRPC cancellation, etc.)
-    // automatically retry on the next endpoint. On mainnet we layer two proven free RPCs;
+    // automatically retry on the next endpoint. On mainnet we layer polygon.drpc.org as backup;
     // the primary is always config.rpcUrl (Railway env var) so ops can override.
     // NOTE: polygon-rpc.com / 1rpc.io block eth_getLogs from Railway IPs (401 tenant disabled).
-    const MAINNET_FALLBACKS = ["https://polygon.drpc.org", "https://polygon.meowrpc.com"];
+    // NOTE: polygon.meowrpc.com removed — returns invalid JSON (HTML error pages) for eth_getLogs.
+    const MAINNET_FALLBACKS = ["https://polygon.drpc.org"];
     const buildTransport = () => {
       if (config.chainId === polygon.id) {
         const primary = config.rpcUrl;
