@@ -1527,13 +1527,18 @@ export class BatchProcessor {
     // 10M gas is a safe upper bound — HonkVerifier N=524288 uses ~5-7M gas.
     // Also pass SETTLE_ERRORS_ABI so viem decodes ZKProofInvalid / SumcheckFailed
     // if the tx reverts, instead of showing a generic "reverted".
+    //
+    // IMPORTANT: do NOT spread chainGas() here unchanged — its 2000 gwei maxFeePerGas
+    // ceiling × 10M explicit gas = 20 MATIC reserved, exceeding the relayer wallet.
+    // 500 gwei is more than sufficient for Polygon mainnet; 10M × 500 gwei = 5 MATIC.
     const settleHash = await this._write({
       address: this.config.vaultAddress,
       abi:     [...BATCH_VAULT_ABI, ...SETTLE_ERRORS_ABI],
       functionName: "settleBatch",
       args: [batchId, proof as `0x${string}`],
-      gas: 10_000_000n,               // explicit limit — no eth_estimateGas call
-      ...chainGas(this.config.chainId),
+      gas:                  10_000_000n,          // explicit — bypass eth_estimateGas
+      maxPriorityFeePerGas: 100_000_000_000n,    // 100 gwei
+      maxFeePerGas:         500_000_000_000n,    // 500 gwei — 10M × 500 gwei = 5 MATIC
     });
 
     await this._waitReceiptOrVerify(settleHash, batchId, 4 /* SETTLED */, "settleBatch");
