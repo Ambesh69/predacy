@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { createServer } from "node:http";
-import { createPublicClient, http, parseAbiItem, recoverMessageAddress, encodeFunctionData } from "viem";
+import { createPublicClient, http, fallback, parseAbiItem, recoverMessageAddress, encodeFunctionData } from "viem";
 import { polygon, polygonAmoy } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 import { createWalletClient } from "viem";
@@ -1060,16 +1060,27 @@ if (missingVars.length > 0) {
 // load-balanced, so eth_newFilter / eth_getFilterChanges fails with "filter not
 // found" when requests hit different backend servers. getLogs is stateless.
 
+// Build a fallback transport so transient dRPC errors (500, 410 GRPC, etc.) automatically
+// retry on the next endpoint. Mirrors the same pattern used inside BatchProcessor.
+const _MAINNET_FALLBACKS = ["https://polygon.drpc.org", "https://polygon.meowrpc.com"];
+const _buildTransport = () => {
+  if (chain.id === polygon.id) {
+    const extras = _MAINNET_FALLBACKS.filter((u) => u !== baseConfig.rpcUrl);
+    return fallback([http(baseConfig.rpcUrl), ...extras.map((u) => http(u))], { rank: false });
+  }
+  return http(baseConfig.rpcUrl);
+};
+
 const publicClient = createPublicClient({
   chain,
-  transport: http(baseConfig.rpcUrl, { retryCount: 3 }),
+  transport: _buildTransport(),
 });
 
 // Global wallet client — shared by /claim-proof and /wrap-execute endpoints.
 const relayerAccount = privateKeyToAccount(baseConfig.relayerPrivateKey);
 const walletClientGlobal = createWalletClient({
   chain,
-  transport: http(baseConfig.rpcUrl),
+  transport: _buildTransport(),
   account:   relayerAccount,
 });
 
