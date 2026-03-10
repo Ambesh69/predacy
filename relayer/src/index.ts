@@ -186,6 +186,30 @@ async function ensureMarket(marketId: `0x${string}`): Promise<MarketState> {
   return state;
 }
 
+// ── Claim errors ABI ──────────────────────────────────────────────────────────
+// Used for simulateContract pre-flight AND writeContract decoding on the claim path.
+// Includes BatchVault custom errors + ClaimHonkVerifier errors that bubble up.
+const CLAIM_ERRORS_ABI = [
+  // BatchVault claim errors
+  { name: "ZKProofInvalid",     type: "error", inputs: [] },
+  { name: "CommitmentMismatch", type: "error", inputs: [] },
+  { name: "AlreadyClaimed",     type: "error", inputs: [] },
+  { name: "BatchNotSettled",    type: "error", inputs: [] },
+  { name: "ClaimVerifierNotSet", type: "error", inputs: [] },
+  { name: "NothingToClaim",     type: "error", inputs: [] },
+  // ClaimHonkVerifier (N=262144) errors — same error names as BatchHonkVerifier
+  { name: "ProofLengthWrongWithLogN", type: "error", inputs: [
+    { name: "logN",           type: "uint256" },
+    { name: "actualLength",   type: "uint256" },
+    { name: "expectedLength", type: "uint256" },
+  ]},
+  { name: "PublicInputsLengthWrong",   type: "error", inputs: [] },
+  { name: "SumcheckFailed",            type: "error", inputs: [] },
+  { name: "ShpleminiFailed",           type: "error", inputs: [] },
+  { name: "GeminiChallengeInSubgroup", type: "error", inputs: [] },
+  { name: "ConsistencyCheckFailed",    type: "error", inputs: [] },
+];
+
 // ── Async claim job store ─────────────────────────────────────────────────────
 // POST /claim-proof returns a jobId immediately (ZK proof takes 60-90s on Railway).
 // The actual proof + on-chain submission run in the background.
@@ -554,14 +578,44 @@ const server = createServer((req, res) => {
             });
 
             // 4. Submit claimWithProof() on-chain (relayer is msg.sender — no trader address leaked)
+            //
+            // Pre-flight simulation: surfaces ZKProofInvalid / CommitmentMismatch / etc.
+            // before spending gas. Uses unlimited gas (eth_call) so heavy ZK verify works.
+            console.log(`[Relayer] Simulating claimWithProof for batch ${batchId}...`);
+            try {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              await (publicClient as any).simulateContract({
+                address:      baseConfig.vaultAddress,
+                abi:          [...BATCH_VAULT_ABI, ...CLAIM_ERRORS_ABI],
+                functionName: "claimWithProof",
+                args:         [batchIdBig, proof, publicInputs],
+                account:      walletClientGlobal.account!.address,
+              });
+              console.log(`[Relayer] claimWithProof simulation passed ✓ — sending tx`);
+            } catch (simErr: unknown) {
+              const e = simErr as any;
+              const errName  = e?.cause?.data?.errorName ?? e?.cause?.reason ?? e?.shortMessage;
+              const errArgs  = e?.cause?.data?.args;
+              const fallback = e?.message ?? String(simErr);
+              const detail   = errName
+                ? (errArgs ? `${errName}(${errArgs.join(", ")})` : errName)
+                : fallback;
+              console.error(`[Relayer] claimWithProof simulation FAILED: ${detail}`);
+              throw new Error(`claimWithProof would revert: ${detail}`, { cause: simErr });
+            }
+
+            // Explicit gas: ClaimHonkVerifier (N=262144) is compute-heavy — eth_estimateGas
+            // can choke on it just like the batch HonkVerifier (N=524288).
+            // 8M gas at 500 gwei = 4 MATIC max reservation, well within relayer balance.
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const txHash = await (walletClientGlobal.writeContract as (p: any) => Promise<`0x${string}`>)({
               address:      baseConfig.vaultAddress,
-              abi:          BATCH_VAULT_ABI,
+              abi:          [...BATCH_VAULT_ABI, ...CLAIM_ERRORS_ABI],
               functionName: "claimWithProof",
               args:         [batchIdBig, proof, publicInputs],
-              maxPriorityFeePerGas: 100_000_000_000n,  // 100 gwei
-              maxFeePerGas:         2_000_000_000_000n, // 2000 gwei — handles mainnet spikes
+              gas:                  8_000_000n,          // explicit — bypass eth_estimateGas
+              maxPriorityFeePerGas: 100_000_000_000n,   // 100 gwei
+              maxFeePerGas:         500_000_000_000n,   // 500 gwei — 8M × 500 gwei = 4 MATIC
             });
 
             // Wait up to 120 s for the receipt. If polling times out the tx is already
