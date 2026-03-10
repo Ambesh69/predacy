@@ -42,7 +42,7 @@ const baseConfig = {
     builderPassphrase: process.env.POLYMARKET_BUILDER_PASSPHRASE || undefined,
   },
   batchWindowMs:  parseInt(process.env.BATCH_WINDOW_MS ?? "30000"),
-  useRealZk:      process.env.USE_REAL_ZK === "true",
+  useRealZk:      process.env.USE_REAL_ZK?.trim().toLowerCase() === "true",
   // PublicInputAdapter address — required when USE_REAL_ZK=true.
   // Adapter converts BatchVault's 6 public inputs to the 37-input HonkVerifier format.
   adapterAddress: process.env.ADAPTER_ADDRESS
@@ -1050,6 +1050,7 @@ console.log("[Relayer] Starting Predacy relayer (multi-market mode)...");
 console.log(`[Relayer] Vault:   ${baseConfig.vaultAddress}`);
 console.log(`[Relayer] Chain:   ${chainId === polygon.id ? "Polygon" : "Polygon Amoy"}`);
 console.log(`[Relayer] Window:  ${baseConfig.batchWindowMs / 1000}s (early-close: $${Number(MAX_BATCH_USD_MICRO) / 1e6} USD or ${MAX_BATCH_ORDERS} orders)`);
+console.log(`[Relayer] ZK mode: ${baseConfig.useRealZk ? "REAL (HonkVerifier)" : "MOCK (prototype)"} (USE_REAL_ZK=${JSON.stringify(process.env.USE_REAL_ZK ?? null)})`);
 
 if (missingVars.length > 0) {
   console.error(`[Relayer] ⚠ Missing env vars: ${missingVars.join(", ")} — add them in Railway Variables tab`);

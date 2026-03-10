@@ -319,6 +319,26 @@ const ADAPTER_ABI = [
   },
 ] as const;
 
+// Custom errors for settleBatch simulation — enables exact error-name logging before the tx
+// Includes BatchVault errors plus HonkVerifier errors that propagate through PublicInputAdapter.
+const SETTLE_ERRORS_ABI = [
+  // BatchVault
+  { name: "ZKProofInvalid",  type: "error", inputs: [] },
+  { name: "BatchNotLocked",  type: "error", inputs: [] },
+  { name: "OnlyRelayer",     type: "error", inputs: [] },
+  // HonkVerifier (BatchVerifier.sol) — thrown when proof bytes length ≠ 10176, or crypto fails
+  { name: "ProofLengthWrongWithLogN", type: "error", inputs: [
+    { name: "logN",           type: "uint256" },
+    { name: "actualLength",   type: "uint256" },
+    { name: "expectedLength", type: "uint256" },
+  ]},
+  { name: "PublicInputsLengthWrong",   type: "error", inputs: [] },
+  { name: "SumcheckFailed",            type: "error", inputs: [] },
+  { name: "ShpleminiFailed",           type: "error", inputs: [] },
+  { name: "GeminiChallengeInSubgroup", type: "error", inputs: [] },
+  { name: "ConsistencyCheckFailed",    type: "error", inputs: [] },
+];
+
 // ConditionalTokens ERC-1155 ABI — minimal subset for relayer approval setup + NegRisk split
 const CTF_ABI = [
   {
@@ -1313,6 +1333,30 @@ export class BatchProcessor {
       filledNoSellQty:   fills.filledNoSellQty,
     });
 
+    // Diagnostics: log proof size so we immediately see mock vs real in Railway logs.
+    // A mock proof ("0x") = 0 bytes → HonkVerifier throws ProofLengthWrongWithLogN(19,0,10176).
+    const proofBytes = proof === "0x" ? 0 : (proof.length - 2) / 2;
+    console.log(
+      `[BatchProcessor] ZK proof ready: ${proofBytes} bytes ` +
+      `(${proofBytes === 0 ? "MOCK — will be REJECTED by HonkVerifier" : "real"}, ` +
+      `useRealZk=${this.config.useRealZk})`,
+    );
+    if (proofBytes === 0 && this.config.useRealZk) {
+      // useRealZk=true but proof is still empty — bb binary likely failed during generation.
+      // generateProof should have thrown; if it didn't, surface the misconfiguration here.
+      throw new Error(
+        "[BatchProcessor] useRealZk=true but ZK proof is empty (0 bytes) — " +
+        "bb binary may not be installed or executed correctly. " +
+        "Check Railway build logs for bb install errors.",
+      );
+    }
+    if (proofBytes === 0 && !this.config.useRealZk) {
+      console.warn(
+        `[BatchProcessor] Mock proof will be REJECTED by HonkVerifier. ` +
+        `Set USE_REAL_ZK=true in Railway env vars to enable real ZK proofs.`,
+      );
+    }
+
     // 6b. PublicInputAdapter (real ZK only — must be set before settleBatch)
     if (this.config.useRealZk && this.config.adapterAddress) {
       console.log(`[BatchProcessor] Setting pendingOrderCount=${orders.length} on PublicInputAdapter`);
@@ -1425,6 +1469,34 @@ export class BatchProcessor {
     // ─── Phase 2: settleBatch ────────────────────────────────────────────────
     // Verifies ZK proof; pulls gap tokens (bought with vault-USDC) from relayer;
     // pulls USDC proceeds (from excess sells) from relayer; finalizes.
+
+    // Pre-flight simulation: catch exact revert reason BEFORE spending gas.
+    // Decodes both BatchVault errors (ZKProofInvalid) and HonkVerifier errors
+    // (ProofLengthWrongWithLogN, SumcheckFailed, etc.) that propagate via the adapter.
+    console.log(`[BatchProcessor] Phase 2: simulating settleBatch for batch ${batchId}...`);
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (this.publicClient as any).simulateContract({
+        address:      this.config.vaultAddress as `0x${string}`,
+        abi:          [...BATCH_VAULT_ABI, ...SETTLE_ERRORS_ABI],
+        functionName: "settleBatch",
+        args:         [batchId, proof as `0x${string}`],
+        account:      this.walletClient.account!.address,
+      });
+      console.log(`[BatchProcessor] settleBatch simulation passed ✓ — sending tx`);
+    } catch (simErr: unknown) {
+      const e = simErr as any;
+      // viem wraps the decoded custom error in cause.data
+      const errName  = e?.cause?.data?.errorName ?? e?.cause?.reason ?? e?.shortMessage;
+      const errArgs  = e?.cause?.data?.args;
+      const fallback = e?.message ?? String(simErr);
+      const detail   = errName
+        ? (errArgs ? `${errName}(${errArgs.join(", ")})` : errName)
+        : fallback;
+      console.error(`[BatchProcessor] settleBatch simulation FAILED: ${detail}`);
+      throw new Error(`settleBatch would revert: ${detail}`, { cause: simErr });
+    }
+
     console.log(`[BatchProcessor] Phase 2: calling settleBatch for batch ${batchId}`);
     const settleHash = await this._write({
       address: this.config.vaultAddress,
