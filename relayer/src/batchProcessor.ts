@@ -1402,30 +1402,54 @@ export class BatchProcessor {
     // until USDC proceeds arrive in the relayer wallet before settleBatch is called.
 
     // Sell excess YES tokens on CLOB first (relayer needs the USDC before settleBatch)
+    //
+    // NegRisk caveat: lockFunds sends vault-side CTF position tokens (e.g. tokenId 650225…)
+    // to the relayer, but Polymarket's CLOB only trades the NegRisk-adapter tokens (e.g.
+    // 545330…). These are different ERC-1155 IDs and cannot be directly sold on the CLOB.
+    // When isNegRisk=true, skip the CLOB sell — settleBatch only needs USDC from the
+    // relayer (via ERC-20 transferFrom), which the relayer has from its own balance.
+    // The vault tokens stay in the relayer wallet; a separate admin step is needed to
+    // convert them (CTF.mergePositions + NegRisk adapter unwrap) to recover the USDC.
     if (cachedYesToken && finalExcessYes > 0n && this.config.chainId === 137) {
-      const usdcExpected = (finalExcessYes * effectiveClearingPrice) / PRICE_DEC;
-      console.log(`[BatchProcessor] Selling ${finalExcessYes} excess YES tokens on CLOB (expecting ${usdcExpected} USDC)`);
-      try {
-        const { orderId } = await this.polymarket.placeMarketSell(cachedYesToken, finalExcessYes);
-        console.log(`[BatchProcessor] Excess YES sell placed: orderId=${orderId}`);
-        // Wait for USDC proceeds to arrive before calling settleBatch.
-        await this._waitForUsdcProceeds(usdcExpected, "excess YES sell");
-      } catch (sellErr) {
-        console.warn(`[BatchProcessor] Excess YES sell failed (settleBatch may revert if USDC not received):`, sellErr);
+      if (isNegRisk) {
+        console.log(
+          `[BatchProcessor] NegRisk: skipping excess YES sell — vault tokens (${finalExcessYes}) ` +
+          `are standard CTF positions, not the NegRisk CLOB token. ` +
+          `settleBatch will pull USDC directly from the relayer wallet instead.`,
+        );
+      } else {
+        const usdcExpected = (finalExcessYes * effectiveClearingPrice) / PRICE_DEC;
+        console.log(`[BatchProcessor] Selling ${finalExcessYes} excess YES tokens on CLOB (expecting ${usdcExpected} USDC)`);
+        try {
+          const { orderId } = await this.polymarket.placeMarketSell(cachedYesToken, finalExcessYes);
+          console.log(`[BatchProcessor] Excess YES sell placed: orderId=${orderId}`);
+          // Wait for USDC proceeds to arrive before calling settleBatch.
+          await this._waitForUsdcProceeds(usdcExpected, "excess YES sell");
+        } catch (sellErr) {
+          console.warn(`[BatchProcessor] Excess YES sell failed (settleBatch may revert if USDC not received):`, sellErr);
+        }
       }
     } else if (finalExcessYes > 0n && this.config.chainId !== 137) {
       console.log(`[BatchProcessor] Testnet: skipping excess YES sell (${finalExcessYes} tokens)`);
     }
 
     if (cachedNoToken && finalExcessNo > 0n && this.config.chainId === 137) {
-      const usdcExpected = (finalExcessNo * noPrice) / PRICE_DEC;
-      console.log(`[BatchProcessor] Selling ${finalExcessNo} excess NO tokens on CLOB (expecting ${usdcExpected} USDC)`);
-      try {
-        const { orderId } = await this.polymarket.placeMarketSell(cachedNoToken, finalExcessNo);
-        console.log(`[BatchProcessor] Excess NO sell placed: orderId=${orderId}`);
-        await this._waitForUsdcProceeds(usdcExpected, "excess NO sell");
-      } catch (sellErr) {
-        console.warn(`[BatchProcessor] Excess NO sell failed (settleBatch may revert if USDC not received):`, sellErr);
+      if (isNegRisk) {
+        console.log(
+          `[BatchProcessor] NegRisk: skipping excess NO sell — vault tokens (${finalExcessNo}) ` +
+          `are standard CTF positions, not the NegRisk CLOB token. ` +
+          `settleBatch will pull USDC directly from the relayer wallet instead.`,
+        );
+      } else {
+        const usdcExpected = (finalExcessNo * noPrice) / PRICE_DEC;
+        console.log(`[BatchProcessor] Selling ${finalExcessNo} excess NO tokens on CLOB (expecting ${usdcExpected} USDC)`);
+        try {
+          const { orderId } = await this.polymarket.placeMarketSell(cachedNoToken, finalExcessNo);
+          console.log(`[BatchProcessor] Excess NO sell placed: orderId=${orderId}`);
+          await this._waitForUsdcProceeds(usdcExpected, "excess NO sell");
+        } catch (sellErr) {
+          console.warn(`[BatchProcessor] Excess NO sell failed (settleBatch may revert if USDC not received):`, sellErr);
+        }
       }
     } else if (finalExcessNo > 0n && this.config.chainId !== 137) {
       console.log(`[BatchProcessor] Testnet: skipping excess NO sell (${finalExcessNo} tokens)`);
@@ -1498,11 +1522,17 @@ export class BatchProcessor {
     }
 
     console.log(`[BatchProcessor] Phase 2: calling settleBatch for batch ${batchId}`);
+    // Explicit gas limit bypasses eth_estimateGas, which can fail for UltraHonk
+    // N=524288 on Polygon (the heavy pairing computation trips the estimator).
+    // 10M gas is a safe upper bound — HonkVerifier N=524288 uses ~5-7M gas.
+    // Also pass SETTLE_ERRORS_ABI so viem decodes ZKProofInvalid / SumcheckFailed
+    // if the tx reverts, instead of showing a generic "reverted".
     const settleHash = await this._write({
       address: this.config.vaultAddress,
-      abi: BATCH_VAULT_ABI,
+      abi:     [...BATCH_VAULT_ABI, ...SETTLE_ERRORS_ABI],
       functionName: "settleBatch",
       args: [batchId, proof as `0x${string}`],
+      gas: 10_000_000n,               // explicit limit — no eth_estimateGas call
       ...chainGas(this.config.chainId),
     });
 
