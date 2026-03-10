@@ -1222,52 +1222,7 @@ export class BatchProcessor {
       finalExcessNo  = batchInfo.finalExcessNo;
     }
 
-    // 5. Generate ZK proof (can be done before lockFunds — inputs are already known)
-    const { proof } = await this.zkProver.generateProof({
-      marketId:          batchInfo.marketId,
-      orders,
-      commitments:       commitments.map((c) => c.hash),
-      clearingPrice:     effectiveClearingPrice,
-      filledYesBuyVol:   fills.filledYesBuyVol,
-      filledNoBuyVol:    fills.filledNoBuyVol,
-      filledYesSellQty:  fills.filledYesSellQty,
-      filledNoSellQty:   fills.filledNoSellQty,
-    });
-
-    // 5b. PublicInputAdapter (real ZK only — must be set before settleBatch)
-    if (this.config.useRealZk && this.config.adapterAddress) {
-      console.log(`[BatchProcessor] Setting pendingOrderCount=${orders.length} on PublicInputAdapter`);
-      const adapterHash = await this._write({
-        address: this.config.adapterAddress,
-        abi: ADAPTER_ABI,
-        functionName: "setPendingOrderCount",
-        args: [BigInt(orders.length)],
-        ...chainGas(this.config.chainId),
-      });
-      try {
-        await this.publicClient.waitForTransactionReceipt({ hash: adapterHash, timeout: 120_000 });
-      } catch (err: any) {
-        const msg: string = err?.message ?? "";
-        if (!msg.includes("could not be found") && !msg.includes("not be processed")) throw err;
-        // Receipt polling timed out — verify adapter state directly
-        console.warn(`[BatchProcessor] setPendingOrderCount receipt timeout for ${adapterHash} — verifying adapter state`);
-        const onChainCount = await this.publicClient.readContract({
-          address: this.config.adapterAddress!,
-          abi:     ADAPTER_ABI,
-          functionName: "pendingOrderCount",
-          args:    [],
-        }) as bigint;
-        if (onChainCount !== BigInt(orders.length)) {
-          throw new Error(
-            `[BatchProcessor] setPendingOrderCount receipt timeout and adapter pendingOrderCount=${onChainCount} ≠ expected ${orders.length}`,
-          );
-        }
-        console.log(`[BatchProcessor] setPendingOrderCount confirmed via adapter state (${onChainCount}) ✓`);
-      }
-      console.log(`[BatchProcessor] PublicInputAdapter ready (tx: ${adapterHash})`);
-    }
-
-    // 6. Build EIP-3009 TransferAuth[] — one per order (parallel to orders[]).
+    // 5. Build EIP-3009 TransferAuth[] — one per order (parallel to orders[]).
     //    For filled BUY orders (YES_BUY and NO_BUY): use stored TransferAuth (pulls USDC).
     //    For SELL orders / unfilled BUY orders: zero struct (contract skips these).
     //    Track excluded buy orders that have pre-signed requeue sigs for auto-requeue.
@@ -1339,6 +1294,56 @@ export class BatchProcessor {
       console.log(`[BatchProcessor] lockFunds tx: ${lockHash} — batch ${batchId} is LOCKED`);
     } else {
       console.log(`[BatchProcessor] Phase 1: skipped (batch ${batchId} already LOCKED)`);
+    }
+
+    // 6. Generate ZK proof — done AFTER lockFunds so the proof is always built from
+    //    authoritative on-chain values.  For fresh batches the local values used to call
+    //    lockFunds are identical to what the contract stored; for already-LOCKED batches
+    //    the values were already overridden from on-chain above (lines 1209-1222).
+    //    Generating the proof here eliminates the class of ZKProofInvalid() reverts that
+    //    occurred when a subtle off-chain/on-chain mismatch existed on attempt 1/3.
+    const { proof } = await this.zkProver.generateProof({
+      marketId:          batchInfo.marketId,
+      orders,
+      commitments:       commitments.map((c) => c.hash),
+      clearingPrice:     effectiveClearingPrice,
+      filledYesBuyVol:   fills.filledYesBuyVol,
+      filledNoBuyVol:    fills.filledNoBuyVol,
+      filledYesSellQty:  fills.filledYesSellQty,
+      filledNoSellQty:   fills.filledNoSellQty,
+    });
+
+    // 6b. PublicInputAdapter (real ZK only — must be set before settleBatch)
+    if (this.config.useRealZk && this.config.adapterAddress) {
+      console.log(`[BatchProcessor] Setting pendingOrderCount=${orders.length} on PublicInputAdapter`);
+      const adapterHash = await this._write({
+        address: this.config.adapterAddress,
+        abi: ADAPTER_ABI,
+        functionName: "setPendingOrderCount",
+        args: [BigInt(orders.length)],
+        ...chainGas(this.config.chainId),
+      });
+      try {
+        await this.publicClient.waitForTransactionReceipt({ hash: adapterHash, timeout: 120_000 });
+      } catch (err: any) {
+        const msg: string = err?.message ?? "";
+        if (!msg.includes("could not be found") && !msg.includes("not be processed")) throw err;
+        // Receipt polling timed out — verify adapter state directly
+        console.warn(`[BatchProcessor] setPendingOrderCount receipt timeout for ${adapterHash} — verifying adapter state`);
+        const onChainCount = await this.publicClient.readContract({
+          address: this.config.adapterAddress!,
+          abi:     ADAPTER_ABI,
+          functionName: "pendingOrderCount",
+          args:    [],
+        }) as bigint;
+        if (onChainCount !== BigInt(orders.length)) {
+          throw new Error(
+            `[BatchProcessor] setPendingOrderCount receipt timeout and adapter pendingOrderCount=${onChainCount} ≠ expected ${orders.length}`,
+          );
+        }
+        console.log(`[BatchProcessor] setPendingOrderCount confirmed via adapter state (${onChainCount}) ✓`);
+      }
+      console.log(`[BatchProcessor] PublicInputAdapter ready (tx: ${adapterHash})`);
     }
 
     // ─── Between phases: CLOB operations (vault-funded, zero relayer capital) ─
