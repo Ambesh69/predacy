@@ -466,13 +466,13 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   // on the discovered provider, then polls eth_chainId to confirm the switch
   // before handing back a ready walletClient.
   const ensureAmoy = async () => {
-    if (!walletAddress) throw new Error("Wallet not connected");
-
-    // Discover the best provider (prefers MetaMask via EIP-6963)
-    const { provider, name } = await findBestProvider();
-
-    // Re-authorize accounts before any tx — silently refreshes expired sessions.
-    await provider.request({ method: "eth_requestAccounts" }).catch(() => {});
+    if (!walletAddress || !wallet) throw new Error("Wallet not connected");
+    // Use Privy's wallet provider — already authorized through the Privy sign-in
+    // flow. findBestProvider() (EIP-6963) returns a raw provider that hasn't been
+    // connected to this dapp session, causing Phantom (and other non-MetaMask
+    // wallets) to return 4100 "not authorized" on writeContract calls.
+    const provider = await wallet.getEthereumProvider();
+    const name = wallet.walletClientType ?? "wallet";
 
     // Switch to Amoy — shows the wallet's native "Switch Network" dialog
     try {

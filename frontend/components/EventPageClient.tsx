@@ -706,12 +706,13 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
 
   // ── Chain switching ──────────────────────────────────────────────────────────
   const ensureAmoy = async () => {
-    if (!walletAddress) throw new Error("Wallet not connected");
-    const { provider, name } = await findBestProvider();
-    // Re-authorize accounts before any tx — silently refreshes expired sessions.
-    // eth_requestAccounts shows no popup if already connected; only prompts if
-    // the dapp→wallet session has expired (which causes the 4100 Unauthorized error).
-    await provider.request({ method: "eth_requestAccounts" }).catch(() => {});
+    if (!walletAddress || !wallet) throw new Error("Wallet not connected");
+    // Use Privy's wallet provider — already authorized through the Privy sign-in
+    // flow. findBestProvider() (EIP-6963) returns a raw provider that hasn't been
+    // connected to this dapp session, causing Phantom (and other non-MetaMask
+    // wallets) to return 4100 "not authorized" on writeContract calls.
+    const provider = await wallet.getEthereumProvider();
+    const name = wallet.walletClientType ?? "wallet";
     try {
       await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: ACTIVE_CHAIN_ID_HEX }] });
     } catch (err: any) {
