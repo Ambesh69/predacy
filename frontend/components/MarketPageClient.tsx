@@ -217,6 +217,11 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     setCommitments([]);
   }, [batch.batchId]);
 
+  // ── Clear stale error banner when wallet reconnects ──────────────────────────
+  useEffect(() => {
+    setChainError(null);
+  }, [walletAddress]);
+
   // ── Fetch on-chain commitment feed via getLogs ───────────────────────────────
   // Runs once on mount and whenever the batchId advances.
   // Only fetches events for the current batchId; merges with locally-submitted.
@@ -480,6 +485,10 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     // connected to this dapp session, causing Phantom (and other non-MetaMask
     // wallets) to return 4100 "not authorized" on writeContract calls.
     const provider = await wallet.getEthereumProvider();
+    // Refresh the wallet session — eth_requestAccounts is idempotent (returns
+    // instantly if already connected) but re-authorises if the session expired,
+    // preventing 4100 "not authorized" on the subsequent eth_sendTransaction.
+    try { await provider.request({ method: "eth_requestAccounts" }); } catch { /* ignore — some providers don't expose it */ }
     const name = wallet.walletClientType ?? "wallet";
 
     // Use Privy's wallet.switchChain() — handles add+switch atomically for all

@@ -712,6 +712,11 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     setOrderSealed(false);
   }, [batch.batchId]);
 
+  // ── Clear stale error banner when wallet reconnects ──────────────────────────
+  useEffect(() => {
+    setChainError(null);
+  }, [walletAddress]);
+
   // ── Chain switching ──────────────────────────────────────────────────────────
   const ensureAmoy = async () => {
     if (!walletAddress || !wallet) throw new Error("Wallet not connected");
@@ -720,6 +725,10 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     // connected to this dapp session, causing Phantom (and other non-MetaMask
     // wallets) to return 4100 "not authorized" on writeContract calls.
     const provider = await wallet.getEthereumProvider();
+    // Refresh the wallet session — eth_requestAccounts is idempotent (returns
+    // instantly if already connected) but re-authorises if the session expired,
+    // preventing 4100 "not authorized" on the subsequent eth_sendTransaction.
+    try { await provider.request({ method: "eth_requestAccounts" }); } catch { /* ignore — some providers don't expose it */ }
     const name = wallet.walletClientType ?? "wallet";
     // Use Privy's wallet.switchChain() — handles add+switch atomically for all
     // wallet types. Raw wallet_switchEthereumChain via provider.request() hangs
