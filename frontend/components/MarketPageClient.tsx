@@ -516,11 +516,14 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       }
     }
 
-    return createWalletClient({
-      account: walletAddress,
-      chain: ACTIVE_CHAIN,
-      transport: custom(provider),
-    });
+    return {
+      walletClient: createWalletClient({
+        account: walletAddress,
+        chain: ACTIVE_CHAIN,
+        transport: custom(provider),
+      }),
+      provider,
+    };
   };
 
   // ── Submit order ─────────────────────────────────────────────────────────────
@@ -557,7 +560,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     const deadline  = BigInt(Math.floor(Date.now() / 1000) + 600); // 10 min from now
 
     setSubmitStep("approving");
-    const walletClient = await ensureAmoy();
+    const { walletClient, provider: userProvider } = await ensureAmoy();
 
     // ── BUY ORDER: ephemeral wallet pattern ──────────────────────────────────
     if (params.side === YES_BUY) {
@@ -594,22 +597,29 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         throw new Error(`Insufficient USDC balance — you have $${have} but need $${need} USDC.e on Polygon. Bridge or swap USDC to Polygon first.`);
       }
 
-      // Send USDC directly via the raw EIP-1193 provider instead of
-      // walletClient.writeContract. viem's writeContract enriches the tx with
-      // EIP-1559 fields (maxFeePerGas/maxPriorityFeePerGas/type=2) that
-      // Phantom's Polygon EVM provider doesn't handle reliably, causing 4100.
-      // Direct provider.request with only {from, to, data, gas} lets Phantom
-      // decide the tx type and gas pricing — it handles this correctly.
-      const userProvider = await wallet.getEthereumProvider();
-      const fundTx = await userProvider.request({
-        method: "eth_sendTransaction",
-        params: [{
-          from: walletAddress,
-          to:   contracts.usdc as string,
-          data: encodeFunctionData({ abi: ERC20_ABI, functionName: "transfer", args: [ephemeralAddress, params.amount] }),
-          gas:  `0x${(100_000n).toString(16)}`,   // 100k — ERC-20 transfer uses ~50k
-        }],
-      }) as `0x${string}`;
+      // Send USDC via the same provider instance that ensureAmoy authorized with
+      // eth_requestAccounts. A second wallet.getEthereumProvider() call may return
+      // a fresh/unauthorized wrapper → 4100. Reusing the exact same instance avoids
+      // this. Also use legacy tx params (no EIP-1559 fields) — Phantom's Polygon EVM
+      // provider doesn't handle type-2 reliably and may return 4100 with them.
+      const txParams = {
+        from: walletAddress,
+        to:   contracts.usdc as string,
+        data: encodeFunctionData({ abi: ERC20_ABI, functionName: "transfer", args: [ephemeralAddress, params.amount] }),
+        gas:  `0x${(100_000n).toString(16)}`,   // 100k — ERC-20 transfer uses ~50k
+      };
+      let fundTx: `0x${string}`;
+      try {
+        fundTx = await userProvider.request({ method: "eth_sendTransaction", params: [txParams] }) as `0x${string}`;
+      } catch (err0: any) {
+        if (err0?.code === 4100 || err0?.message?.includes("Unauthorized")) {
+          // Authorization may have lapsed — re-request and retry once before failing.
+          try { await userProvider.request({ method: "eth_requestAccounts" }); } catch { /* ignore */ }
+          fundTx = await userProvider.request({ method: "eth_sendTransaction", params: [txParams] }) as `0x${string}`;
+        } else {
+          throw err0;
+        }
+      }
       await publicClient.waitForTransactionReceipt({ hash: fundTx });
 
       // 3. In-browser wallet client for ephemeral key — no MetaMask popups from here on
@@ -942,7 +952,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     setFaucetLoading(true);
     try {
       // ensureAmoy() switches to Amoy first, then returns a ready walletClient
-      const walletClient = await ensureAmoy();
+      const { walletClient } = await ensureAmoy();
       const contracts = getContracts(ACTIVE_CHAIN.id);
       const tx = await walletClient.writeContract({
         address: contracts.usdc,

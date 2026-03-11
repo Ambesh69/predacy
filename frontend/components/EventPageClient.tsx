@@ -757,7 +757,10 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         throw new Error(`Please switch to ${ACTIVE_CHAIN_NAME} (Chain ID ${ACTIVE_CHAIN.id}) in ${name}.`);
       }
     }
-    return createWalletClient({ account: walletAddress, chain: ACTIVE_CHAIN, transport: custom(provider) });
+    return {
+      walletClient: createWalletClient({ account: walletAddress, chain: ACTIVE_CHAIN, transport: custom(provider) }),
+      provider,
+    };
   };
 
   // ── Close position: pre-fill the SELL order form and switch to ORDER tab ────────
@@ -1049,7 +1052,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     const v = parseInt(sig.slice(130, 132), 16);
 
     // Real wallet submits transferWithAuthorization (1 MetaMask popup, pays gas).
-    const walletClient = await ensureAmoy();
+    const { walletClient } = await ensureAmoy();
     const txHash = await walletClient.writeContract({
       address: contracts.usdc, abi: TRANSFER_WITH_AUTH_ABI,
       functionName: "transferWithAuthorization",
@@ -1243,7 +1246,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     const deadline  = BigInt(Math.floor(Date.now() / 1000) + 600);
 
     setSubmitStep("approving");
-    const walletClient = await ensureAmoy();
+    const { walletClient, provider: userProvider } = await ensureAmoy();
 
     if (params.side === YES_BUY || params.side === NO_BUY) {
       // ── BUY: ephemeral wallet pattern ──────────────────────────────────────
@@ -1264,22 +1267,29 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         throw new Error(`Insufficient USDC balance — you have $${have} but need $${need} USDC.e on Polygon. Bridge or swap USDC to Polygon first.`);
       }
 
-      // Send USDC directly via the raw EIP-1193 provider instead of
-      // walletClient.writeContract. viem's writeContract enriches the tx with
-      // EIP-1559 fields (maxFeePerGas/maxPriorityFeePerGas/type=2) that
-      // Phantom's Polygon EVM provider doesn't handle reliably, causing 4100.
-      // Direct provider.request with only {from, to, data, gas} lets Phantom
-      // decide the tx type and gas pricing — it handles this correctly.
-      const userProvider = await wallet.getEthereumProvider();
-      const fundTx = await userProvider.request({
-        method: "eth_sendTransaction",
-        params: [{
-          from: walletAddress,
-          to:   contracts.usdc as string,
-          data: encodeFunctionData({ abi: ERC20_ABI, functionName: "transfer", args: [ephemeralAddress, params.amount] }),
-          gas:  `0x${(100_000n).toString(16)}`,   // 100k — ERC-20 transfer uses ~50k
-        }],
-      }) as `0x${string}`;
+      // Send USDC via the same provider instance that ensureAmoy authorized with
+      // eth_requestAccounts. A second wallet.getEthereumProvider() call may return
+      // a fresh/unauthorized wrapper → 4100. Reusing the exact same instance avoids
+      // this. Also use legacy tx params (no EIP-1559 fields) — Phantom's Polygon EVM
+      // provider doesn't handle type-2 reliably and may return 4100 with them.
+      const txParams = {
+        from: walletAddress,
+        to:   contracts.usdc as string,
+        data: encodeFunctionData({ abi: ERC20_ABI, functionName: "transfer", args: [ephemeralAddress, params.amount] }),
+        gas:  `0x${(100_000n).toString(16)}`,   // 100k — ERC-20 transfer uses ~50k
+      };
+      let fundTx: `0x${string}`;
+      try {
+        fundTx = await userProvider.request({ method: "eth_sendTransaction", params: [txParams] }) as `0x${string}`;
+      } catch (err0: any) {
+        if (err0?.code === 4100 || err0?.message?.includes("Unauthorized")) {
+          // Authorization may have lapsed — re-request and retry once before failing.
+          try { await userProvider.request({ method: "eth_requestAccounts" }); } catch { /* ignore */ }
+          fundTx = await userProvider.request({ method: "eth_sendTransaction", params: [txParams] }) as `0x${string}`;
+        } else {
+          throw err0;
+        }
+      }
       await publicClient.waitForTransactionReceipt({ hash: fundTx });
 
       // Persist ephemeral key immediately after funding so USDC can always be swept
@@ -1582,7 +1592,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     if (!walletAddress) return;
     setFaucetLoading(true);
     try {
-      const walletClient = await ensureAmoy();
+      const { walletClient } = await ensureAmoy();
       const contracts = getContracts(ACTIVE_CHAIN.id);
       const tx = await walletClient.writeContract({
         address: contracts.usdc, abi: MOCK_USDC_ABI, functionName: "mint",
