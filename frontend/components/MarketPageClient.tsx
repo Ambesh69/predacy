@@ -2,7 +2,7 @@
 
 import { useState, useEffect, use } from "react";
 import Link from "next/link";
-import { createPublicClient, createWalletClient, custom, http, parseAbiItem } from "viem";
+import { createPublicClient, createWalletClient, custom, http, fallback, parseAbiItem } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
 import BatchTimer from "@/components/BatchTimer";
@@ -32,9 +32,17 @@ import {
 import { clsx } from "clsx";
 
 // ── Viem public client (read-only, no wallet needed) ─────────────────────────
+// polygon-rpc.com shut down Feb 2026 — viem's default transport for Polygon
+// would resolve to it and silently break balance reads. Use explicit working RPCs.
 const publicClient = createPublicClient({
   chain: ACTIVE_CHAIN,
-  transport: http(),
+  transport: IS_MAINNET
+    ? fallback([
+        http("https://polygon.llamarpc.com"),
+        http("https://polygon.meowrpc.com"),
+        http("https://rpc.ankr.com/polygon"),
+      ])
+    : http(),
 });
 
 // ── Fallback batch state shown before chain data loads ────────────────────────
@@ -567,13 +575,15 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         throw new Error(`Insufficient USDC balance — you have $${have} but need $${need} USDC.e on Polygon. Bridge or swap USDC to Polygon first.`);
       }
 
-      // No explicit gas params — let the wallet estimate. CHAIN_GAS (2000 gwei
-      // maxFeePerGas) causes Phantom and other non-MetaMask wallets to reject.
+      // Explicit gas avoids eth_estimateGas — Phantom's Privy-wrapped provider
+      // doesn't reliably handle estimateGas on Polygon, returning "Unexpected error".
+      // ERC-20 transfer safely fits in 150k gas.
       const fundTx = await walletClient.writeContract({
         address: contracts.usdc,
         abi:     ERC20_ABI,
         functionName: "transfer",
         args:    [ephemeralAddress, params.amount],
+        gas:     150_000n,
       });
       await publicClient.waitForTransactionReceipt({ hash: fundTx });
 

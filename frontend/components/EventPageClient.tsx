@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useCallback, use } from "react";
 import Link from "next/link";
 import { clsx } from "clsx";
 import {
-  createPublicClient, createWalletClient, custom, http, parseAbiItem, pad, toHex,
+  createPublicClient, createWalletClient, custom, http, fallback, parseAbiItem, pad, toHex,
   keccak256, encodeAbiParameters, encodeFunctionData,
 } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
@@ -42,9 +42,17 @@ function usdcDomain(verifyingContract: `0x${string}`) {
 }
 
 // ── Viem public client ────────────────────────────────────────────────────────
+// polygon-rpc.com shut down Feb 2026 — viem's default transport for Polygon
+// would resolve to it and silently break balance reads. Use explicit working RPCs.
 const publicClient = createPublicClient({
   chain: ACTIVE_CHAIN,
-  transport: http(),
+  transport: IS_MAINNET
+    ? fallback([
+        http("https://polygon.llamarpc.com"),
+        http("https://polygon.meowrpc.com"),
+        http("https://rpc.ankr.com/polygon"),
+      ])
+    : http(),
 });
 
 // ── Batch fallback ────────────────────────────────────────────────────────────
@@ -1232,11 +1240,13 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       }
 
       // Fund ephemeral with USDC from real wallet (1 tx)
-      // No explicit gas params — let the wallet estimate. CHAIN_GAS (2000 gwei
-      // maxFeePerGas) causes Phantom and other non-MetaMask wallets to reject.
+      // Explicit gas avoids eth_estimateGas — Phantom's Privy-wrapped provider
+      // doesn't reliably handle estimateGas on Polygon, returning "Unexpected error".
+      // ERC-20 transfer safely fits in 150k gas.
       const fundTx = await walletClient.writeContract({
         address: contracts.usdc, abi: ERC20_ABI, functionName: "transfer",
         args: [ephemeralAddress, params.amount],
+        gas: 150_000n,
       });
       await publicClient.waitForTransactionReceipt({ hash: fundTx });
 
