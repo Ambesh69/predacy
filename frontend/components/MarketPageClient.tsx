@@ -488,7 +488,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
               chainId: ACTIVE_CHAIN_ID_HEX,
               chainName: "Polygon",
               nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 },
-              rpcUrls: ["https://polygon-rpc.com/"],
+              rpcUrls: ["https://polygon.llamarpc.com", "https://polygon.meowrpc.com", "https://rpc.ankr.com/polygon"],
               blockExplorerUrls: ["https://polygonscan.com/"],
             }
           : {
@@ -595,12 +595,15 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       // 2b. DIRECT MODE — fund ephemeral with a plain USDC transfer from Alice's wallet.
       //     Less private: on-chain Transfer(Alice → ephemeral) is visible.
       //     "FUNDING EPHEMERAL WALLET…" shown here — submitStep = "approving"
+      //
+      // No explicit gas params — let the wallet estimate. Passing CHAIN_GAS
+      // (2000 gwei maxFeePerGas) causes Phantom and other non-MetaMask wallets
+      // to reject the tx as an extreme-fee transaction.
       const fundTx = await walletClient.writeContract({
         address: contracts.usdc,
         abi:     ERC20_ABI,
         functionName: "transfer",
         args:    [ephemeralAddress, params.amount],
-        ...CHAIN_GAS,
       });
       await publicClient.waitForTransactionReceipt({ hash: fundTx });
 

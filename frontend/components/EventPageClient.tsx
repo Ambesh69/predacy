@@ -717,7 +717,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     } catch (err: any) {
       if (err.code === 4902) {
         const addParams = IS_MAINNET
-          ? { chainId: ACTIVE_CHAIN_ID_HEX, chainName: "Polygon", nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 }, rpcUrls: ["https://polygon-rpc.com/"], blockExplorerUrls: ["https://polygonscan.com/"] }
+          ? { chainId: ACTIVE_CHAIN_ID_HEX, chainName: "Polygon", nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 }, rpcUrls: ["https://polygon.llamarpc.com", "https://polygon.meowrpc.com", "https://rpc.ankr.com/polygon"], blockExplorerUrls: ["https://polygonscan.com/"] }
           : { chainId: ACTIVE_CHAIN_ID_HEX, chainName: "Polygon Amoy", nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 }, rpcUrls: ["https://rpc-amoy.polygon.technology/"], blockExplorerUrls: ["https://amoy.polygonscan.com/"] };
         await provider.request({ method: "wallet_addEthereumChain", params: [addParams] });
         await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: ACTIVE_CHAIN_ID_HEX }] });
@@ -1229,9 +1229,12 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       const ephemeralAddress    = ephemeralAccount.address;
 
       // Fund ephemeral with USDC from real wallet (1 MetaMask tx)
+      // No explicit gas params here — let the wallet estimate. Passing CHAIN_GAS
+      // (2000 gwei maxFeePerGas) causes Phantom and other non-MetaMask wallets to
+      // reject the tx as an extreme-fee transaction.
       const fundTx = await walletClient.writeContract({
         address: contracts.usdc, abi: ERC20_ABI, functionName: "transfer",
-        args: [ephemeralAddress, params.amount], ...CHAIN_GAS,
+        args: [ephemeralAddress, params.amount],
       });
       await publicClient.waitForTransactionReceipt({ hash: fundTx });
 
