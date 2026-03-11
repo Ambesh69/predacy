@@ -1521,7 +1521,8 @@ export class BatchProcessor {
     //
     // IMPORTANT: do NOT spread chainGas() here unchanged — its 2000 gwei maxFeePerGas
     // ceiling × 10M explicit gas = 20 MATIC reserved, exceeding the relayer wallet.
-    // 500 gwei is more than sufficient for Polygon mainnet; 10M × 500 gwei = 5 MATIC.
+    // 300 gwei is a generous safe ceiling for Polygon mainnet (normal: 30-80 gwei,
+    // congested: 150-200 gwei). 10M × 300 gwei = 3 MATIC reservation.
     const settleHash = await this._write({
       address: this.config.vaultAddress,
       abi:     [...BATCH_VAULT_ABI, ...SETTLE_ERRORS_ABI],
@@ -1529,7 +1530,7 @@ export class BatchProcessor {
       args: [batchId, proof as `0x${string}`],
       gas:                  10_000_000n,          // explicit — bypass eth_estimateGas
       maxPriorityFeePerGas: 100_000_000_000n,    // 100 gwei
-      maxFeePerGas:         500_000_000_000n,    // 500 gwei — 10M × 500 gwei = 5 MATIC
+      maxFeePerGas:         300_000_000_000n,    // 300 gwei — 10M × 300 gwei = 3 MATIC
     });
 
     await this._waitReceiptOrVerify(settleHash, batchId, 4 /* SETTLED */, "settleBatch");

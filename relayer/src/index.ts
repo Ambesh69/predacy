@@ -615,7 +615,7 @@ const server = createServer((req, res) => {
               args:         [batchIdBig, proof, publicInputs],
               gas:                  8_000_000n,          // explicit — bypass eth_estimateGas
               maxPriorityFeePerGas: 100_000_000_000n,   // 100 gwei
-              maxFeePerGas:         500_000_000_000n,   // 500 gwei — 8M × 500 gwei = 4 MATIC
+              maxFeePerGas:         300_000_000_000n,   // 300 gwei — 8M × 300 gwei = 2.4 MATIC
             });
 
             // Wait up to 120 s for the receipt. If polling times out the tx is already
