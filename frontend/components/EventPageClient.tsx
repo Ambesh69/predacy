@@ -713,9 +713,11 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   }, [batch.batchId]);
 
   // ── Clear stale error banner when wallet reconnects ──────────────────────────
+  // Watch both walletAddress (different wallet) and authenticated (same wallet
+  // disconnect→reconnect cycle) so the banner clears in either case.
   useEffect(() => {
     setChainError(null);
-  }, [walletAddress]);
+  }, [walletAddress, authenticated]);
 
   // ── Chain switching ──────────────────────────────────────────────────────────
   const ensureAmoy = async () => {
@@ -1969,7 +1971,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                           catch (e: any) {
                             if (e?.code === 4001) return; // user rejected
                             if (e?.code === 4100 || e?.message?.includes("Unauthorized")) {
-                              setChainError("Wallet session expired — please reconnect your wallet and try again.");
+                              setChainError("Order failed — please try again. If the problem persists, disconnect and reconnect your wallet.");
                             } else {
                               setChainError(e.message ?? "Order failed");
                             }

@@ -218,9 +218,11 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   }, [batch.batchId]);
 
   // ── Clear stale error banner when wallet reconnects ──────────────────────────
+  // Watch both walletAddress (different wallet) and authenticated (same wallet
+  // disconnect→reconnect cycle) so the banner clears in either case.
   useEffect(() => {
     setChainError(null);
-  }, [walletAddress]);
+  }, [walletAddress, authenticated]);
 
   // ── Fetch on-chain commitment feed via getLogs ───────────────────────────────
   // Runs once on mount and whenever the batchId advances.
