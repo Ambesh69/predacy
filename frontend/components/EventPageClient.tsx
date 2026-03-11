@@ -728,16 +728,27 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   // ── Chain switching ──────────────────────────────────────────────────────────
   const ensureAmoy = async () => {
     if (!walletAddress || !wallet) throw new Error("Wallet not connected");
-    // Use Privy's wallet provider — already authorized through the Privy sign-in
-    // flow. findBestProvider() (EIP-6963) returns a raw provider that hasn't been
-    // connected to this dapp session, causing Phantom (and other non-MetaMask
-    // wallets) to return 4100 "not authorized" on writeContract calls.
-    const provider = await wallet.getEthereumProvider();
-    // Refresh the wallet session — eth_requestAccounts is idempotent (returns
-    // instantly if already connected) but re-authorises if the session expired,
-    // preventing 4100 "not authorized" on the subsequent eth_sendTransaction.
-    try { await provider.request({ method: "eth_requestAccounts" }); } catch { /* ignore — some providers don't expose it */ }
     const name = wallet.walletClientType ?? "wallet";
+
+    // Phantom-specific: Privy's wrapped provider intercepts eth_requestAccounts and
+    // shows a SIWE "Sign In" popup on Ethereum mainnet instead of authorizing Phantom's
+    // native EVM session. Access window.phantom.ethereum directly — eth_requestAccounts
+    // on the native provider shows Phantom's compact EVM-connect flow (correct UX).
+    // For all other wallets we use Privy's wrapped provider as before.
+    const phantomNativeEvm =
+      wallet.walletClientType === "phantom" && typeof window !== "undefined"
+        ? (window as any).phantom?.ethereum ?? null
+        : null;
+
+    const provider = phantomNativeEvm ?? (await wallet.getEthereumProvider());
+
+    // Authorize the EVM session. Safe to call on native Phantom provider (shows its
+    // compact "Connect" popup if not yet connected); skip for Privy-wrapped providers
+    // where it would trigger a SIWE login flow instead.
+    if (phantomNativeEvm) {
+      try { await phantomNativeEvm.request({ method: "eth_requestAccounts" }); } catch { /* ignore */ }
+    }
+
     // Only switch chain if actually needed — calling switchChain when already on
     // the right network briefly disrupts Phantom's provider authorization, causing
     // the very next eth_sendTransaction to return 4100 "not authorized".
@@ -1283,7 +1294,10 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         fundTx = await userProvider.request({ method: "eth_sendTransaction", params: [txParams] }) as `0x${string}`;
       } catch (err0: any) {
         if (err0?.code === 4100 || err0?.message?.includes("Unauthorized")) {
-          // Authorization may have lapsed — re-request and retry once before failing.
+          // 4100 — re-authorize and retry once. Using the same provider instance as
+          // ensureAmoy: for Phantom this is window.phantom.ethereum (not Privy's
+          // wrapper), so eth_requestAccounts shows Phantom's compact EVM-connect
+          // popup rather than Privy's SIWE flow.
           try { await userProvider.request({ method: "eth_requestAccounts" }); } catch { /* ignore */ }
           fundTx = await userProvider.request({ method: "eth_sendTransaction", params: [txParams] }) as `0x${string}`;
         } else {
