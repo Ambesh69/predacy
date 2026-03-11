@@ -1218,10 +1218,22 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       const ephemeralAccount    = privateKeyToAccount(ephemeralPrivateKey);
       const ephemeralAddress    = ephemeralAccount.address;
 
-      // Fund ephemeral with USDC from real wallet (1 MetaMask tx)
-      // No explicit gas params here — let the wallet estimate. Passing CHAIN_GAS
-      // (2000 gwei maxFeePerGas) causes Phantom and other non-MetaMask wallets to
-      // reject the tx as an extreme-fee transaction.
+      // Pre-flight balance check: USDC.e reverts with empty revert data when
+      // balance is insufficient, which viem shows as "Unexpected error". Check
+      // first so the user gets a clear message rather than a cryptic revert.
+      const usdcBalance = await publicClient.readContract({
+        address: contracts.usdc, abi: ERC20_ABI, functionName: "balanceOf",
+        args: [walletAddress!],
+      }) as bigint;
+      if (usdcBalance < params.amount) {
+        const have = (Number(usdcBalance) / 1e6).toFixed(2);
+        const need = (Number(params.amount) / 1e6).toFixed(2);
+        throw new Error(`Insufficient USDC balance — you have $${have} but need $${need} USDC.e on Polygon. Bridge or swap USDC to Polygon first.`);
+      }
+
+      // Fund ephemeral with USDC from real wallet (1 tx)
+      // No explicit gas params — let the wallet estimate. CHAIN_GAS (2000 gwei
+      // maxFeePerGas) causes Phantom and other non-MetaMask wallets to reject.
       const fundTx = await walletClient.writeContract({
         address: contracts.usdc, abi: ERC20_ABI, functionName: "transfer",
         args: [ephemeralAddress, params.amount],
