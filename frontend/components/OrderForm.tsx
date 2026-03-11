@@ -8,6 +8,7 @@ import { getErrorMessage } from "@/lib/validation";
 import { getContracts, CTF_ABI, BATCH_VAULT_ABI } from "@/lib/contracts";
 import { ACTIVE_CHAIN } from "@/lib/chain";
 import type { Market } from "@/lib/polymarket";
+import ActionModal from "@/components/ui/ActionModal";
 
 // Module-level read-only client (same pattern as MarketPageClient)
 const publicClient = createPublicClient({
@@ -102,6 +103,15 @@ export default function OrderForm({
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showPrivacy,  setShowPrivacy]  = useState(false);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [submitStartedAt, setSubmitStartedAt] = useState<number | null>(null);
+  const [pendingSubmit, setPendingSubmit] = useState<{
+    commitment: `0x${string}`;
+    amount: bigint;
+    salt: `0x${string}`;
+    side: number;
+    limitPrice: bigint;
+  } | null>(null);
 
   // ── Sell prefill (from "CLOSE POSITION" button) ──────────────────────────
   useEffect(() => {
@@ -248,16 +258,30 @@ export default function OrderForm({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!isConnected || !batchOpen) return;
-    setIsSubmitting(true);
-    setError(null);
     try {
       const amount = BigInt(Math.round(parseFloat(amountDisplay) * 1_000_000));
-      await onSubmit({ commitment, amount, salt, side: orderSide, limitPrice: effectiveLimitPrice });
+      setPendingSubmit({ commitment, amount, salt, side: orderSide, limitPrice: effectiveLimitPrice });
+      setReviewOpen(true);
+    } catch (err: unknown) {
+      setError(getErrorMessage(err));
+    }
+  };
+
+  const confirmSubmit = async () => {
+    if (!pendingSubmit) return;
+    setReviewOpen(false);
+    setIsSubmitting(true);
+    setSubmitStartedAt(Date.now());
+    setError(null);
+    try {
+      await onSubmit(pendingSubmit);
       setSubmitted(true);
+      setPendingSubmit(null);
     } catch (err: unknown) {
       setError(getErrorMessage(err));
     } finally {
       setIsSubmitting(false);
+      setSubmitStartedAt(null);
     }
   };
 
@@ -275,6 +299,9 @@ export default function OrderForm({
   const toWin        = sharesOut;
   const potentialPct = fillPrice > 0 ? (1 / fillPrice - 1) * 100 : 0;
   const receiveUSDC  = amountNum * fillPrice;
+  const progressMessage = submitStep === "approving"
+    ? (mode === "buy" ? "Submitting order and funding private wallet..." : "Submitting approval transaction...")
+    : "Confirming signatures and relayer processing...";
 
   // ── Sealed state ────────────────────────────────────────────────────────────
   if (submitted) {
@@ -359,6 +386,58 @@ export default function OrderForm({
 
   return (
     <div className="flex flex-col h-full">
+      <ActionModal
+        open={reviewOpen}
+        title="Review Order"
+        onClose={() => setReviewOpen(false)}
+      >
+        <div className="space-y-2">
+          <p className="text-[12px] text-muted-dim">
+            {orderType.toUpperCase()} {mode.toUpperCase()} {mode === "buy" ? (isBuy ? "YES" : "NO") : (sellYes ? "YES" : "NO")}
+          </p>
+          <div className="grid grid-cols-2 gap-2 text-[11px]">
+            <div className="border border-border p-2">
+              <p className="text-muted-dim">Amount</p>
+              <p className="text-text font-mono">{mode === "buy" ? `$${amountDisplay || "0"}` : `${amountDisplay || "0"} tokens`}</p>
+            </div>
+            <div className="border border-border p-2">
+              <p className="text-muted-dim">{mode === "buy" ? "Max Price" : "Min Price"}</p>
+              <p className="text-text font-mono">{(Number(effectiveLimitPrice) / 10_000).toFixed(1)}¢</p>
+            </div>
+          </div>
+          <div className="flex justify-end gap-2 pt-1">
+            <button
+              type="button"
+              onClick={() => setReviewOpen(false)}
+              className="px-3 py-1.5 text-[10px] tracking-widest uppercase border border-border text-muted hover:text-text hover:border-border-bright transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={confirmSubmit}
+              className="px-3 py-1.5 text-[10px] tracking-widest uppercase border border-accent text-accent hover:bg-accent/5 transition-colors"
+            >
+              Confirm
+            </button>
+          </div>
+        </div>
+      </ActionModal>
+
+      <ActionModal
+        open={isSubmitting && submitStep !== "railgun"}
+        title="Processing Order"
+        onClose={() => {}}
+        progress={{
+          open: true,
+          kind: "order",
+          title: "Order Progress",
+          stage: submitStep === "signing" ? "confirming" : "submitting",
+          message: progressMessage,
+          helper: "Submitting → Confirming → Settled",
+          startedAt: submitStartedAt ?? Date.now(),
+        }}
+      />
 
       {/* ── Header: BUY | SELL + Market | Limit (one row) ─────────────────── */}
       <div className="flex border-b border-border">

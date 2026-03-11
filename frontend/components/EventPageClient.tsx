@@ -14,6 +14,7 @@ import BatchTimer from "@/components/BatchTimer";
 import OrderForm from "@/components/OrderForm";
 import PositionsPanel from "@/components/PositionsPanel";
 import OrderbookPanel from "@/components/OrderbookPanel";
+import ActionModal from "@/components/ui/ActionModal";
 import type { Market } from "@/lib/polymarket";
 import { getRelayerUrl } from "@/lib/relayerUrl";
 import {
@@ -31,6 +32,7 @@ import {
   ACTIVE_CHAIN, ACTIVE_CHAIN_ID_HEX, ACTIVE_CHAIN_NAME,
   CHAIN_GAS, IS_MAINNET,
 } from "@/lib/chain";
+import { IDLE_ACTION_PROGRESS, emitActionTiming, type ActionProgressState, type ActionKind } from "@/lib/ui/action-progress";
 
 // USDC.e on Polygon mainnet uses EIP712Domain with `salt` (bytes32 chainId) instead
 // of `chainId` (uint256). Testnet MockUSDC uses the standard chainId domain.
@@ -514,6 +516,9 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   const [leftTab, setLeftTab]     = useState<"outcomes" | "orderbook">("outcomes");
   const [claimLoading, setClaimLoading] = useState(false);
   const [historicalMarketIds, setHistoricalMarketIds] = useState<`0x${string}`[]>([]);
+  const [actionProgress, setActionProgress] = useState<ActionProgressState>(IDLE_ACTION_PROGRESS);
+  const [actionRetry, setActionRetry] = useState<(() => void) | null>(null);
+  const tradingPanelRef = useRef<HTMLDivElement | null>(null);
   // Pre-fill for SELL mode when user clicks "CLOSE POSITION" on a claimed entry.
   const [sellPrefill, setSellPrefill] = useState<bigint | null>(null);
   // The buy clearing price of the position being closed — stored on the sell order for P&L.
@@ -528,6 +533,15 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   } | null>(null);
   const selectedMarketId = selectedMarket?.conditionId;
 
+  const setTradingTab = (tab: "order" | "positions") => {
+    const node = tradingPanelRef.current;
+    const prevTop = node?.scrollTop ?? 0;
+    setActiveTab(tab);
+    requestAnimationFrame(() => {
+      if (node) node.scrollTop = prevTop;
+    });
+  };
+
   // ── Toast notifications ──────────────────────────────────────────────────────
   const [toast, setToast] = useState<{ id: number; message: string; type: "success" | "error" } | null>(null);
   const toastIdRef = useRef(0);
@@ -539,6 +553,67 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     const id = ++toastIdRef.current;
     setToast({ id, message, type });
     setTimeout(() => setToast((prev) => (prev?.id === id ? null : prev)), 4000);
+  };
+
+  const explorerTxUrl = (hash?: string) => {
+    if (!hash) return null;
+    const base = ACTIVE_CHAIN.blockExplorers?.default?.url;
+    if (!base) return null;
+    return `${base.replace(/\/$/, "")}/tx/${hash}`;
+  };
+
+  const beginAction = (kind: ActionKind, title: string, message: string, helper?: string) => {
+    setActionProgress({
+      open: true,
+      kind,
+      title,
+      stage: "submitting",
+      message,
+      helper,
+      startedAt: Date.now(),
+    });
+    setActionRetry(null);
+  };
+
+  const setActionConfirming = (txHash?: string, message = "Confirming on-chain...", helper?: string) => {
+    setActionProgress((prev) => ({
+      ...prev,
+      open: true,
+      stage: "confirming",
+      txHash: txHash ?? prev.txHash,
+      message,
+      helper: helper ?? prev.helper,
+    }));
+  };
+
+  const settleAction = (message: string, helper?: string) => {
+    const settledAt = Date.now();
+    setActionProgress((prev) => {
+      emitActionTiming({
+        kind: prev.kind,
+        startedAt: prev.startedAt ?? undefined,
+        settledAt,
+      });
+      return {
+        ...prev,
+        open: true,
+        stage: "settled",
+        message,
+        helper: helper ?? prev.helper,
+      };
+    });
+    setTimeout(() => setActionProgress(IDLE_ACTION_PROGRESS), 1500);
+  };
+
+  const failAction = (error: string, retry?: () => void) => {
+    setActionProgress((prev) => ({
+      ...prev,
+      open: true,
+      stage: "failed",
+      error,
+      message: error,
+    }));
+    setActionRetry(() => retry ?? null);
   };
 
   // ── Requeue status polling ───────────────────────────────────────────────────
@@ -693,7 +768,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   // claim button immediately without having to refresh or click a tab.
   useEffect(() => {
     if (batch.status === BatchStatus.SETTLED && isConnected) {
-      setActiveTab("positions");
+      setTradingTab("positions");
     }
   }, [batch.status, isConnected]);
 
@@ -743,7 +818,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   const handleClosePosition = useCallback((yesAmount: bigint, clearingPrice: bigint) => {
     setSellPrefill(yesAmount);
     setCloseBuyClearingPrice(clearingPrice);
-    setActiveTab("order");
+    setTradingTab("order");
   }, []);
 
   // ── Claim position via ZK proof (relayer submits on-chain — no wallet tx needed) ──
@@ -752,6 +827,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   const handleClaimPosition = async (batchId: bigint) => {
     setClaimLoading(true);
     setChainError(null);
+    beginAction("claim", "Claim Position", "Submitting claim proof request...", "Submitting → Confirming → Settled");
     try {
       if (!walletAddress) throw new Error("Wallet not connected");
       const storageKey = `predacy:orders:${walletAddress.toLowerCase()}`;
@@ -846,6 +922,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       };
 
       let jobId = await submitClaimJob();
+      setActionConfirming(undefined, "Proof job accepted. Waiting for relayer confirmation...");
 
       // Poll for proof completion (ZK proof takes ~60-90 s on Railway).
       // Up to 60 polls × 3 s = 3 minutes before timing out.
@@ -898,6 +975,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       const { txHash, wrapDigest, wrappedToken, ctfAddress: wrapCtfAddress, tokenAmount } = claimResult;
 
       if (txHash) {
+        setActionConfirming(txHash, "Claim transaction submitted. Confirming on-chain...");
         const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash as `0x${string}` });
         if (receipt.status === "reverted") {
           throw new Error("Claim transaction reverted — the batch may not be fully settled yet. Try again in a few seconds.");
@@ -951,6 +1029,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
             ? {
                 ...o,
                 claimed: true,
+                ...(txHash ? { claimTxHash: txHash } : {}),
                 ...(proxyWalletAddress ? { proxyWalletAddress } : {}),
                 ...(wrapTxHash && wrappedToken ? { wrappedToken, wrapTxHash } : {}),
               }
@@ -974,10 +1053,12 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       } else {
         pushToast("Position claimed — payout sent to wallet.", "success");
       }
+      settleAction("Claim settled successfully", txHash ? `View tx: ${txHash.slice(0, 10)}…` : undefined);
     } catch (e: any) {
       if (e?.code !== 4001) {
         setChainError(e.message ?? "Claim failed");
         pushToast(cleanClaimError(e.message ?? "Claim failed"), "error");
+        failAction(cleanClaimError(e.message ?? "Claim failed"), () => { void handleClaimPosition(batchId); });
       }
       throw e;
     } finally {
@@ -990,8 +1071,10 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   // ephemeral wallet. We already have the private key in localStorage, so we can
   // sign a gasless EIP-3009 TransferWithAuthorization and have the real wallet
   // submit it (one MetaMask popup, real wallet pays the gas).
-  const handleSweepUnfilled = async (ephemeralKey: string, ephemeralAddress: string, amount: bigint) => {
-    const contracts = getContracts(ACTIVE_CHAIN.id);
+  const handleSweepUnfilled = async (ephemeralKey: string, ephemeralAddress: string, _amount: bigint) => {
+    beginAction("sweep", "Sweep Unfilled USDC", "Preparing signed transfer...", "Submitting → Confirming → Settled");
+    try {
+      const contracts = getContracts(ACTIVE_CHAIN.id);
 
     // Check live balance — may differ from stored amount if partially swept already.
     const balance = await publicClient.readContract({
@@ -1035,23 +1118,33 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       args: [ephemeralAddress as `0x${string}`, walletAddress as `0x${string}`, balance, 0n, validBefore, transferNonce, v, r, s],
       ...CHAIN_GAS,
     });
+    setActionConfirming(txHash, "Sweep transaction submitted. Confirming on-chain...");
 
     // Mark swept immediately — don't block UI on receipt (Polygon can take 30–120s).
     try {
       const key = `predacy:orders:${walletAddress!.toLowerCase()}`;
       const all: Array<Record<string, unknown>> = JSON.parse(localStorage.getItem(key) ?? "[]");
       localStorage.setItem(key, JSON.stringify(
-        all.map((o) => o.ephemeralAddress === ephemeralAddress ? { ...o, swept: true } : o)
+        all.map((o) => o.ephemeralAddress === ephemeralAddress ? { ...o, swept: true, transferTxHash: txHash } : o)
       ));
     } catch { /* ignore */ }
 
     setBalanceVersion(v => v + 1);
     pushToast(`${(Number(balance) / 1e6).toFixed(2)} USDC sweep submitted — tx: ${txHash.slice(0, 10)}…`, "success");
 
-    // Wait for receipt in background to refresh balance once confirmed.
-    publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 180_000 })
-      .then(() => setBalanceVersion(v => v + 1))
-      .catch(() => { /* tx is on-chain, just slow — balance will refresh on next poll */ });
+      // Wait for receipt in background to refresh balance once confirmed.
+      publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 180_000 })
+        .then(() => {
+          setBalanceVersion(v => v + 1);
+          settleAction("Sweep settled successfully");
+        })
+        .catch(() => {
+          failAction("Sweep is taking longer than expected. Check explorer for confirmation.");
+        });
+    } catch (e: any) {
+      failAction(e?.message ?? "Sweep failed");
+      throw e;
+    }
   };
 
   // ── Transfer CTF tokens from ProxyWallet to main wallet ──────────────────────
@@ -1060,7 +1153,9 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   // posts to /proxy-transfer — the relayer submits executeWithSig (pays gas).
   // After success the tokens land in the user's main wallet for selling.
   const handleTransferFromProxy = async (batchId: bigint) => {
-    if (!walletAddress) throw new Error("Wallet not connected");
+    beginAction("transfer", "Move Tokens To Wallet", "Submitting signed transfer...", "Submitting → Confirming → Settled");
+    try {
+      if (!walletAddress) throw new Error("Wallet not connected");
 
     const contracts = getContracts(ACTIVE_CHAIN.id);
     const storageKey = `predacy:orders:${walletAddress.toLowerCase()}`;
@@ -1169,6 +1264,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     }
 
     const { txHash } = await resp.json();
+    setActionConfirming(txHash, "Transfer submitted. Confirming on-chain...");
     await publicClient.waitForTransactionReceipt({ hash: txHash as `0x${string}` });
 
     // Clear proxyWalletAddress from localStorage — tokens are now in main wallet.
@@ -1176,14 +1272,19 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       const allOrders: Array<Record<string, unknown>> = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
       localStorage.setItem(storageKey, JSON.stringify(
         allOrders.map((o) => o.batchId === batchId.toString()
-          ? { ...o, proxyWalletAddress: null }
+          ? { ...o, proxyWalletAddress: null, transferTxHash: txHash }
           : o
         )
       ));
     } catch { /* ignore */ }
 
-    setBalanceVersion(v => v + 1);
-    pushToast("Tokens moved to your wallet — you can now place a SELL order.", "success");
+      setBalanceVersion(v => v + 1);
+      pushToast("Tokens moved to your wallet — you can now place a SELL order.", "success");
+      settleAction("Transfer settled successfully");
+    } catch (e: any) {
+      failAction(e?.message ?? "Transfer failed");
+      throw e;
+    }
   };
 
   // OrderSide constants (must match BatchVault v8 OrderSide enum)
@@ -1408,6 +1509,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
               ctfTokenId: params.side === 0
                 ? (selectedMarket.tokens?.[0]?.token_id ?? null)
                 : (selectedMarket.tokens?.[1]?.token_id ?? null),
+              settleTxHash: relayerData.txHash ?? undefined,
             });
             localStorage.setItem(key, JSON.stringify(existing.slice(0, 200)));
           } catch { /* ignore */ }
@@ -1416,7 +1518,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
 
       if (isSplit) pushToast(`Order split across ${K} batches for lower price impact`, "success");
       setOrderSealed(true);
-      setActiveTab("positions");
+      setTradingTab("positions");
       // Poll requeue status for the last chunk (most recently committed).
       setRequeueNotif(null);
       setPendingRequeueCommitment(chunkOrders[chunkOrders.length - 1].chunkCommitment.toLowerCase());
@@ -1488,6 +1590,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
       const err = await resp.json().catch(() => ({ error: "Relayer error" }));
       throw new Error(err.error ?? `Relayer returned ${resp.status}`);
     }
+    const relayerData = await resp.json().catch(() => ({}));
     if (walletAddress) {
       setCommitments((prev) => [...prev, { hash: params.commitment, amount: params.amount, trader: walletAddress, timestamp: Date.now() }]);
       setBatch((prev) => ({ ...prev, commitmentCount: prev.commitmentCount + 1 }));
@@ -1506,12 +1609,13 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
           timestamp:        Date.now(),
           // Cost basis of the position being closed — used for P&L display
           buyClearingPrice: closeBuyClearingPrice != null ? closeBuyClearingPrice.toString() : undefined,
+          settleTxHash: relayerData.txHash ?? undefined,
         });
         localStorage.setItem(key, JSON.stringify(existing.slice(0, 200)));
       } catch { /* ignore */ }
     }
     setOrderSealed(true);
-    setActiveTab("positions");
+    setTradingTab("positions");
   };
 
   // ── Faucet ───────────────────────────────────────────────────────────────────
@@ -1773,7 +1877,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
               <div className="border-b border-border px-4 flex items-center">
                 <button
                   type="button"
-                  onClick={() => { setActiveTab("order"); setOrderSealed(false); setRequeueNotif(null); setPendingRequeueCommitment(null); }}
+                  onClick={() => { setTradingTab("order"); setOrderSealed(false); setRequeueNotif(null); setPendingRequeueCommitment(null); }}
                   className={clsx(
                     "px-3 py-3 text-[10px] tracking-widest uppercase transition-colors border-b-2",
                     activeTab === "order"
@@ -1785,7 +1889,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                 </button>
                 <button
                   type="button"
-                  onClick={() => setActiveTab("positions")}
+                  onClick={() => setTradingTab("positions")}
                   className={clsx(
                     "px-3 py-3 text-[10px] tracking-widest uppercase transition-colors border-b-2",
                     activeTab === "positions"
@@ -1798,7 +1902,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
               </div>
 
               {/* Tab content — scrolls internally, BatchTimer pinned below */}
-              <div className="flex-1 min-h-0 overflow-y-auto">
+              <div ref={tradingPanelRef} className="flex-1 min-h-0 overflow-y-auto">
               {activeTab === "positions" ? (
                 isConnected && walletAddress ? (
                   <>
@@ -1895,7 +1999,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                             : "no cross"}.
                         </p>
                         <button
-                          onClick={() => setActiveTab("positions")}
+                          onClick={() => setTradingTab("positions")}
                           className="text-[10px] text-accent tracking-widest uppercase hover:underline"
                         >
                           VIEW MY POSITIONS →
@@ -2013,6 +2117,18 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
           </div>
         </div>
       )}
+
+      <ActionModal
+        open={actionProgress.open}
+        title={actionProgress.title || "Action Progress"}
+        onClose={() => {
+          setActionProgress(IDLE_ACTION_PROGRESS);
+          setActionRetry(null);
+        }}
+        progress={actionProgress}
+        txUrl={explorerTxUrl(actionProgress.txHash as string | undefined)}
+        onRetry={actionRetry}
+      />
 
     </div>
   );

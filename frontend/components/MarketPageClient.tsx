@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, use } from "react";
+import { useState, useEffect, use, useRef } from "react";
 import Link from "next/link";
 import { createPublicClient, createWalletClient, custom, http, parseAbiItem } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
@@ -11,6 +11,7 @@ import OrderForm from "@/components/OrderForm";
 import PositionsPanel from "@/components/PositionsPanel";
 import PriceChart from "@/components/PriceChart";
 import WalletButton from "@/components/WalletButton";
+import ActionModal from "@/components/ui/ActionModal";
 import { getMarket, MOCK_MARKETS, type Market } from "@/lib/polymarket";
 import { getRelayerUrl } from "@/lib/relayerUrl";
 import {
@@ -30,6 +31,7 @@ import {
   IS_MAINNET,
 } from "@/lib/chain";
 import { clsx } from "clsx";
+import { IDLE_ACTION_PROGRESS, emitActionTiming, type ActionProgressState, type ActionKind } from "@/lib/ui/action-progress";
 
 // ── Viem public client (read-only, no wallet needed) ─────────────────────────
 const publicClient = createPublicClient({
@@ -144,12 +146,85 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   const [claimLoading, setClaimLoading] = useState(false);
   const [balanceVersion, setBalanceVersion] = useState(0);
   const [historicalMarketIds, setHistoricalMarketIds] = useState<`0x${string}`[]>([]);
+  const [actionProgress, setActionProgress] = useState<ActionProgressState>(IDLE_ACTION_PROGRESS);
+  const [actionRetry, setActionRetry] = useState<(() => void) | null>(null);
+  const tradingPanelRef = useRef<HTMLDivElement | null>(null);
 
   const { authenticated, login } = usePrivy();
   const { wallets } = useWallets();
   const wallet        = wallets[0];
   const walletAddress = wallet?.address as `0x${string}` | undefined;
   const isConnected   = authenticated && !!walletAddress;
+
+  const setTradingTab = (tab: "order" | "positions") => {
+    const node = tradingPanelRef.current;
+    const prevTop = node?.scrollTop ?? 0;
+    setActiveTab(tab);
+    requestAnimationFrame(() => {
+      if (node) node.scrollTop = prevTop;
+    });
+  };
+
+  const explorerTxUrl = (hash?: string) => {
+    if (!hash) return null;
+    const base = ACTIVE_CHAIN.blockExplorers?.default?.url;
+    if (!base) return null;
+    return `${base.replace(/\/$/, "")}/tx/${hash}`;
+  };
+
+  const beginAction = (kind: ActionKind, title: string, message: string, helper?: string) => {
+    setActionProgress({
+      open: true,
+      kind,
+      title,
+      stage: "submitting",
+      message,
+      helper,
+      startedAt: Date.now(),
+    });
+    setActionRetry(null);
+  };
+
+  const setActionConfirming = (txHash?: string, message = "Confirming on-chain...", helper?: string) => {
+    setActionProgress((prev) => ({
+      ...prev,
+      open: true,
+      stage: "confirming",
+      txHash: txHash ?? prev.txHash,
+      message,
+      helper: helper ?? prev.helper,
+    }));
+  };
+
+  const settleAction = (message: string, helper?: string) => {
+    const settledAt = Date.now();
+    setActionProgress((prev) => {
+      emitActionTiming({
+        kind: prev.kind,
+        startedAt: prev.startedAt ?? undefined,
+        settledAt,
+      });
+      return {
+        ...prev,
+        open: true,
+        stage: "settled",
+        message,
+        helper: helper ?? prev.helper,
+      };
+    });
+    setTimeout(() => setActionProgress(IDLE_ACTION_PROGRESS), 1500);
+  };
+
+  const failAction = (error: string, retry?: () => void) => {
+    setActionProgress((prev) => ({
+      ...prev,
+      open: true,
+      stage: "failed",
+      error,
+      message: error,
+    }));
+    setActionRetry(() => retry ?? null);
+  };
 
   // Track the best available provider's chain via EIP-6963 / window.ethereum events.
   const [rawChainId, setRawChainId]   = useState<string | null>(null);
@@ -438,7 +513,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
               setCommitments((prev) => [...prev, { hash: actualCommitment, amount: params.amount, trader: walletAddress, timestamp: Date.now() }]);
               setBatch((prev) => ({ ...prev, commitmentCount: prev.commitmentCount + 1, totalDeposited: prev.totalDeposited + params.amount }));
             }
-            setActiveTab("positions");
+            setTradingTab("positions");
             try {
               const key = `predacy:orders:${walletAddress!.toLowerCase()}`;
               const existing: unknown[] = JSON.parse(localStorage.getItem(key) ?? "[]");
@@ -774,7 +849,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         }));
       }
 
-      setActiveTab("positions");
+      setTradingTab("positions");
 
       // Persist locally — store order preimage for ZK claim proof at claim time.
       // ephemeralKey stored for USDC recovery: if settlement ever fails, import it
@@ -795,6 +870,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
           timestamp:       Date.now(),
           ephemeralKey:    ephemeralPrivateKey,   // recovery: import into MetaMask if stuck
           ephemeralAddress: ephemeralAddress,
+          settleTxHash:    relayerData.txHash ?? undefined,
         });
         localStorage.setItem(key, JSON.stringify(existing.slice(0, 200)));
       } catch { /* ignore quota / SSR errors */ }
@@ -894,6 +970,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       const err = await resp.json().catch(() => ({ error: "Relayer error" }));
       throw new Error(err.error ?? `Relayer returned ${resp.status}`);
     }
+    const relayerData = await resp.json().catch(() => ({}));
 
     if (walletAddress) {
       setCommitments((prev) => [
@@ -907,12 +984,12 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       }));
     }
 
-    setActiveTab("positions");
+    setTradingTab("positions");
 
     try {
       const key = `predacy:orders:${walletAddress!.toLowerCase()}`;
       const existing: unknown[] = JSON.parse(localStorage.getItem(key) ?? "[]");
-      existing.unshift({
+        existing.unshift({
         commitment:     params.commitment,
         salt:           params.salt,
         amount:         params.amount.toString(),
@@ -921,9 +998,10 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         batchId:        batch.batchId.toString(),
         marketId:       id,
         marketQuestion: market?.question ?? null,
-        timestamp:      Date.now(),
-        // No ephemeral wallet for sell orders — real wallet signs everything directly
-      });
+          timestamp:      Date.now(),
+          // No ephemeral wallet for sell orders — real wallet signs everything directly
+          settleTxHash:   relayerData.txHash ?? undefined,
+        });
       localStorage.setItem(key, JSON.stringify(existing.slice(0, 200)));
     } catch { /* ignore quota / SSR errors */ }
   };
@@ -960,6 +1038,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   const handleClaimPosition = async (batchId: bigint) => {
     setClaimLoading(true);
     setChainError(null);
+    beginAction("claim", "Claim Position", "Submitting claim proof request...", "Submitting → Confirming → Settled");
     try {
       if (!walletAddress) throw new Error("Wallet not connected");
       const storageKey = `predacy:orders:${walletAddress.toLowerCase()}`;
@@ -998,6 +1077,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       }
 
       const { txHash } = await resp.json();
+      setActionConfirming(txHash, "Claim transaction submitted. Confirming on-chain...");
 
       // Wait for the relayer's tx to land
       const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash as `0x${string}` });
@@ -1005,12 +1085,23 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         throw new Error("Claim transaction reverted — the batch may not be fully settled yet. Try again in a few seconds.");
       }
 
+      try {
+        const allOrders: Array<Record<string, unknown>> = JSON.parse(localStorage.getItem(storageKey) ?? "[]");
+        localStorage.setItem(storageKey, JSON.stringify(
+          allOrders.map((o) => o.batchId === batchId.toString() ? { ...o, claimTxHash: txHash } : o)
+        ));
+      } catch { /* ignore */ }
+
       if (batchId === batch.batchId) {
         setPosition((p) => p ? { ...p, claimed: true } : p);
       }
       setBalanceVersion(v => v + 1);
+      settleAction("Claim settled successfully");
     } catch (e: any) {
-      if (e?.code !== 4001) setChainError(e.message ?? "Claim failed");
+      if (e?.code !== 4001) {
+        setChainError(e.message ?? "Claim failed");
+        failAction(e.message ?? "Claim failed", () => { void handleClaimPosition(batchId); });
+      }
       throw e;
     } finally {
       setClaimLoading(false);
@@ -1205,7 +1296,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
             <div className="flex items-center flex-1">
               <button
                 type="button"
-                onClick={() => setActiveTab("order")}
+                onClick={() => setTradingTab("order")}
                 className={clsx(
                     "px-3 py-3 text-[11px] tracking-widest uppercase transition-colors border-b-2",
                   activeTab === "order"
@@ -1217,7 +1308,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
               </button>
               <button
                 type="button"
-                onClick={() => setActiveTab("positions")}
+                onClick={() => setTradingTab("positions")}
                 className={clsx(
                     "px-3 py-3 text-[11px] tracking-widest uppercase transition-colors border-b-2",
                   activeTab === "positions"
@@ -1247,6 +1338,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
             </div>
           </div>
 
+          <div ref={tradingPanelRef} className="flex-1 min-h-0 overflow-y-auto">
           {activeTab === "positions" ? (
             /* My Positions panel — multi-batch history + claim */
             isConnected && walletAddress ? (
@@ -1462,8 +1554,21 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
               />
             </div>
           )}
+          </div>
         </div>
       </div>
+
+      <ActionModal
+        open={actionProgress.open}
+        title={actionProgress.title || "Action Progress"}
+        onClose={() => {
+          setActionProgress(IDLE_ACTION_PROGRESS);
+          setActionRetry(null);
+        }}
+        progress={actionProgress}
+        txUrl={explorerTxUrl(actionProgress.txHash as string | undefined)}
+        onRetry={actionRetry}
+      />
     </div>
   );
 }

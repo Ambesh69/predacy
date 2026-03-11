@@ -5,6 +5,7 @@ import { createPublicClient, http, keccak256, encodeAbiParameters } from "viem";
 import { clsx } from "clsx";
 import { BATCH_VAULT_ABI, BatchStatus, getContracts } from "@/lib/contracts";
 import { ACTIVE_CHAIN } from "@/lib/chain";
+import ActionModal from "@/components/ui/ActionModal";
 
 const publicClient = createPublicClient({
   chain: ACTIVE_CHAIN,
@@ -55,6 +56,9 @@ interface HistoricalPosition {
   swept?: boolean;
   /** ProxyWallet address for claimed positions — tokens route here for Railgun shielding */
   proxyWalletAddress?: `0x${string}`;
+  claimTxHash?: `0x${string}` | string;
+  settleTxHash?: `0x${string}` | string;
+  transferTxHash?: `0x${string}` | string;
 }
 
 interface PositionsPanelProps {
@@ -109,6 +113,13 @@ function timeAgo(ts: number) {
   const hrs = Math.floor(mins / 60);
   if (hrs < 24)  return `${hrs}h ago`;
   return `${Math.floor(hrs / 24)}d ago`;
+}
+
+function txUrl(hash?: `0x${string}` | string): string | null {
+  if (!hash) return null;
+  const base = ACTIVE_CHAIN.blockExplorers?.default?.url;
+  if (!base) return null;
+  return `${base.replace(/\/$/, "")}/tx/${hash}`;
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
@@ -171,13 +182,16 @@ interface PositionRowProps {
   onTransfer?:     () => void;
   isTransferring?: boolean;
   transferError?:  string;
+  txUrl?: string | null;
 }
 
 function PositionRow({
   batchId, position, side, clearingPrice, marketQuestion, shares,
   onClaim, isClaiming, claimError, isActive, onClose, proxyWalletAddress,
   onTransfer, isTransferring, transferError,
+  txUrl,
 }: PositionRowProps) {
+  const [confirmOpen, setConfirmOpen] = useState<null | "close" | "transfer">(null);
 
   const isSell      = side === YES_SELL || side === NO_SELL;
   const avgCents    = clearingPrice > 0n ? (Number(clearingPrice) / 1e4).toFixed(1) : "—";
@@ -189,7 +203,40 @@ function PositionRow({
     : fUsdc(position.filledAmount);
 
   return (
-    <div className="px-4 py-3 border-b border-border/40 last:border-b-0 space-y-2">
+    <div className="px-4 py-3 border-b border-border/40 last:border-b-0 space-y-2 group/position-row">
+      <ActionModal
+        open={confirmOpen !== null}
+        title={confirmOpen === "transfer" ? "Confirm Transfer" : "Confirm Close Position"}
+        onClose={() => setConfirmOpen(null)}
+      >
+        <div className="space-y-3">
+          <p className="text-[12px] text-muted-dim">
+            {confirmOpen === "transfer"
+              ? "Move claimed tokens from ProxyWallet to your main wallet?"
+              : "Pre-fill a close order from this claimed position?"}
+          </p>
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setConfirmOpen(null)}
+              className="px-3 py-1.5 text-[10px] tracking-widest uppercase border border-border text-muted hover:text-text hover:border-border-bright transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (confirmOpen === "transfer" && onTransfer) onTransfer();
+                if (confirmOpen === "close" && onClose) onClose();
+                setConfirmOpen(null);
+              }}
+              className="px-3 py-1.5 text-[10px] tracking-widest uppercase border border-accent text-accent hover:bg-accent/5 transition-colors"
+            >
+              Confirm
+            </button>
+          </div>
+        </div>
+      </ActionModal>
       {/* Row header: direction badge + question + batch ID */}
       <div className="flex items-start gap-2 min-w-0">
         <div className="flex-shrink-0 pt-px">
@@ -199,6 +246,17 @@ function PositionRow({
           {marketQuestion ?? `Batch #${batchId.toString()}`}
         </p>
         <span className="text-[9px] text-muted-dim font-mono flex-shrink-0 pt-px">#{batchId.toString()}</span>
+        {txUrl && (
+          <a
+            href={txUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="opacity-0 group-hover/position-row:opacity-100 group-focus-within/position-row:opacity-100 transition-opacity text-[9px] text-muted hover:text-text tracking-widest uppercase border border-border px-1.5 py-0.5 flex-shrink-0"
+            aria-label="Open on block explorer"
+          >
+            TX ↗
+          </a>
+        )}
       </div>
 
       {/* Metrics row */}
@@ -274,7 +332,7 @@ function PositionRow({
               {/* Move to wallet — transfers CTF ERC-1155 to main wallet for selling */}
               {onTransfer && (
                 <button
-                  onClick={onTransfer}
+                  onClick={() => setConfirmOpen("transfer")}
                   disabled={isTransferring}
                   className={clsx(
                     "w-full py-1.5 border text-[10px] tracking-widest uppercase transition-colors",
@@ -313,7 +371,7 @@ function PositionRow({
               <span className="text-[9px] text-accent/60 tracking-widest uppercase">CLAIMED ✓</span>
               {onClose && (
                 <button
-                  onClick={onClose}
+                  onClick={() => setConfirmOpen("close")}
                   className="w-full py-1.5 border border-border-bright text-muted text-[10px] tracking-widest uppercase hover:border-text/30 hover:text-text transition-colors"
                 >
                   CLOSE POSITION
@@ -337,10 +395,11 @@ interface ActivityRowProps {
   marketQuestion?: string;
   timestamp?:     number;
   batchStatus?:   BatchStatus;
+  txUrl?: string | null;
 }
 
 function ActivityRow({
-  batchId, side, amount, clearingPrice, shares, marketQuestion, timestamp, batchStatus,
+  batchId, side, amount, clearingPrice, shares, marketQuestion, timestamp, batchStatus, txUrl,
 }: ActivityRowProps) {
   const isBuyOrder = side === YES_BUY || side === NO_BUY;
   const tokenLabel = (side === YES_BUY || side === YES_SELL) ? "YES" : "NO";
@@ -354,7 +413,7 @@ function ActivityRow({
     : null;
 
   return (
-    <div className="px-4 py-3 border-b border-border/40 last:border-b-0 flex items-start gap-3">
+    <div className="px-4 py-3 border-b border-border/40 last:border-b-0 flex items-start gap-3 group/activity-row">
       {/* Type badge */}
       <div className="flex-shrink-0 mt-0.5">
         <DirectionBadge side={side} />
@@ -380,6 +439,16 @@ function ActivityRow({
         {batchStatus === BatchStatus.SETTLED && (
           <span className="text-[8px] text-muted-dim border border-border px-1">SETTLED</span>
         )}
+        {txUrl && (
+          <a
+            href={txUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="block opacity-0 group-hover/activity-row:opacity-100 group-focus-within/activity-row:opacity-100 transition-opacity text-[9px] text-muted hover:text-text"
+          >
+            Explorer ↗
+          </a>
+        )}
       </div>
     </div>
   );
@@ -395,6 +464,7 @@ function UnfilledCard({ hp, onSweep }: {
   const [sweeping, setSweeping] = useState(false);
   const [swept,    setSwept]    = useState(hp.swept === true);
   const [sweepErr, setSweepErr] = useState<string | null>(null);
+  const [confirmSweep, setConfirmSweep] = useState(false);
 
   const copyKey = async () => {
     if (!hp.ephemeralKey) return;
@@ -423,6 +493,34 @@ function UnfilledCard({ hp, onSweep }: {
 
   return (
     <div className="px-4 py-3 border-b border-border/40">
+      <ActionModal
+        open={confirmSweep}
+        title="Confirm Sweep"
+        onClose={() => setConfirmSweep(false)}
+      >
+        <div className="space-y-3">
+          <p className="text-[12px] text-muted-dim">Sweep remaining USDC from the ephemeral wallet back to your main wallet?</p>
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setConfirmSweep(false)}
+              className="px-3 py-1.5 text-[10px] tracking-widest uppercase border border-border text-muted hover:text-text hover:border-border-bright transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setConfirmSweep(false);
+                void doSweep();
+              }}
+              className="px-3 py-1.5 text-[10px] tracking-widest uppercase border border-accent text-accent hover:bg-accent/5 transition-colors"
+            >
+              Confirm
+            </button>
+          </div>
+        </div>
+      </ActionModal>
       <div className="flex items-center gap-2 mb-1">
         <DirectionBadge side={hp.side} />
         <span className="text-[10px] text-muted tracking-widest uppercase">Not filled</span>
@@ -445,7 +543,7 @@ function UnfilledCard({ hp, onSweep }: {
               {/* One-click sweep — signs EIP-3009 with ephemeral key, real wallet submits */}
               {onSweep && (
                 <button
-                  onClick={doSweep}
+                  onClick={() => setConfirmSweep(true)}
                   disabled={sweeping}
                   className={clsx(
                     "w-full py-1.5 border text-[10px] tracking-widest uppercase transition-colors",
@@ -509,6 +607,7 @@ export default function PositionsPanel({
   const [allStoredOrders,     setAllStoredOrders]     = useState<Array<{
     batchId: string; side: number; amount: string; marketQuestion?: string;
     timestamp?: number; clearingPrice?: bigint; shares?: number; batchStatus?: BatchStatus;
+    claimTxHash?: `0x${string}` | string; settleTxHash?: `0x${string}` | string; transferTxHash?: `0x${string}` | string;
   }>>([]);
   const [scanning,         setScanning]         = useState(false);
   const [claimingBatchId,  setClaimingBatchId]  = useState<bigint | null>(null);
@@ -592,6 +691,9 @@ export default function PositionsPanel({
       amount: string; marketQuestion?: string; timestamp?: number;
       marketId?: string; ephemeralKey?: string; ephemeralAddress?: string; swept?: boolean;
       proxyWalletAddress?: `0x${string}`;
+      claimTxHash?: `0x${string}` | string;
+      settleTxHash?: `0x${string}` | string;
+      transferTxHash?: `0x${string}` | string;
     }> = [];
     const storageKey = `predacy:orders:${walletAddress.toLowerCase()}`;
     try {
@@ -618,6 +720,9 @@ export default function PositionsPanel({
       amount:         o.amount,
       marketQuestion: o.marketQuestion,
       timestamp:      o.timestamp,
+      claimTxHash:    o.claimTxHash,
+      settleTxHash:   o.settleTxHash,
+      transferTxHash: o.transferTxHash,
     }));
 
     await Promise.allSettled(
@@ -670,6 +775,9 @@ export default function PositionsPanel({
                 ephemeralAddress: isBuyOrder ? order.ephemeralAddress : undefined,
                 unfilledAmount:   isBuyOrder ? BigInt(order.amount)   : undefined,
                 swept:            order.swept === true,
+                claimTxHash:      order.claimTxHash,
+                settleTxHash:     order.settleTxHash,
+                transferTxHash:   order.transferTxHash,
               });
             }
             return;
@@ -724,6 +832,9 @@ export default function PositionsPanel({
             position:          { ...posRaw, claimed },
             shares,
             proxyWalletAddress: order.proxyWalletAddress,
+            claimTxHash: order.claimTxHash,
+            settleTxHash: order.settleTxHash,
+            transferTxHash: order.transferTxHash,
           });
         } catch { /* batch doesn't exist or RPC hiccup — skip */ }
       })
@@ -927,7 +1038,7 @@ export default function PositionsPanel({
 
               {/* Current batch settled buy (claimed or unclaimed — stays in Active) */}
               {currentPositionInActive && currentPosition && (
-                <PositionRow
+              <PositionRow
                   batchId={currentBatchId}
                   position={currentPosition}
                   side={currentSide}
@@ -936,6 +1047,7 @@ export default function PositionsPanel({
                   isClaiming={claimingBatchId === currentBatchId}
                   claimError={claimErrors[currentBatchId.toString()]}
                   isActive={!currentPosition.claimed}
+                  txUrl={txUrl(undefined)}
                   onClose={
                     currentPosition.claimed && onClosePosition
                       ? () => onClosePosition(computeYesAmount(currentPosition.filledAmount, currentBatchClearingPrice), currentBatchClearingPrice)
@@ -1020,6 +1132,7 @@ export default function PositionsPanel({
                     }
                     isTransferring={transferringId === hp.batchId}
                     transferError={transferErrors[hp.batchId.toString()]}
+                    txUrl={txUrl(hp.claimTxHash ?? hp.transferTxHash ?? hp.settleTxHash)}
                     onClose={
                       (hp.side === YES_BUY || hp.side === NO_BUY) && hp.position.claimed && !hp.proxyWalletAddress && onClosePosition
                         ? () => onClosePosition(computeYesAmount(hp.position.filledAmount, hp.clearingPrice), hp.clearingPrice)
@@ -1054,6 +1167,7 @@ export default function PositionsPanel({
                       isClaiming={claimingBatchId === currentBatchId}
                       claimError={claimErrors[currentBatchId.toString()]}
                       isActive={!currentPosition.claimed}
+                      txUrl={txUrl(undefined)}
                     />
                   )}
                   {closedPositions.map((hp) => (
@@ -1069,6 +1183,7 @@ export default function PositionsPanel({
                       isClaiming={claimingBatchId === hp.batchId}
                       claimError={claimErrors[hp.batchId.toString()]}
                       isActive={!hp.position.claimed}
+                      txUrl={txUrl(hp.claimTxHash ?? hp.transferTxHash ?? hp.settleTxHash)}
                     />
                   ))}
                 </>
@@ -1090,6 +1205,7 @@ export default function PositionsPanel({
               side={currentSide}
               amount={currentForActivity.amount ?? 0n}
               batchStatus={currentBatchStatus}
+              txUrl={null}
             />
           )}
 
@@ -1112,6 +1228,7 @@ export default function PositionsPanel({
                 marketQuestion={o.marketQuestion}
                 timestamp={o.timestamp}
                 batchStatus={o.batchStatus}
+                txUrl={txUrl(o.claimTxHash ?? o.transferTxHash ?? o.settleTxHash)}
               />
             ))
           )}
