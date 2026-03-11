@@ -712,7 +712,13 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     setOrderSealed(false);
   }, [batch.batchId]);
 
-  // ── Clear stale error banner when wallet reconnects ──────────────────────────
+  // ── Clear stale error banner on success or wallet reconnect ─────────────────
+  // When an order is sealed, any lingering error from a previous failed attempt
+  // should disappear — the success supercedes it.
+  useEffect(() => {
+    if (orderSealed) setChainError(null);
+  }, [orderSealed]);
+
   // Watch both walletAddress (different wallet) and authenticated (same wallet
   // disconnect→reconnect cycle) so the banner clears in either case.
   useEffect(() => {
