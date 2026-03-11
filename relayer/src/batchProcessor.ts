@@ -759,8 +759,12 @@ export class BatchProcessor {
 
       clobYesTokenId = BigInt(yesTokenStr);
       clobNoTokenId  = BigInt(noTokenStr);
-    } catch (err) {
-      console.warn(`[BatchProcessor] ensureMarketTokenIds: Gamma API error — skipping:`, err);
+    } catch (err: any) {
+      // "Market not found" is a hard failure — no point opening a batch for a
+      // market that doesn't exist on Polymarket. Re-throw so ensureMarket() can
+      // reject the order. Other Gamma API errors are transient; skip gracefully.
+      if (err?.message?.includes("Market not found")) throw err;
+      console.warn(`[BatchProcessor] ensureMarketTokenIds: Gamma API error — skipping: ${err?.message}`);
       return;
     }
 

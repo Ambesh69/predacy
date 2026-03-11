@@ -135,7 +135,14 @@ async function ensureMarket(marketId: `0x${string}`): Promise<MarketState> {
     try {
       await state.processor.ensureMarketTokenIds(marketId);
     } catch (err: any) {
-      console.warn(`[Relayer] ensureMarketTokenIds for ${marketId} failed (non-fatal):`, err.message);
+      if (err?.message?.includes("Market not found")) {
+        // Hard failure — market doesn't exist on Polymarket. Clean up and reject
+        // the order so we don't waste MATIC on openBatch for a phantom market.
+        activeMarkets.delete(key);
+        throw new Error(`Unknown market: ${marketId}`);
+      }
+      // Transient Gamma API error — proceed with batch opening anyway.
+      console.warn(`[Relayer] ensureMarketTokenIds for ${marketId} failed (non-fatal): ${err.message}`);
     }
     try {
       state.currentBatchId = await state.processor.openBatch(marketId);
