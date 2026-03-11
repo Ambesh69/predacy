@@ -560,9 +560,9 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       //     Less private: on-chain Transfer(Alice → ephemeral) is visible.
       //     "FUNDING EPHEMERAL WALLET…" shown here — submitStep = "approving"
 
-      // Pre-flight balance check: USDC.e reverts with empty revert data when
-      // balance is insufficient, which viem shows as "Unexpected error". Check
-      // first so the user gets a clear message rather than a cryptic revert.
+      // Pre-flight balance check — gives a clear human-readable error before
+      // hitting the wallet. USDC.e uses old SafeMath that reverts with empty bytes,
+      // so without this check viem would show "Unexpected error".
       const usdcBalance = await publicClient.readContract({
         address: contracts.usdc,
         abi:     ERC20_ABI,
@@ -575,16 +575,22 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         throw new Error(`Insufficient USDC balance — you have $${have} but need $${need} USDC.e on Polygon. Bridge or swap USDC to Polygon first.`);
       }
 
-      // Explicit gas avoids eth_estimateGas — Phantom's Privy-wrapped provider
-      // doesn't reliably handle estimateGas on Polygon, returning "Unexpected error".
-      // ERC-20 transfer safely fits in 150k gas.
-      const fundTx = await walletClient.writeContract({
+      // Simulate via our reliable public client (llamarpc/meowrpc/ankr) to:
+      //   a) validate the transfer will succeed on-chain before asking the wallet
+      //   b) get a gas estimate from a working RPC (not Phantom's provider)
+      // The returned `request` is passed directly to writeContract so Phantom
+      // never needs to call eth_estimateGas — it just signs and broadcasts.
+      const { request: transferReq } = await publicClient.simulateContract({
         address: contracts.usdc,
         abi:     ERC20_ABI,
         functionName: "transfer",
         args:    [ephemeralAddress, params.amount],
-        gas:     150_000n,
+        account: walletAddress as `0x${string}`,
       });
+
+      // Fund ephemeral with USDC from real wallet (1 tx).
+      // writeContract receives the pre-validated request — no internal estimation.
+      const fundTx = await walletClient.writeContract(transferReq);
       await publicClient.waitForTransactionReceipt({ hash: fundTx });
 
       // 3. In-browser wallet client for ephemeral key — no MetaMask popups from here on
