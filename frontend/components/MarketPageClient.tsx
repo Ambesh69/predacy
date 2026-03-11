@@ -474,62 +474,18 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     const provider = await wallet.getEthereumProvider();
     const name = wallet.walletClientType ?? "wallet";
 
-    // Switch to Amoy — shows the wallet's native "Switch Network" dialog
+    // Use Privy's wallet.switchChain() — handles add+switch atomically for all
+    // wallet types. Raw wallet_switchEthereumChain via provider.request() hangs
+    // on Phantom's Privy-wrapped provider.
     try {
-      await provider.request({
-        method: "wallet_switchEthereumChain",
-        params: [{ chainId: ACTIVE_CHAIN_ID_HEX }],
-      });
+      await wallet.switchChain(ACTIVE_CHAIN.id);
     } catch (err: any) {
-      if (err.code === 4902) {
-        // Chain unknown to this wallet — add it first
-        const addParams = IS_MAINNET
-          ? {
-              chainId: ACTIVE_CHAIN_ID_HEX,
-              chainName: "Polygon",
-              nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 },
-              rpcUrls: ["https://polygon.llamarpc.com", "https://polygon.meowrpc.com", "https://rpc.ankr.com/polygon"],
-              blockExplorerUrls: ["https://polygonscan.com/"],
-            }
-          : {
-              chainId: ACTIVE_CHAIN_ID_HEX,
-              chainName: "Polygon Amoy",
-              nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 },
-              rpcUrls: ["https://rpc-amoy.polygon.technology/"],
-              blockExplorerUrls: ["https://amoy.polygonscan.com/"],
-            };
-        await provider.request({
-          method: "wallet_addEthereumChain",
-          params: [addParams],
-        });
-        await provider.request({
-          method: "wallet_switchEthereumChain",
-          params: [{ chainId: ACTIVE_CHAIN_ID_HEX }],
-        });
-      } else if (err.code === 4001) {
+      if (err.code === 4001 || err.message?.includes("rejected") || err.message?.includes("cancelled")) {
         throw new Error(`Network switch cancelled — please approve switching to ${ACTIVE_CHAIN_NAME}.`);
-      } else {
-        // Some wallets (e.g. Backpack) reject wallet_switchEthereumChain
-        // with proprietary error codes. Surface a clear message.
-        throw new Error(
-          `${name} declined the network switch (${err.message ?? err.code}). ` +
-          `Please manually switch ${name} to ${ACTIVE_CHAIN_NAME} (Chain ID ${ACTIVE_CHAIN.id}) ` +
-          `or disable ${name} and reconnect with MetaMask.`
-        );
       }
-    }
-
-    // Poll until eth_chainId confirms the target chain
-    let onTargetChain = false;
-    for (let i = 0; i < 15; i++) {
-      const id = (await provider.request({ method: "eth_chainId" })) as string;
-      if (id.toLowerCase() === ACTIVE_CHAIN_ID_HEX) { onTargetChain = true; break; }
-      await new Promise((r) => setTimeout(r, 200));
-    }
-    if (!onTargetChain) {
       throw new Error(
-        `${name} is still on the wrong network. Please switch to ${ACTIVE_CHAIN_NAME} ` +
-        `(Chain ID ${ACTIVE_CHAIN.id}) inside ${name} and try again.`
+        `${name} declined the network switch. Please manually switch to ${ACTIVE_CHAIN_NAME} ` +
+        `(Chain ID ${ACTIVE_CHAIN.id}) in ${name}.`
       );
     }
 

@@ -713,28 +713,17 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     // wallets) to return 4100 "not authorized" on writeContract calls.
     const provider = await wallet.getEthereumProvider();
     const name = wallet.walletClientType ?? "wallet";
+    // Use Privy's wallet.switchChain() — handles add+switch atomically for all
+    // wallet types. Raw wallet_switchEthereumChain via provider.request() hangs
+    // on Phantom's Privy-wrapped provider.
     try {
-      await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: ACTIVE_CHAIN_ID_HEX }] });
+      await wallet.switchChain(ACTIVE_CHAIN.id);
     } catch (err: any) {
-      if (err.code === 4902) {
-        const addParams = IS_MAINNET
-          ? { chainId: ACTIVE_CHAIN_ID_HEX, chainName: "Polygon", nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 }, rpcUrls: ["https://polygon.llamarpc.com", "https://polygon.meowrpc.com", "https://rpc.ankr.com/polygon"], blockExplorerUrls: ["https://polygonscan.com/"] }
-          : { chainId: ACTIVE_CHAIN_ID_HEX, chainName: "Polygon Amoy", nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 }, rpcUrls: ["https://rpc-amoy.polygon.technology/"], blockExplorerUrls: ["https://amoy.polygonscan.com/"] };
-        await provider.request({ method: "wallet_addEthereumChain", params: [addParams] });
-        await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: ACTIVE_CHAIN_ID_HEX }] });
-      } else if (err.code === 4001) {
+      if (err.code === 4001 || err.message?.includes("rejected") || err.message?.includes("cancelled")) {
         throw new Error(`Network switch cancelled — please approve switching to ${ACTIVE_CHAIN_NAME}.`);
-      } else {
-        throw new Error(`${name} declined the network switch. Please manually switch to ${ACTIVE_CHAIN_NAME} (Chain ID ${ACTIVE_CHAIN.id}).`);
       }
+      throw new Error(`Please switch to ${ACTIVE_CHAIN_NAME} (Chain ID ${ACTIVE_CHAIN.id}) in ${name}.`);
     }
-    let onTarget = false;
-    for (let i = 0; i < 15; i++) {
-      const cid = await provider.request({ method: "eth_chainId" });
-      if ((cid as string).toLowerCase() === ACTIVE_CHAIN_ID_HEX) { onTarget = true; break; }
-      await new Promise((r) => setTimeout(r, 200));
-    }
-    if (!onTarget) throw new Error(`Still on wrong network. Please switch to ${ACTIVE_CHAIN_NAME} in your wallet.`);
     return createWalletClient({ account: walletAddress, chain: ACTIVE_CHAIN, transport: custom(provider) });
   };
 
