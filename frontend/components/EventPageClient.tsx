@@ -738,16 +738,24 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     // preventing 4100 "not authorized" on the subsequent eth_sendTransaction.
     try { await provider.request({ method: "eth_requestAccounts" }); } catch { /* ignore — some providers don't expose it */ }
     const name = wallet.walletClientType ?? "wallet";
-    // Use Privy's wallet.switchChain() — handles add+switch atomically for all
-    // wallet types. Raw wallet_switchEthereumChain via provider.request() hangs
-    // on Phantom's Privy-wrapped provider.
+    // Only switch chain if actually needed — calling switchChain when already on
+    // the right network briefly disrupts Phantom's provider authorization, causing
+    // the very next eth_sendTransaction to return 4100 "not authorized".
+    let alreadyOnChain = false;
     try {
-      await wallet.switchChain(ACTIVE_CHAIN.id);
-    } catch (err: any) {
-      if (err.code === 4001 || err.message?.includes("rejected") || err.message?.includes("cancelled")) {
-        throw new Error(`Network switch cancelled — please approve switching to ${ACTIVE_CHAIN_NAME}.`);
+      const hexId = await provider.request({ method: "eth_chainId" }) as string;
+      alreadyOnChain = parseInt(hexId, 16) === ACTIVE_CHAIN.id;
+    } catch { /* can't check — assume wrong chain */ }
+
+    if (!alreadyOnChain) {
+      try {
+        await wallet.switchChain(ACTIVE_CHAIN.id);
+      } catch (err: any) {
+        if (err.code === 4001 || err.message?.includes("rejected") || err.message?.includes("cancelled")) {
+          throw new Error(`Network switch cancelled — please approve switching to ${ACTIVE_CHAIN_NAME}.`);
+        }
+        throw new Error(`Please switch to ${ACTIVE_CHAIN_NAME} (Chain ID ${ACTIVE_CHAIN.id}) in ${name}.`);
       }
-      throw new Error(`Please switch to ${ACTIVE_CHAIN_NAME} (Chain ID ${ACTIVE_CHAIN.id}) in ${name}.`);
     }
     return createWalletClient({ account: walletAddress, chain: ACTIVE_CHAIN, transport: custom(provider) });
   };
@@ -1256,20 +1264,22 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         throw new Error(`Insufficient USDC balance — you have $${have} but need $${need} USDC.e on Polygon. Bridge or swap USDC to Polygon first.`);
       }
 
-      // Simulate via our reliable public client (llamarpc/meowrpc/ankr) to:
-      //   a) validate the transfer will succeed on-chain before asking the wallet
-      //   b) get a gas estimate from a working RPC (not Phantom's provider)
-      // The returned `request` is passed directly to writeContract so Phantom
-      // never needs to call eth_estimateGas — it just signs and broadcasts.
-      const { request: transferReq } = await publicClient.simulateContract({
-        address: contracts.usdc, abi: ERC20_ABI, functionName: "transfer",
-        args:    [ephemeralAddress, params.amount],
-        account: walletAddress as `0x${string}`,
-      });
-
-      // Fund ephemeral with USDC from real wallet (1 tx).
-      // writeContract receives the pre-validated request — no internal estimation.
-      const fundTx = await walletClient.writeContract(transferReq);
+      // Send USDC directly via the raw EIP-1193 provider instead of
+      // walletClient.writeContract. viem's writeContract enriches the tx with
+      // EIP-1559 fields (maxFeePerGas/maxPriorityFeePerGas/type=2) that
+      // Phantom's Polygon EVM provider doesn't handle reliably, causing 4100.
+      // Direct provider.request with only {from, to, data, gas} lets Phantom
+      // decide the tx type and gas pricing — it handles this correctly.
+      const userProvider = await wallet.getEthereumProvider();
+      const fundTx = await userProvider.request({
+        method: "eth_sendTransaction",
+        params: [{
+          from: walletAddress,
+          to:   contracts.usdc as string,
+          data: encodeFunctionData({ abi: ERC20_ABI, functionName: "transfer", args: [ephemeralAddress, params.amount] }),
+          gas:  `0x${(100_000n).toString(16)}`,   // 100k — ERC-20 transfer uses ~50k
+        }],
+      }) as `0x${string}`;
       await publicClient.waitForTransactionReceipt({ hash: fundTx });
 
       // Persist ephemeral key immediately after funding so USDC can always be swept
