@@ -484,24 +484,28 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     if (!walletAddress || !wallet) throw new Error("Wallet not connected");
     const name = wallet.walletClientType ?? "wallet";
 
-    // Phantom-specific: Privy's wrapped provider intercepts eth_requestAccounts and
-    // shows a SIWE "Sign In" popup on Ethereum mainnet instead of authorizing Phantom's
-    // native EVM session. Access window.phantom.ethereum directly — eth_requestAccounts
-    // on the native provider shows Phantom's compact EVM-connect flow (correct UX).
-    // For all other wallets we use Privy's wrapped provider as before.
-    const phantomNativeEvm =
-      wallet.walletClientType === "phantom" && typeof window !== "undefined"
-        ? (window as any).phantom?.ethereum ?? null
-        : null;
-
-    const provider = phantomNativeEvm ?? (await wallet.getEthereumProvider());
-
-    // Authorize the EVM session. Safe to call on native Phantom provider (shows its
-    // compact "Connect" popup if not yet connected); skip for Privy-wrapped providers
-    // where it would trigger a SIWE login flow instead.
-    if (phantomNativeEvm) {
-      try { await phantomNativeEvm.request({ method: "eth_requestAccounts" }); } catch { /* ignore */ }
+    // Privy intercepts eth_requestAccounts on its wrapped provider and shows a SIWE
+    // "Sign In" popup on Ethereum mainnet — useless for authorizing a Polygon tx.
+    // Detect Phantom's native EVM provider via address match (non-interactive
+    // eth_accounts), NOT walletClientType — Privy may return different type strings
+    // depending on how Phantom was connected. If the native provider already has our
+    // address, use it directly for all EVM calls (bypasses Privy's SIWE interception).
+    let phantomNativeEvm: any = null;
+    if (typeof window !== "undefined") {
+      const candidate = (window as any).phantom?.ethereum;
+      if (candidate) {
+        try {
+          const accts = (await candidate.request({ method: "eth_accounts" })) as string[];
+          if (accts.some((a: string) => a.toLowerCase() === walletAddress.toLowerCase())) {
+            phantomNativeEvm = candidate;
+          }
+        } catch { /* unavailable */ }
+      }
     }
+    const provider = phantomNativeEvm ?? (await wallet.getEthereumProvider());
+    // Do NOT call eth_requestAccounts here — on Privy's wrapped provider it triggers
+    // SIWE instead of a wallet session refresh. eth_accounts already confirmed the
+    // native Phantom provider has our address; no auth popup is needed.
 
     // Only switch chain if actually needed — calling switchChain when already on
     // the right network briefly disrupts Phantom's provider authorization, causing
@@ -623,11 +627,10 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         fundTx = await userProvider.request({ method: "eth_sendTransaction", params: [txParams] }) as `0x${string}`;
       } catch (err0: any) {
         if (err0?.code === 4100 || err0?.message?.includes("Unauthorized")) {
-          // 4100 — re-authorize and retry once. Using the same provider instance as
-          // ensureAmoy: for Phantom this is window.phantom.ethereum (not Privy's
-          // wrapper), so eth_requestAccounts shows Phantom's compact EVM-connect
-          // popup rather than Privy's SIWE flow.
-          try { await userProvider.request({ method: "eth_requestAccounts" }); } catch { /* ignore */ }
+          // 4100 on first attempt — retry once. Do NOT call eth_requestAccounts before
+          // the retry: on Privy's wrapped provider it triggers SIWE instead of refreshing
+          // the session. The native Phantom path already confirmed authorization via
+          // eth_accounts in ensureAmoy; Privy's path has no safe re-auth option here.
           fundTx = await userProvider.request({ method: "eth_sendTransaction", params: [txParams] }) as `0x${string}`;
         } else {
           throw err0;
