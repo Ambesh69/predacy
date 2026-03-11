@@ -1401,55 +1401,46 @@ export class BatchProcessor {
     // Note: buys are blocking (FOK + balance poll).  Excess sells now also block
     // until USDC proceeds arrive in the relayer wallet before settleBatch is called.
 
-    // Sell excess YES tokens on CLOB first (relayer needs the USDC before settleBatch)
+    // Sell excess YES/NO tokens on CLOB first (relayer needs the USDC before settleBatch).
     //
-    // NegRisk caveat: lockFunds sends vault-side CTF position tokens (e.g. tokenId 650225…)
-    // to the relayer, but Polymarket's CLOB only trades the NegRisk-adapter tokens (e.g.
-    // 545330…). These are different ERC-1155 IDs and cannot be directly sold on the CLOB.
-    // When isNegRisk=true, skip the CLOB sell — settleBatch only needs USDC from the
-    // relayer (via ERC-20 transferFrom), which the relayer has from its own balance.
-    // The vault tokens stay in the relayer wallet; a separate admin step is needed to
-    // convert them (CTF.mergePositions + NegRisk adapter unwrap) to recover the USDC.
+    // For NegRisk markets: cachedYesToken / cachedNoToken ARE the NegRisk CLOB token IDs
+    // (registered via setMarketTokenIds before the batch opens). lockFunds uses
+    // _getYesTokenId → returns the registered NegRisk CLOB ID → sends those tokens to
+    // the relayer. The relayer can sell them on the CLOB normally.
+    //
+    // If the sell fails for any reason (e.g. a historical batch where tokens are wrong type),
+    // the catch block lets settlement proceed; settleBatch will pull USDC from the relayer
+    // wallet as a fallback (same behaviour as before).
     if (cachedYesToken && finalExcessYes > 0n && this.config.chainId === 137) {
-      if (isNegRisk) {
-        console.log(
-          `[BatchProcessor] NegRisk: skipping excess YES sell — vault tokens (${finalExcessYes}) ` +
-          `are standard CTF positions, not the NegRisk CLOB token. ` +
-          `settleBatch will pull USDC directly from the relayer wallet instead.`,
-        );
-      } else {
-        const usdcExpected = (finalExcessYes * effectiveClearingPrice) / PRICE_DEC;
-        console.log(`[BatchProcessor] Selling ${finalExcessYes} excess YES tokens on CLOB (expecting ${usdcExpected} USDC)`);
-        try {
-          const { orderId } = await this.polymarket.placeMarketSell(cachedYesToken, finalExcessYes);
-          console.log(`[BatchProcessor] Excess YES sell placed: orderId=${orderId}`);
-          // Wait for USDC proceeds to arrive before calling settleBatch.
-          await this._waitForUsdcProceeds(usdcExpected, "excess YES sell");
-        } catch (sellErr) {
-          console.warn(`[BatchProcessor] Excess YES sell failed (settleBatch may revert if USDC not received):`, sellErr);
-        }
+      const usdcExpected = (finalExcessYes * effectiveClearingPrice) / PRICE_DEC;
+      console.log(
+        `[BatchProcessor] Selling ${finalExcessYes} excess YES tokens on CLOB` +
+        `${isNegRisk ? " (NegRisk CLOB token)" : ""} (expecting ${usdcExpected} USDC)`,
+      );
+      try {
+        const { orderId } = await this.polymarket.placeMarketSell(cachedYesToken, finalExcessYes);
+        console.log(`[BatchProcessor] Excess YES sell placed: orderId=${orderId}`);
+        // Wait for USDC proceeds to arrive before calling settleBatch.
+        await this._waitForUsdcProceeds(usdcExpected, "excess YES sell");
+      } catch (sellErr) {
+        console.warn(`[BatchProcessor] Excess YES sell failed (settleBatch will pull USDC from relayer wallet instead):`, sellErr);
       }
     } else if (finalExcessYes > 0n && this.config.chainId !== 137) {
       console.log(`[BatchProcessor] Testnet: skipping excess YES sell (${finalExcessYes} tokens)`);
     }
 
     if (cachedNoToken && finalExcessNo > 0n && this.config.chainId === 137) {
-      if (isNegRisk) {
-        console.log(
-          `[BatchProcessor] NegRisk: skipping excess NO sell — vault tokens (${finalExcessNo}) ` +
-          `are standard CTF positions, not the NegRisk CLOB token. ` +
-          `settleBatch will pull USDC directly from the relayer wallet instead.`,
-        );
-      } else {
-        const usdcExpected = (finalExcessNo * noPrice) / PRICE_DEC;
-        console.log(`[BatchProcessor] Selling ${finalExcessNo} excess NO tokens on CLOB (expecting ${usdcExpected} USDC)`);
-        try {
-          const { orderId } = await this.polymarket.placeMarketSell(cachedNoToken, finalExcessNo);
-          console.log(`[BatchProcessor] Excess NO sell placed: orderId=${orderId}`);
-          await this._waitForUsdcProceeds(usdcExpected, "excess NO sell");
-        } catch (sellErr) {
-          console.warn(`[BatchProcessor] Excess NO sell failed (settleBatch may revert if USDC not received):`, sellErr);
-        }
+      const usdcExpected = (finalExcessNo * noPrice) / PRICE_DEC;
+      console.log(
+        `[BatchProcessor] Selling ${finalExcessNo} excess NO tokens on CLOB` +
+        `${isNegRisk ? " (NegRisk CLOB token)" : ""} (expecting ${usdcExpected} USDC)`,
+      );
+      try {
+        const { orderId } = await this.polymarket.placeMarketSell(cachedNoToken, finalExcessNo);
+        console.log(`[BatchProcessor] Excess NO sell placed: orderId=${orderId}`);
+        await this._waitForUsdcProceeds(usdcExpected, "excess NO sell");
+      } catch (sellErr) {
+        console.warn(`[BatchProcessor] Excess NO sell failed (settleBatch will pull USDC from relayer wallet instead):`, sellErr);
       }
     } else if (finalExcessNo > 0n && this.config.chainId !== 137) {
       console.log(`[BatchProcessor] Testnet: skipping excess NO sell (${finalExcessNo} tokens)`);
