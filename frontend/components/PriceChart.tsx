@@ -2,35 +2,69 @@
 
 import { useState, useEffect } from "react";
 import { clsx } from "clsx";
-import { Liveline } from "liveline";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface PricePoint { t: number; p: number; }
 
 const INTERVALS = [
-  { label: "6H",  value: "6h",  fidelity: 10   },
-  { label: "1D",  value: "1d",  fidelity: 60   },
-  { label: "1W",  value: "1w",  fidelity: 240  },
+  { label: "6H",  value: "6h",  fidelity: 10  },
+  { label: "1D",  value: "1d",  fidelity: 60  },
+  { label: "1W",  value: "1w",  fidelity: 240 },
   { label: "ALL", value: "max", fidelity: 1440 },
 ] as const;
 type Interval = typeof INTERVALS[number]["value"];
 
-// Map interval → visible seconds for liveline window prop
-const WINDOW_SECS: Record<Interval, number> = {
-  "6h":  6  * 3_600,
-  "1d":  24 * 3_600,
-  "1w":  7  * 86_400,
-  "max": 50 * 365 * 86_400,  // effectively "show all"
-};
+// ── SVG geometry ──────────────────────────────────────────────────────────────
+const W   = 600;
+const H   = 160;
+const PAD = { t: 12, r: 52, b: 28, l: 8 };
+const CW  = W - PAD.l - PAD.r;  // 540
+const CH  = H - PAD.t - PAD.b;  // 120
+
+function toY(p: number): number {
+  return PAD.t + (1 - Math.max(0, Math.min(1, p))) * CH;
+}
+function toX(t: number, minT: number, range: number): number {
+  return PAD.l + ((t - minT) / Math.max(range, 1)) * CW;
+}
+
+// Smooth cubic-bezier path — no overshoot, mirrors FactMachine-style curves
+function smoothPath(pts: { x: number; y: number }[]): string {
+  if (pts.length < 2) return "";
+  let d = `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`;
+  for (let i = 1; i < pts.length; i++) {
+    const p0 = pts[i - 1], p1 = pts[i];
+    const cx = ((p0.x + p1.x) / 2).toFixed(1);
+    d += ` C ${cx} ${p0.y.toFixed(1)}, ${cx} ${p1.y.toFixed(1)}, ${p1.x.toFixed(1)} ${p1.y.toFixed(1)}`;
+  }
+  return d;
+}
+
+function downsample(pts: PricePoint[], max = 120): PricePoint[] {
+  if (pts.length <= max) return pts;
+  const step = Math.ceil(pts.length / max);
+  return pts.filter((_, i) => i % step === 0 || i === pts.length - 1);
+}
+
+function fmtTime(ts: number, iv: Interval): string {
+  const d = new Date(ts * 1000);
+  if (iv === "6h" || iv === "1d") {
+    return d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
+  }
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
 
 // ── Colours ───────────────────────────────────────────────────────────────────
-const YES_COLOR = "#2CE8C6";
-const NO_COLOR  = "#FF5F6D";
+const YES_COLOR = "#2CE8C6";   // accent green — always YES
+const NO_COLOR  = "#FF5F6D";   // danger red   — always NO
+const BORDER    = "#1A2B3D";
+const MUTED     = "#65798F";
+const MONO      = "var(--font-mono)";
 
 // ── Component ─────────────────────────────────────────────────────────────────
 interface PriceChartProps {
   tokenId:      string;  // CLOB token ID (large decimal integer)
-  currentPrice: number;  // Current YES price 0–1 (fallback)
+  currentPrice: number;  // Current YES price 0–1 (fallback label)
 }
 
 export default function PriceChart({ tokenId, currentPrice }: PriceChartProps) {
@@ -54,13 +88,33 @@ export default function PriceChart({ tokenId, currentPrice }: PriceChartProps) {
       .finally(() => setLoading(false));
   }, [tokenId, iv]);
 
-  const hasData = raw.length >= 2;
+  const pts     = downsample(raw);
+  const hasData = pts.length >= 2;
 
-  // Convert to liveline format — time stays in unix seconds (liveline native)
-  const yesData = raw.map((d) => ({ time: d.t, value: d.p }));
-  const noData  = raw.map((d) => ({ time: d.t, value: 1 - d.p }));
-  const yesLast = raw.length ? raw[raw.length - 1].p       : currentPrice;
-  const noLast  = raw.length ? 1 - raw[raw.length - 1].p  : 1 - currentPrice;
+  const minT  = hasData ? pts[0].t : 0;
+  const maxT  = hasData ? pts[pts.length - 1].t : 1;
+  const range = maxT - minT;
+
+  // YES svg points + path
+  const yesSvgPts = pts.map((d) => ({ x: toX(d.t, minT, range), y: toY(d.p) }));
+  const yesLine   = smoothPath(yesSvgPts);
+  const yesLast   = yesSvgPts[yesSvgPts.length - 1];
+  const yesLastP  = pts.length ? pts[pts.length - 1].p : currentPrice;
+
+  // NO svg points + path — NO = 1 - YES, derived without a second API call
+  const noSvgPts = pts.map((d, i) => ({ x: yesSvgPts[i].x, y: toY(1 - d.p) }));
+  const noLine   = smoothPath(noSvgPts);
+  const noLast   = noSvgPts[noSvgPts.length - 1];
+  const noLastP  = pts.length ? 1 - pts[pts.length - 1].p : 1 - currentPrice;
+
+  // YES area fill (under the YES line down to 50% midpoint for cleaner look)
+  const yesArea = hasData
+    ? `${yesLine} L ${(PAD.l + CW).toFixed(1)} ${toY(0).toFixed(1)} L ${PAD.l.toFixed(1)} ${toY(0).toFixed(1)} Z`
+    : "";
+
+  const yGrid  = [0, 0.25, 0.5, 0.75, 1];
+  const xTicks = [0.25, 0.5, 0.75].map((f) => ({ t: minT + f * range, x: PAD.l + f * CW }));
+  const gradId = `pg-${tokenId.slice(0, 8)}`;
 
   return (
     <div className="border-b border-border bg-surface/[0.12]">
@@ -101,27 +155,200 @@ export default function PriceChart({ tokenId, currentPrice }: PriceChartProps) {
         </div>
       </div>
 
-      {/* ── Chart ──────────────────────────────────────────────────────────── */}
-      <div className="px-2 pb-2" style={{ height: 160 }}>
-        {hasData ? (
-          <Liveline
-            data={yesData}
-            value={yesLast}
-            series={[
-              { id: "yes", data: yesData, value: yesLast, color: YES_COLOR, label: "YES" },
-              { id: "no",  data: noData,  value: noLast,  color: NO_COLOR,  label: "NO"  },
-            ]}
-            window={WINDOW_SECS[iv]}
-            theme="dark"
-            grid
-            scrub
-            formatValue={(v: number) => `${Math.round(v * 100)}%`}
+      {/* ── SVG chart ──────────────────────────────────────────────────────── */}
+      <div className="px-2 pb-1">
+        <svg
+          viewBox={`0 0 ${W} ${H}`}
+          width="100%"
+          style={{ display: "block" }}
+          aria-label="YES / NO price chart"
+        >
+          <defs>
+            {/* YES gradient fill — top of chart down to 0 */}
+            <linearGradient id={`${gradId}-yes`} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%"   stopColor={YES_COLOR} stopOpacity="0.12" />
+              <stop offset="100%" stopColor={YES_COLOR} stopOpacity="0.01" />
+            </linearGradient>
+          </defs>
+
+          {/* Horizontal grid lines */}
+          {yGrid.map((v) => (
+            <line
+              key={v}
+              x1={PAD.l} y1={toY(v).toFixed(1)}
+              x2={W - PAD.r} y2={toY(v).toFixed(1)}
+              stroke={BORDER} strokeWidth="1"
+            />
+          ))}
+
+          {/* 50% centre line — brighter, acts as the axis between YES and NO */}
+          <line
+            x1={PAD.l}     y1={toY(0.5).toFixed(1)}
+            x2={W - PAD.r} y2={toY(0.5).toFixed(1)}
+            stroke="#2B4560" strokeWidth="1"
           />
-        ) : !loading ? (
-          <div className="flex items-center justify-center h-full text-[10px] tracking-widest text-muted-dim font-mono">
-            NO PRICE HISTORY
-          </div>
-        ) : null}
+
+          {/* YES area fill */}
+          {hasData && <path d={yesArea} fill={`url(#${gradId}-yes)`} />}
+
+          {/* NO line — drawn first (below YES) */}
+          {hasData && (
+            <path
+              d={noLine}
+              fill="none"
+              stroke={NO_COLOR}
+              strokeWidth="1.5"
+              strokeLinejoin="round"
+              strokeLinecap="round"
+              vectorEffect="non-scaling-stroke"
+              strokeOpacity="0.7"
+            />
+          )}
+          {hasData && (
+            <path
+              d={noLine}
+              fill="none"
+              stroke={NO_COLOR}
+              strokeWidth="1.15"
+              strokeLinejoin="round"
+              strokeLinecap="round"
+              vectorEffect="non-scaling-stroke"
+              strokeOpacity="0.4"
+              strokeDasharray="4 16"
+            >
+              <animate attributeName="stroke-dashoffset" from="0" to="-84" dur="4.6s" repeatCount="indefinite" />
+            </path>
+          )}
+
+          {/* YES line — drawn on top */}
+          {hasData && (
+            <path
+              d={yesLine}
+              fill="none"
+              stroke={YES_COLOR}
+              strokeWidth="1.5"
+              strokeLinejoin="round"
+              strokeLinecap="round"
+              vectorEffect="non-scaling-stroke"
+            />
+          )}
+          {hasData && (
+            <path
+              d={yesLine}
+              fill="none"
+              stroke={YES_COLOR}
+              strokeWidth="1.15"
+              strokeLinejoin="round"
+              strokeLinecap="round"
+              vectorEffect="non-scaling-stroke"
+              strokeOpacity="0.46"
+              strokeDasharray="4 15"
+            >
+              <animate attributeName="stroke-dashoffset" from="0" to="-84" dur="3.9s" repeatCount="indefinite" />
+            </path>
+          )}
+
+          {/* No-data state */}
+          {!hasData && !loading && (
+            <text
+              x={(W / 2).toFixed(1)} y={(H / 2 + 4).toFixed(1)}
+              fill={MUTED} fontSize="10" fontFamily={MONO} textAnchor="middle"
+            >
+              NO PRICE HISTORY
+            </text>
+          )}
+
+          {/* ── YES annotation (dot + dashed leader + label) ─────────────── */}
+          {hasData && yesLast && (
+            <>
+              <line
+                x1={yesLast.x.toFixed(1)}        y1={yesLast.y.toFixed(1)}
+                x2={(W - PAD.r + 4).toFixed(1)}  y2={yesLast.y.toFixed(1)}
+                stroke={YES_COLOR} strokeWidth="0.75" strokeDasharray="2,3" strokeOpacity="0.5"
+              />
+              <circle cx={yesLast.x.toFixed(1)} cy={yesLast.y.toFixed(1)} r="2.5" fill={YES_COLOR} />
+              <circle
+                cx={yesLast.x.toFixed(1)}
+                cy={yesLast.y.toFixed(1)}
+                r="2.6"
+                fill="none"
+                stroke={YES_COLOR}
+                strokeOpacity="0.7"
+                strokeWidth="1"
+              >
+                <animate attributeName="r" from="2.6" to="7.8" dur="2.3s" repeatCount="indefinite" />
+                <animate attributeName="stroke-opacity" from="0.6" to="0" dur="2.3s" repeatCount="indefinite" />
+              </circle>
+              <text
+                x={(W - PAD.r + 8).toFixed(1)} y={(yesLast.y + 4).toFixed(1)}
+                fill={YES_COLOR} fontSize="11" fontFamily={MONO}
+              >
+                {Math.round(yesLastP * 100)}%
+              </text>
+            </>
+          )}
+
+          {/* ── NO annotation (dot + dashed leader + label) ──────────────── */}
+          {hasData && noLast && (
+            <>
+              <line
+                x1={noLast.x.toFixed(1)}         y1={noLast.y.toFixed(1)}
+                x2={(W - PAD.r + 4).toFixed(1)}  y2={noLast.y.toFixed(1)}
+                stroke={NO_COLOR} strokeWidth="0.75" strokeDasharray="2,3" strokeOpacity="0.5"
+              />
+              <circle cx={noLast.x.toFixed(1)} cy={noLast.y.toFixed(1)} r="2.5" fill={NO_COLOR} />
+              <circle
+                cx={noLast.x.toFixed(1)}
+                cy={noLast.y.toFixed(1)}
+                r="2.6"
+                fill="none"
+                stroke={NO_COLOR}
+                strokeOpacity="0.66"
+                strokeWidth="1"
+              >
+                <animate attributeName="r" from="2.6" to="7.8" dur="2.7s" repeatCount="indefinite" />
+                <animate attributeName="stroke-opacity" from="0.58" to="0" dur="2.7s" repeatCount="indefinite" />
+              </circle>
+              {/* Only show NO label if it doesn't overlap YES label */}
+              {Math.abs(noLast.y - yesLast.y) > 14 && (
+                <text
+                  x={(W - PAD.r + 8).toFixed(1)} y={(noLast.y + 4).toFixed(1)}
+                  fill={NO_COLOR} fontSize="11" fontFamily={MONO}
+                >
+                  {Math.round(noLastP * 100)}%
+                </text>
+              )}
+            </>
+          )}
+
+          {/* ── Y-axis ghost labels — dodge both line annotations ─────────── */}
+          {[0.25, 0.5, 0.75].map((v) => {
+            const ySelf = toY(v);
+            const tooCloseYes = yesLast && Math.abs(ySelf - yesLast.y) < 14;
+            const tooCloseNo  = noLast  && Math.abs(ySelf - noLast.y)  < 14;
+            if (tooCloseYes || tooCloseNo) return null;
+            return (
+              <text
+                key={v}
+                x={(W - PAD.r + 8).toFixed(1)} y={(ySelf + 3.5).toFixed(1)}
+                fill={MUTED} fontSize="8" fontFamily={MONO}
+              >
+                {Math.round(v * 100)}%
+              </text>
+            );
+          })}
+
+          {/* ── X-axis time labels ────────────────────────────────────────── */}
+          {hasData && xTicks.map(({ t, x }, i) => (
+            <text
+              key={i}
+              x={x.toFixed(1)} y={(H - 5).toFixed(1)}
+              fill={MUTED} fontSize="8" fontFamily={MONO} textAnchor="middle"
+            >
+              {fmtTime(t, iv)}
+            </text>
+          ))}
+        </svg>
       </div>
     </div>
   );
