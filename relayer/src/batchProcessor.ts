@@ -846,13 +846,17 @@ export class BatchProcessor {
       ...chainGas(this.config.chainId),
     });
 
-    await this.publicClient.waitForTransactionReceipt({ hash, timeout: 120_000 });
-    console.log(`[BatchProcessor] ${fnName} tx: ${hash} (trader=${signer} hidden)`);
-
-    // Store order keyed by commitment hash — used for matching at settlement.
+    // Store order immediately after tx submission — don't block on receipt.
+    // Responding before receipt confirmation keeps the HTTP round-trip under the
+    // 25 s Vercel proxy timeout even on slow Polygon blocks.
     const orderWithAuth: Order = { ...order, trader: signer, transferAuth };
     await this.store.save(batchId.toString(), commitment.toLowerCase(), orderWithAuth);
-    console.log(`[BatchProcessor] Stored ${isYesBuy ? "YES_BUY" : "NO_BUY"} order for commitment ${commitment} (batch ${batchId})`);
+    console.log(`[BatchProcessor] ${fnName} tx submitted: ${hash} (trader=${signer} hidden) — stored in Redis`);
+
+    // Await receipt in the background (logging only — does not affect the response).
+    this.publicClient.waitForTransactionReceipt({ hash, timeout: 120_000 })
+      .then(() => console.log(`[BatchProcessor] ${fnName} tx confirmed: ${hash}`))
+      .catch((err: any) => console.error(`[BatchProcessor] ${fnName} receipt error (${hash}):`, err?.message));
   }
 
   /**
@@ -899,13 +903,16 @@ export class BatchProcessor {
       ...chainGas(this.config.chainId),
     });
 
-    await this.publicClient.waitForTransactionReceipt({ hash, timeout: 120_000 });
-    console.log(`[BatchProcessor] ${fnName} tx: ${hash} (seller=${signer})`);
-
-    // Sell orders: no TransferAuth (tokens deposited, not USDC)
+    // Store order immediately after tx submission — don't block on receipt.
+    // Sell orders: no TransferAuth (tokens deposited upfront, not USDC)
     const orderWithTrader: Order = { ...order, trader: signer };
     await this.store.save(batchId.toString(), commitment.toLowerCase(), orderWithTrader);
-    console.log(`[BatchProcessor] Stored ${isYesSell ? "YES_SELL" : "NO_SELL"} order for commitment ${commitment} (batch ${batchId})`);
+    console.log(`[BatchProcessor] ${fnName} tx submitted: ${hash} (seller=${signer}) — stored in Redis`);
+
+    // Await receipt in the background (logging only — does not affect the response).
+    this.publicClient.waitForTransactionReceipt({ hash, timeout: 120_000 })
+      .then(() => console.log(`[BatchProcessor] ${fnName} tx confirmed: ${hash}`))
+      .catch((err: any) => console.error(`[BatchProcessor] ${fnName} receipt error (${hash}):`, err?.message));
   }
 
   /**

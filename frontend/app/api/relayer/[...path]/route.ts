@@ -10,10 +10,12 @@
 import { NextRequest, NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 60; // Vercel Pro: allow up to 60 s for this serverless function
 
-// Max wait for Railway to respond — Vercel functions time out at 10 s (hobby) or 30 s (pro).
-// The claim-proof endpoint returns immediately (<2 s) so this is fine.
-const TIMEOUT_MS = 25_000;
+// Max wait for Railway to respond.
+// The relayer now responds after tx submission (~2–8 s), not after receipt (~30–120 s),
+// so 55 s gives plenty of headroom while staying within Vercel Pro's 60 s function limit.
+const TIMEOUT_MS = 55_000;
 
 function getRelayerBase(): string {
   const url = process.env.NEXT_PUBLIC_RELAYER_URL?.trim();
