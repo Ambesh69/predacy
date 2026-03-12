@@ -728,30 +728,10 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   // ── Chain switching ──────────────────────────────────────────────────────────
   const ensureAmoy = async () => {
     if (!walletAddress || !wallet) throw new Error("Wallet not connected");
+    const provider = await wallet.getEthereumProvider();
+    // Do NOT call eth_requestAccounts here — Privy intercepts it and shows a SIWE
+    // "Sign In" popup on Ethereum mainnet instead of authorizing the wallet session.
     const name = wallet.walletClientType ?? "wallet";
-
-    // Privy intercepts eth_requestAccounts on its wrapped provider and shows a SIWE
-    // "Sign In" popup on Ethereum mainnet — useless for authorizing a Polygon tx.
-    // Detect Phantom's native EVM provider via address match (non-interactive
-    // eth_accounts), NOT walletClientType — Privy may return different type strings
-    // depending on how Phantom was connected. If the native provider already has our
-    // address, use it directly for all EVM calls (bypasses Privy's SIWE interception).
-    let phantomNativeEvm: any = null;
-    if (typeof window !== "undefined") {
-      const candidate = (window as any).phantom?.ethereum;
-      if (candidate) {
-        try {
-          const accts = (await candidate.request({ method: "eth_accounts" })) as string[];
-          if (accts.some((a: string) => a.toLowerCase() === walletAddress.toLowerCase())) {
-            phantomNativeEvm = candidate;
-          }
-        } catch { /* unavailable */ }
-      }
-    }
-    const provider = phantomNativeEvm ?? (await wallet.getEthereumProvider());
-    // Do NOT call eth_requestAccounts here — on Privy's wrapped provider it triggers
-    // SIWE instead of a wallet session refresh. eth_accounts already confirmed the
-    // native Phantom provider has our address; no auth popup is needed.
 
     // Only switch chain if actually needed — calling switchChain when already on
     // the right network briefly disrupts Phantom's provider authorization, causing
@@ -772,10 +752,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         throw new Error(`Please switch to ${ACTIVE_CHAIN_NAME} (Chain ID ${ACTIVE_CHAIN.id}) in ${name}.`);
       }
     }
-    return {
-      walletClient: createWalletClient({ account: walletAddress, chain: ACTIVE_CHAIN, transport: custom(provider) }),
-      provider,
-    };
+    return createWalletClient({ account: walletAddress, chain: ACTIVE_CHAIN, transport: custom(provider) });
   };
 
   // ── Close position: pre-fill the SELL order form and switch to ORDER tab ────────
@@ -1067,7 +1044,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     const v = parseInt(sig.slice(130, 132), 16);
 
     // Real wallet submits transferWithAuthorization (1 MetaMask popup, pays gas).
-    const { walletClient } = await ensureAmoy();
+    const walletClient = await ensureAmoy();
     const txHash = await walletClient.writeContract({
       address: contracts.usdc, abi: TRANSFER_WITH_AUTH_ABI,
       functionName: "transferWithAuthorization",
@@ -1261,7 +1238,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     const deadline  = BigInt(Math.floor(Date.now() / 1000) + 600);
 
     setSubmitStep("approving");
-    const { walletClient, provider: userProvider } = await ensureAmoy();
+    const walletClient = await ensureAmoy();
 
     if (params.side === YES_BUY || params.side === NO_BUY) {
       // ── BUY: ephemeral wallet pattern ──────────────────────────────────────
@@ -1282,11 +1259,10 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         throw new Error(`Insufficient USDC balance — you have $${have} but need $${need} USDC.e on Polygon. Bridge or swap USDC to Polygon first.`);
       }
 
-      // Send USDC via the same provider instance that ensureAmoy authorized with
-      // eth_requestAccounts. A second wallet.getEthereumProvider() call may return
-      // a fresh/unauthorized wrapper → 4100. Reusing the exact same instance avoids
-      // this. Also use legacy tx params (no EIP-1559 fields) — Phantom's Polygon EVM
-      // provider doesn't handle type-2 reliably and may return 4100 with them.
+      // Send USDC via raw provider.request (no EIP-1559 fields — viem's writeContract
+      // adds maxFeePerGas/type=2 which some wallets reject on Polygon). Privy's
+      // getEthereumProvider() routes to whichever wallet the user connected.
+      const userProvider = await wallet.getEthereumProvider();
       const txParams = {
         from: walletAddress,
         to:   contracts.usdc as string,
@@ -1298,10 +1274,8 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         fundTx = await userProvider.request({ method: "eth_sendTransaction", params: [txParams] }) as `0x${string}`;
       } catch (err0: any) {
         if (err0?.code === 4100 || err0?.message?.includes("Unauthorized")) {
-          // 4100 on first attempt — retry once. Do NOT call eth_requestAccounts before
-          // the retry: on Privy's wrapped provider it triggers SIWE instead of refreshing
-          // the session. The native Phantom path already confirmed authorization via
-          // eth_accounts in ensureAmoy; Privy's path has no safe re-auth option here.
+          // Retry once on 4100 — do NOT call eth_requestAccounts first; Privy intercepts
+          // it and shows a SIWE popup on Ethereum instead of re-authorizing the session.
           fundTx = await userProvider.request({ method: "eth_sendTransaction", params: [txParams] }) as `0x${string}`;
         } else {
           throw err0;
@@ -1609,7 +1583,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     if (!walletAddress) return;
     setFaucetLoading(true);
     try {
-      const { walletClient } = await ensureAmoy();
+      const walletClient = await ensureAmoy();
       const contracts = getContracts(ACTIVE_CHAIN.id);
       const tx = await walletClient.writeContract({
         address: contracts.usdc, abi: MOCK_USDC_ABI, functionName: "mint",
