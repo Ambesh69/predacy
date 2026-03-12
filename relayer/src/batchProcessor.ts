@@ -1675,42 +1675,67 @@ export class BatchProcessor {
     excludedOrders: Array<{ order: Order; commitment: `0x${string}` }>,
     fromBatchId: bigint,
   ): Promise<RequeueResult[]> {
-    const results: RequeueResult[] = [];
+    // Partition: only BUY orders can be requeued (sell orders pre-deposited tokens into
+    // the batch, so they don't carry a funded ephemeral wallet for requeue sigs).
+    const requeueable: Array<{
+      commitment:    `0x${string}`;
+      order:          Order;
+      requeueAuth:    RequeueAuth;
+      remainingAuths: RequeueAuth[];
+    }> = [];
+
+    const earlyResults: RequeueResult[] = [];
 
     for (const { order, commitment } of excludedOrders) {
-      // Only BUY orders (YES_BUY / NO_BUY) can be requeued — sell orders pre-deposited tokens
       if (order.side !== OrderSide.YES_BUY && order.side !== OrderSide.NO_BUY) continue;
       if (!order.requeueAuths || order.requeueAuths.length === 0) {
         console.log(`[BatchProcessor] No requeue auths remaining for ${commitment} — cannot auto-requeue`);
-        results.push({ commitment, status: "no_auths", fromBatchId, remainingAuths: 0 });
+        earlyResults.push({ commitment, status: "no_auths", fromBatchId, remainingAuths: 0 });
         continue;
       }
-
-      // Pop the first available requeue auth (FIFO — nonce order matters)
       const [requeueAuth, ...remainingAuths] = order.requeueAuths;
+      requeueable.push({ commitment, order, requeueAuth, remainingAuths });
+    }
 
+    if (requeueable.length === 0) return earlyResults;
+
+    // Submit ALL requeue txs concurrently — avoids waiting ~30s per order serially.
+    // viem's nonce-management (_write) handles sequential nonce assignment internally.
+    const txPromises = requeueable.map(async ({ commitment, order, requeueAuth, remainingAuths }) => {
+      console.log(`[BatchProcessor] Requeueing excluded order ${commitment} (ephemeral=${requeueAuth.ephemeral}, nonce=${requeueAuth.nonce})`);
+      const requeueFn = order.side === OrderSide.YES_BUY ? "commitOrderFor" : "commitBuyNoOrderFor";
+      const hash = await this._write({
+        address:      this.config.vaultAddress,
+        abi:          BATCH_VAULT_ABI,
+        functionName: requeueFn,
+        args: [
+          commitment,
+          order.amount,
+          requeueAuth.ephemeral,
+          requeueAuth.nonce,
+          requeueAuth.deadline,
+          requeueAuth.signature,
+          this.config.marketId,
+        ],
+        ...chainGas(this.config.chainId),
+      });
+      return { commitment, order, remainingAuths, hash };
+    });
+
+    // Wait for all tx submissions (not receipts yet — just the hash).
+    const submitted = await Promise.allSettled(txPromises);
+
+    // Now wait for all receipts concurrently and finalize each order.
+    const receiptPromises = submitted.map(async (res, i) => {
+      const { commitment, order, remainingAuths } = requeueable[i];
+      if (res.status === "rejected") {
+        console.error(`[BatchProcessor] Failed to submit requeue tx for ${commitment}:`, res.reason?.message);
+        return { commitment, status: "error" as const, fromBatchId, remainingAuths: (order.requeueAuths?.length ?? 1) - 1, errorMessage: res.reason?.message ?? "tx submission failed" };
+      }
+
+      const { hash } = res.value;
       try {
-        console.log(`[BatchProcessor] Requeueing excluded order ${commitment} (ephemeral=${requeueAuth.ephemeral}, nonce=${requeueAuth.nonce})`);
-
-        const requeueFn = order.side === OrderSide.YES_BUY ? "commitOrderFor" : "commitBuyNoOrderFor";
-        const hash = await this._write({
-          address:      this.config.vaultAddress,
-          abi:          BATCH_VAULT_ABI,
-          functionName: requeueFn,
-          args: [
-            commitment,
-            order.amount,
-            requeueAuth.ephemeral,
-            requeueAuth.nonce,
-            requeueAuth.deadline,
-            requeueAuth.signature,
-            this.config.marketId,
-          ],
-          ...chainGas(this.config.chainId),
-        });
-
         await this.publicClient.waitForTransactionReceipt({ hash, timeout: 120_000 });
-
         // Determine the new batch ID (the currently-open batch for this market)
         const newBatchId = await this.publicClient.readContract({
           address:      this.config.vaultAddress,
@@ -1718,20 +1743,23 @@ export class BatchProcessor {
           functionName: "getCurrentBatchId",
           args:         [this.config.marketId],
         }) as bigint;
-
         // Save order under new batch with remaining requeue auths (may be 0 or 1 left)
         const updatedOrder: Order = { ...order, requeueAuths: remainingAuths };
         await this.store.save(newBatchId.toString(), commitment.toLowerCase(), updatedOrder);
-
         console.log(`[BatchProcessor] Requeued ${commitment} → batch ${newBatchId} (${remainingAuths.length} requeue auth(s) remaining)`);
-        results.push({ commitment, status: "requeued", fromBatchId, toBatchId: newBatchId, remainingAuths: remainingAuths.length });
+        return { commitment, status: "requeued" as const, fromBatchId, toBatchId: newBatchId, remainingAuths: remainingAuths.length };
       } catch (err: any) {
-        console.error(`[BatchProcessor] Failed to requeue ${commitment}:`, err.message);
-        results.push({ commitment, status: "error", fromBatchId, remainingAuths: order.requeueAuths.length - 1, errorMessage: err.message });
+        console.error(`[BatchProcessor] Failed to confirm requeue for ${commitment}:`, err.message);
+        return { commitment, status: "error" as const, fromBatchId, remainingAuths: (order.requeueAuths?.length ?? 1) - 1, errorMessage: err.message };
       }
-    }
+    });
 
-    return results;
+    const settled = await Promise.allSettled(receiptPromises);
+    const lateResults = settled.map((r) =>
+      r.status === "fulfilled" ? r.value : { commitment: "unknown" as `0x${string}`, status: "error" as const, fromBatchId, remainingAuths: 0, errorMessage: "unexpected rejection" }
+    );
+
+    return [...earlyResults, ...lateResults];
   }
 
   // ─── Helpers ───────────────────────────────────────────────────────────────

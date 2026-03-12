@@ -492,7 +492,9 @@ function UnfilledCard({ hp, onSweep }: {
           )}
         </div>
       ) : (
-        <p className="text-[9px] text-muted-dim">Sell order not filled — YES tokens returned.</p>
+        <p className="text-[9px] text-muted-dim">
+          Sell order not filled — {hp.side === NO_SELL ? "NO" : "YES"} tokens returned.
+        </p>
       )}
     </div>
   );

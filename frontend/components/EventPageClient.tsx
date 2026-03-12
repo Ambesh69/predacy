@@ -827,6 +827,13 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
           const statusData: ClaimJobResult = await statusResp.json();
           if (statusData.status === "done") { claimResult = statusData; break; }
           if (statusData.status === "error") {
+            // "AlreadyClaimed" means the claim tx already landed on-chain (e.g. the
+            // relayer retried after a receipt timeout and the nullifier was already set).
+            // Treat as done — the user's tokens were already sent, so this is success.
+            if (statusData.error?.includes("AlreadyClaimed")) {
+              claimResult = statusData; // no txHash/wrapDigest, but that's fine
+              break;
+            }
             throw new Error(statusData.error ?? "Claim proof failed");
           }
           // status === "pending" — keep polling
