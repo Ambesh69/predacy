@@ -273,8 +273,9 @@ function MultiOutcomeChart({ markets, selectedMarketId }: { markets: Market[]; s
             data:  l.pts.map((p) => ({ time: p.t, value: p.p })),
             value: l.pts.at(-1)?.p ?? 0,
             color: l.color,
-            label: l.name,
+            // no label — end-of-line text suppressed; custom legend above shows names
           }))}
+          seriesToggleCompact
           window={WINDOW_SECS[iv]}
           theme="dark"
           grid
