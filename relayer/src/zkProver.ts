@@ -154,9 +154,9 @@ export class ZKProver {
       const { execFileSync } = await import("child_process");
       const { createRequire } = await import("module");
       const _req = createRequire(import.meta.url);
-      // Locate the @aztec/bb.js package root via its package.json
-      const pkgJsonPath = _req.resolve("@aztec/bb.js/package.json");
-      const pkgRoot     = nodePath.default.dirname(pkgJsonPath);
+      // @aztec/bb.js main resolves to .../dest/node/index.js; package root is 3 dirs up.
+      const bbJsMain = _req.resolve("@aztec/bb.js");
+      const pkgRoot  = nodePath.default.resolve(bbJsMain, "../../..");
       const archMap: Record<string, string> = {
         "x64-linux":    "amd64-linux",
         "arm64-linux":  "arm64-linux",
@@ -166,7 +166,7 @@ export class ZKProver {
       const platformKey = `${nodeOs.default.arch() === "x64" ? "x64" : nodeOs.default.arch()}-${nodeOs.default.platform()}`;
       const buildDir    = archMap[platformKey];
       const bbBin       = buildDir ? nodePath.default.join(pkgRoot, "build", buildDir, "bb") : null;
-      console.log(`[ZKProver] platform=${platformKey} buildDir=${buildDir ?? "UNKNOWN"} bbBin=${bbBin ?? "N/A"}`);
+      console.log(`[ZKProver] platform=${platformKey} pkgRoot=${pkgRoot} bbBin=${bbBin ?? "N/A"}`);
       if (bbBin && nodeFs.default.existsSync(bbBin)) {
         try {
           const ver = execFileSync(bbBin, ["--version"], { encoding: "utf8", timeout: 5000 }).trim();
