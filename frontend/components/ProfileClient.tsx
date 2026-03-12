@@ -1040,21 +1040,25 @@ export default function ProfileClient() {
 
         // Shares computation:
         // - Buy orders:  shares = filledAmount_usdc / clearingPrice
-        // - Sell orders: rawAmount IS the YES token count submitted (6-decimal).
-        //   getPosition returns filledAmount=0 for sells (contract pays USDC directly
-        //   in settleBatch without writing to position struct), so we must use rawAmount.
+        // - Sell orders: filledAmount from getPosition() = token qty (not USDC).
+        //   Use that for actual filled count; fall back to rawAmount (committed qty).
         const shares: number | undefined = e.isSell
-          ? (e.rawAmount > 0n ? Number(e.rawAmount) / 1_000_000 : undefined)
+          ? (filledAmount > 0n
+              ? Number(filledAmount) / 1_000_000             // on-chain filled token qty
+              : e.rawAmount > 0n
+                ? Number(e.rawAmount) / 1_000_000            // fallback: committed qty
+                : undefined)
           : (clearingPrice > 0n && filledAmount > 0n
               ? Number(filledAmount * 1_000_000n / clearingPrice) / 1_000_000
               : undefined);
 
-        // filledAmount for sell orders = USDC proceeds = rawAmount × clearingPrice / 1e6.
-        // Contract doesn't write this to the position struct, so derive it here.
+        // filledAmount for sell orders = USDC proceeds = tokenQty × clearingPrice / 1e6.
+        // getPosition() stores token qty for sell orders (not USDC), so we must convert.
         const effectiveFilledAmount: bigint | undefined = (() => {
           if (e.isSell) {
-            // Use on-chain value if it's non-zero (future-proof), otherwise derive.
-            if (filledAmount > 0n) return filledAmount;
+            // filledAmount = token qty from contract — multiply by clearingPrice for USDC.
+            if (filledAmount > 0n && clearingPrice > 0n)
+              return filledAmount * clearingPrice / 1_000_000n;
             if (clearingPrice > 0n && e.rawAmount > 0n)
               return e.rawAmount * clearingPrice / 1_000_000n;
             return undefined;
