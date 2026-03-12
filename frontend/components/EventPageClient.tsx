@@ -10,6 +10,7 @@ import {
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
 import WalletButton from "@/components/WalletButton";
+import { Liveline } from "liveline";
 import BatchTimer from "@/components/BatchTimer";
 import OrderForm from "@/components/OrderForm";
 import PositionsPanel from "@/components/PositionsPanel";
@@ -158,27 +159,15 @@ const INTERVALS: { label: string; value: Interval; fidelity: number }[] = [
 
 interface ChartSeries { marketId: string; name: string; color: string; pts: Array<{ t: number; p: number }>; }
 
-// SVG viewBox geometry
-const VW = 960, VH = 310;
-const PAD = { t: 12, r: 46, b: 30, l: 6 };
-const CW  = VW - PAD.l - PAD.r;
-const CH  = VH - PAD.t - PAD.b;
+// ── Chart window sizes ────────────────────────────────────────────────────────
+const WINDOW_SECS: Record<Interval, number> = {
+  "6h":  6  * 3_600,
+  "1d":  24 * 3_600,
+  "1w":  7  * 86_400,
+  "max": 50 * 365 * 86_400,
+};
 
-function smoothPath(pts: { x: number; y: number }[]): string {
-  if (pts.length < 2) return "";
-  let d = `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`;
-  for (let i = 1; i < pts.length; i++) {
-    const p0 = pts[i - 1], p1 = pts[i];
-    const cx = ((p0.x + p1.x) / 2).toFixed(1);
-    d += ` C ${cx} ${p0.y.toFixed(1)}, ${cx} ${p1.y.toFixed(1)}, ${p1.x.toFixed(1)} ${p1.y.toFixed(1)}`;
-  }
-  return d;
-}
-function downsample(pts: Array<{ t: number; p: number }>, max = 200) {
-  if (pts.length <= max) return pts;
-  const step = Math.ceil(pts.length / max);
-  return pts.filter((_, i) => i % step === 0 || i === pts.length - 1);
-}
+// lerp: used by legend to show hover-interpolated prices from liveline's onHover time
 function lerp(pts: Array<{ t: number; p: number }>, t: number): number {
   if (!pts.length) return 0;
   if (t <= pts[0].t) return pts[0].p;
@@ -189,25 +178,14 @@ function lerp(pts: Array<{ t: number; p: number }>, t: number): number {
   return pts[lo].p + frac * (pts[hi].p - pts[lo].p);
 }
 
-function fmtXLabel(ts: number, iv: Interval): string {
-  const d = new Date(ts * 1000);
-  if (iv === "6h" || iv === "1d")
-    return d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false });
-  if (iv === "max")
-    return d.toLocaleDateString("en-US", { month: "short" }); // "Oct", "Nov", "Dec"
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" }); // "Nov 15" for 1W
-}
-
 function MultiOutcomeChart({ markets, selectedMarketId }: { markets: Market[]; selectedMarketId?: string; }) {
   const [iv, setIv]           = useState<Interval>("1d");
   const [lines, setLines]     = useState<ChartSeries[]>([]);
   const [loading, setLoading] = useState(true);
-  const [hoverX, setHoverX]   = useState<number | null>(null); // SVG x coord
+  const [hoverT, setHoverT]   = useState<number | null>(null); // from liveline onHover
 
-  // Sort by current YES probability descending — this is exactly how Polymarket orders its
-  // chart outcomes: highest probability candidate first, then next, etc.
-  // The Gamma API's own market order is NOT by probability (it's internal/alphabetical),
-  // so we must sort ourselves. Judy Shelton at 4.5% should always rank above <1% candidates.
+  // Sort by current YES probability descending — highest probability candidate first.
+  // The Gamma API's own market order is NOT by probability (it's internal/alphabetical).
   const sortedMarkets = filterAndDeduplicateMarkets(markets)
     .filter((m) => !!getTokenId(m))
     .sort((a, b) =>
@@ -216,7 +194,7 @@ function MultiOutcomeChart({ markets, selectedMarketId }: { markets: Market[]; s
   const selectedMkt = selectedMarketId
     ? sortedMarkets.find((m) => m.conditionId === selectedMarketId)
     : undefined;
-  // Always include the selected outcome in the chart, even if it's outside the top 4 by probability.
+  // Always include the selected outcome in the chart, even if it's outside the top 4.
   const chartMarkets = selectedMkt && !sortedMarkets.slice(0, 4).some((m) => m.conditionId === selectedMkt.conditionId)
     ? [selectedMkt, ...sortedMarkets.filter((m) => m.conditionId !== selectedMkt.conditionId).slice(0, 3)]
     : sortedMarkets.slice(0, 4);
@@ -226,7 +204,7 @@ function MultiOutcomeChart({ markets, selectedMarketId }: { markets: Market[]; s
   useEffect(() => {
     if (chartMarkets.length === 0) { setLoading(false); return; }
     setLoading(true);
-    setHoverX(null);
+    setHoverT(null);
     const fidelity = INTERVALS.find((i) => i.value === iv)?.fidelity ?? 60;
     Promise.all(
       chartMarkets.map((m, idx) =>
@@ -248,78 +226,14 @@ function MultiOutcomeChart({ markets, selectedMarketId }: { markets: Market[]; s
 
   const hasData = lines.some((l) => l.pts.length >= 2);
 
-  // ── Coordinate system ──────────────────────────────────────────────────────
-  const allT  = lines.flatMap((l) => l.pts.map((p) => p.t));
-  const minT  = hasData ? Math.min(...allT) : 0;
-  const maxT  = hasData ? Math.max(...allT) : 1;
-  const tRange = maxT - minT || 1;
-
-  // Y: auto-scale tight to data range — like Polymarket zooms to visible prices
-  const allP   = lines.flatMap((l) => l.pts.map((p) => p.p));
-  const rawMin = hasData ? Math.min(...allP) : 0;
-  const rawMax = hasData ? Math.max(...allP) : 1;
-  // Small padding: 8% of range, min 2pp — so lines don't hug the edges
-  const pPad   = Math.max((rawMax - rawMin) * 0.08, 0.02);
-  const yMin   = Math.max(0, rawMin - pPad);
-  const yMax   = Math.min(1, rawMax + pPad);
-  const yRange = yMax - yMin || 1;
-
-  const toX = (t: number) => PAD.l + ((t - minT) / tRange) * CW;
-  const toY = (p: number) => PAD.t + (1 - (Math.max(yMin, Math.min(yMax, p)) - yMin) / yRange) * CH;
-
-  // Y-axis ticks: all quarter-marks within the visible range
-  const Y_TICKS = [0, 0.25, 0.5, 0.75, 1.0].filter((v) => v >= yMin - 0.01 && v <= yMax + 0.01);
-
-  // X-axis ticks: calendar month/day boundaries so no month is ever skipped
-  const X_TICKS = (() => {
-    if (!hasData) return [] as { t: number; x: number }[];
-    if (iv === "6h" || iv === "1d") {
-      // Evenly-spaced for short ranges
-      return [0.15, 0.38, 0.62, 0.85].map((f) => ({ t: minT + f * tRange, x: PAD.l + f * CW }));
-    }
-    const ticks: { t: number; x: number }[] = [];
-    const start = new Date(minT * 1000);
-    // Advance to first calendar boundary after minT
-    const cur = iv === "1w"
-      ? new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate() + 1))
-      : new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 1));
-    while (cur.getTime() / 1000 <= maxT) {
-      const t = cur.getTime() / 1000;
-      const x = toX(t);
-      if (x > PAD.l + 20 && x < PAD.l + CW - 20) ticks.push({ t, x });
-      if (iv === "1w") cur.setUTCDate(cur.getUTCDate() + 1);
-      else cur.setUTCMonth(cur.getUTCMonth() + 1);
-    }
-    // Thin out if more than 7 labels
-    if (ticks.length > 7) {
-      const step = Math.ceil(ticks.length / 6);
-      return ticks.filter((_, i) => i % step === 0);
-    }
-    return ticks.length >= 2 ? ticks : [0.15, 0.38, 0.62, 0.85].map((f) => ({ t: minT + f * tRange, x: PAD.l + f * CW }));
-  })();
-
-  // Hover timestamp
-  const inPlot = hoverX !== null && hoverX >= PAD.l && hoverX <= PAD.l + CW;
-  const hoverT = inPlot ? minT + ((hoverX! - PAD.l) / CW) * tRange : null;
-
-  const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const svgX  = ((e.clientX - rect.left) / rect.width) * VW;
-    setHoverX(Math.max(PAD.l, Math.min(PAD.l + CW, svgX)));
-  };
-
-  const GRID  = "#1A1A2E";
-  const LABEL = "#42425A";
-  const MONO  = "var(--font-mono, monospace)";
-
   return (
     <div className="border-b border-border">
-      {/* ── Legend: dot + name (no text), hover updates ───────────────────── */}
+      {/* ── Legend: dot + name + live/hover price ─────────────────────────── */}
       <div className="flex items-center justify-between px-4 py-2 border-b border-border/50 gap-3">
         <div className="flex items-center gap-2.5 flex-wrap min-w-0">
           {(lines.length > 0 ? lines : chartMarkets.slice(0, 4).map((m, i) => ({ marketId: m.conditionId, name: outcomeLabel(m), color: OUTCOME_COLORS[i], pts: [] as ChartSeries["pts"] }))).map((l, i) => {
             const liveP = l.pts[l.pts.length - 1]?.p ?? 0;
-            const dispP = (inPlot && hoverT) ? lerp(l.pts, hoverT) : liveP;
+            const dispP = hoverT ? lerp(l.pts, hoverT) : liveP;
             const isSelected = !!selectedMarketId && l.marketId === selectedMarketId;
             return (
               <div key={i} className="flex items-center gap-1.5 flex-shrink-0">
@@ -344,129 +258,33 @@ function MultiOutcomeChart({ markets, selectedMarketId }: { markets: Market[]; s
         </div>
       </div>
 
-      {/* ── SVG chart ─────────────────────────────────────────────────────── */}
-      <div className="pt-0.5 pb-1 px-1" style={{ height: 330 }}>
-        {loading ? (
-          <div className="h-full flex items-center justify-center">
-            <div className="w-3 h-3 border border-muted/40 border-t-transparent rounded-full animate-spin" />
-          </div>
-        ) : !hasData ? (
-          <div className="h-full flex items-center justify-center">
-            <span className="text-[10px] text-muted-dim tracking-widest font-mono">NO PRICE HISTORY</span>
-          </div>
-        ) : (
-          <svg viewBox={`0 0 ${VW} ${VH}`} width="100%" height="100%"
-            preserveAspectRatio="none"
-            style={{ display: "block", cursor: "crosshair" }}
-            onMouseMove={handleMouseMove}
-            onMouseLeave={() => setHoverX(null)}
-          >
-            {/* Y-axis grid lines + labels on RIGHT */}
-            {Y_TICKS.map((v) => {
-              const y = toY(v);
-              return (
-                <g key={v}>
-                  <line x1={PAD.l} y1={y.toFixed(1)} x2={VW - PAD.r} y2={y.toFixed(1)}
-                    stroke={GRID} strokeWidth="1" strokeDasharray="3,4" />
-                  <text x={(VW - PAD.r + 5).toFixed(1)} y={(y + 3.5).toFixed(1)}
-                    fill={LABEL} fontSize="11" fontFamily={MONO} textAnchor="start">
-                    {Math.round(v * 100)}%
-                  </text>
-                </g>
-              );
-            })}
-
-            {/* Price lines + current-value dots */}
-            {lines.map((line, i) => {
-              const isSelected = !!selectedMarketId && line.marketId === selectedMarketId;
-              const ds     = downsample(line.pts);
-              const svgPts = ds.map((p) => ({ x: toX(p.t), y: toY(p.p) }));
-              const path   = smoothPath(svgPts);
-              const last   = svgPts[svgPts.length - 1];
-              return (
-                <g key={i}>
-                  <path d={path} fill="none" stroke={line.color}
-                    strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round"
-                    vectorEffect="non-scaling-stroke"
-                    opacity={isSelected ? 1 : !selectedMarketId ? 0.88 : 0.72} />
-                  <path
-                    d={path}
-                    fill="none"
-                    stroke={line.color}
-                    strokeWidth="1.2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    vectorEffect="non-scaling-stroke"
-                    strokeDasharray="5 22"
-                    strokeOpacity={isSelected ? 0.55 : !selectedMarketId ? 0.45 : 0.32}
-                  >
-                    <animate
-                      attributeName="stroke-dashoffset"
-                      from="0"
-                      to="-108"
-                      dur="4.2s"
-                      repeatCount="indefinite"
-                    />
-                  </path>
-                  {last && !inPlot && (
-                    <g>
-                      {/* Pulsating outer ring */}
-                      <circle cx={last.x.toFixed(1)} cy={last.y.toFixed(1)} r="3"
-                        fill="none" stroke={line.color} strokeWidth="1.5">
-                        <animate attributeName="r" from="3" to="9" dur="1.8s" repeatCount="indefinite" />
-                        <animate attributeName="stroke-opacity" from="0.7" to="0" dur="1.8s" repeatCount="indefinite" />
-                      </circle>
-                      {/* Solid inner dot */}
-                      <circle cx={last.x.toFixed(1)} cy={last.y.toFixed(1)} r="3"
-                        fill={line.color} stroke="#0D0D1A" strokeWidth="1.5" />
-                    </g>
-                  )}
-                </g>
-              );
-            })}
-
-            {/* Hover: vertical line + dots + inline % labels */}
-            {inPlot && hoverT && (() => {
-              const nearRight = hoverX! > PAD.l + CW * 0.72;
-              const lx  = nearRight ? hoverX! - 8 : hoverX! + 8;
-              const anc = nearRight ? "end" : "start";
-              return (
-                <g>
-                  <line x1={hoverX!.toFixed(1)} y1={PAD.t} x2={hoverX!.toFixed(1)} y2={VH - PAD.b}
-                    stroke="#ffffff" strokeWidth="1" strokeOpacity="0.12" />
-                  {lines.map((line, i) => {
-                    const p  = lerp(line.pts, hoverT);
-                    const cy = toY(p);
-                    return (
-                      <g key={i}>
-                        <circle cx={hoverX!.toFixed(1)} cy={cy.toFixed(1)} r="3.5"
-                          fill={line.color} stroke="#0D0D1A" strokeWidth="1.5" />
-                        <text x={lx.toFixed(1)} y={(cy - 5).toFixed(1)}
-                          fill={line.color} fontSize="11" fontFamily={MONO} textAnchor={anc}
-                          style={{ fontWeight: 600 }}>
-                          {fmtPct(p)}
-                        </text>
-                      </g>
-                    );
-                  })}
-                  {/* Hover time label at bottom */}
-                  <text x={hoverX!.toFixed(1)} y={(VH - PAD.b + 16).toFixed(1)}
-                    fill="#6B6B8A" fontSize="11" fontFamily={MONO} textAnchor="middle">
-                    {fmtXLabel(hoverT, iv)}
-                  </text>
-                </g>
-              );
-            })()}
-
-            {/* X-axis static labels (hidden while hovering) */}
-            {!inPlot && X_TICKS.map(({ t, x }, i) => (
-              <text key={i} x={x.toFixed(1)} y={(VH - PAD.b + 16).toFixed(1)}
-                fill={LABEL} fontSize="11" fontFamily={MONO} textAnchor="middle">
-                {fmtXLabel(t, iv)}
-              </text>
-            ))}
-          </svg>
-        )}
+      {/* ── Chart ─────────────────────────────────────────────────────────── */}
+      {/* Liveline is always mounted so its ResizeObserver fires on first layout,
+          not after a loading→data state transition which would leave the canvas
+          at the browser default 300×150. loading/emptyText handle those states. */}
+      <div className="pt-0.5 pb-1 px-1" style={{ height: 330 }}
+        onMouseLeave={() => setHoverT(null)}
+      >
+        <Liveline
+          data={lines[0]?.pts.map((p) => ({ time: p.t, value: p.p })) ?? []}
+          value={lines[0]?.pts.at(-1)?.p ?? 0}
+          series={lines.map((l) => ({
+            id:    l.marketId,
+            data:  l.pts.map((p) => ({ time: p.t, value: p.p })),
+            value: l.pts.at(-1)?.p ?? 0,
+            color: l.color,
+            label: l.name,
+          }))}
+          window={WINDOW_SECS[iv]}
+          theme="dark"
+          grid
+          scrub
+          loading={loading}
+          emptyText="NO PRICE HISTORY"
+          formatValue={(v: number) => `${Math.round(v * 100)}%`}
+          onHover={(pt) => pt && setHoverT(pt.time)}
+          style={{ height: "290px" }}
+        />
       </div>
     </div>
   );
