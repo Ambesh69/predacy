@@ -300,8 +300,8 @@ function MultiOutcomeChart({ markets, selectedMarketId }: { markets: Market[]; s
             if (iv === "1w") {
               return d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
             }
-            // "max" — month + year, e.g. "Aug '24"
-            return d.toLocaleDateString("en-US", { month: "short", year: "2-digit" }).replace(" ", " '");
+            // "max" — "Aug 15" style: includes day so two ticks in the same month never collide
+            return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
           }}
           onHover={(pt) => pt && setHoverT(pt.time)}
           style={{ height: "290px" }}

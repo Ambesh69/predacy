@@ -128,7 +128,7 @@ export default function PriceChart({ tokenId, currentPrice }: PriceChartProps) {
               if (iv === "1w") {
                 return d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
               }
-              return d.toLocaleDateString("en-US", { month: "short", year: "2-digit" }).replace(" ", " '");
+              return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
             }}
           />
         ) : !loading ? (
