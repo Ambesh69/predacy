@@ -267,8 +267,8 @@ export class ZKClaimProver {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const circuit                    = _require("../circuits/claim.json") as any;
 
-    const bbPath = process.env.BB_PATH ?? `${process.env.HOME}/.bb/bb`;
-    const api    = await Barretenberg.new({ bbPath });
+    // Use the bundled binary — see zkProver.ts for explanation.
+    const api    = await Barretenberg.new({});
     const backend = new UltraHonkBackend(circuit.bytecode, api);
     const noir    = new Noir(circuit);
 

@@ -146,9 +146,12 @@ export class ZKProver {
     const circuit = _require("../circuits/batch_clearing.json") as any;
 
     console.log("[ZKProver] Initialising Barretenberg backend...");
-    // Use the native bb binary when available (much faster than WASM fallback)
-    const bbPath = process.env.BB_PATH ?? `${process.env.HOME}/.bb/bb`;
-    const api = await Barretenberg.new({ bbPath });
+    // Use the bb binary bundled inside @aztec/bb.js (auto-discovered from node_modules).
+    // DO NOT pass a custom bbPath — the bbup-installed binary at ~/.bb/bb can be a
+    // mismatched version that exits with code 1 during proof generation.
+    // The bundled binary (node_modules/@aztec/bb.js/build/<platform>/bb) is always
+    // version-matched to the installed package, so no BB_PATH env var is needed.
+    const api = await Barretenberg.new({});
 
     const backend = new UltraHonkBackend(circuit.bytecode, api);
     const noir    = new Noir(circuit);

@@ -2,20 +2,17 @@
 # Nixpacks would otherwise run `npm run build` which fails on strict
 # viem generic inference that tsx handles fine at runtime.
 #
-# bb (Barretenberg) is required for real UltraHonk proof generation when
-# USE_REAL_ZK=true. The install script places bbup at ~/.bb/bbup; we then
-# call bbup with the exact version matching @aztec/bb.js to ensure the native
-# binary proof format is compatible with the deployed HonkVerifier VK.
-# zkProver.ts / zkClaimProver.ts default to BB_PATH=~/.bb/bb.
-#
-# Version MUST match @aztec/bb.js version in package.json (4.0.0-nightly.20260120).
+# bb (Barretenberg) native binary: NO separate install needed.
+# @aztec/bb.js bundles its own version-matched bb binary inside the npm package
+# (node_modules/@aztec/bb.js/build/<platform>/bb). zkProver.ts calls
+# Barretenberg.new({}) with no bbPath so bb.js auto-discovers the bundled binary.
+# This avoids the mismatch where bbup-installed ~/.bb/bb can be a different version
+# that exits with code 1 during proof generation.
 
 [phases.build]
 cmds = [
   "npm install --no-audit --no-fund",
-  "curl -L https://raw.githubusercontent.com/AztecProtocol/aztec-packages/master/barretenberg/cpp/installation/install | bash",
-  "$HOME/.bb/bbup --version 4.0.0-nightly.20260120",
 ]
 
 [start]
-cmd = "BB_PATH=$HOME/.bb/bb npm start"
+cmd = "npm start"
