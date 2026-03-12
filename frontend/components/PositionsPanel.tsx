@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { keccak256, encodeAbiParameters } from "viem";
 import { clsx } from "clsx";
-import { BATCH_VAULT_ABI, PROXY_WALLET_FACTORY_ABI, BatchStatus, getContracts } from "@/lib/contracts";
+import { BATCH_VAULT_ABI, PROXY_WALLET_FACTORY_ABI, ERC20_ABI, BatchStatus, getContracts } from "@/lib/contracts";
 import { ACTIVE_CHAIN, IS_MAINNET } from "@/lib/chain";
 import { publicClient } from "@/lib/publicClient";
 
@@ -427,8 +427,12 @@ function UnfilledCard({ hp, onSweep }: {
     <div className="px-4 py-3 border-b border-border/40">
       <div className="flex items-center gap-2 mb-1">
         <DirectionBadge side={hp.side} />
-        <span className="text-[10px] text-muted tracking-widest uppercase">Not filled</span>
-        <span className="text-[9px] text-muted-dim ml-auto">#{hp.batchId.toString()}</span>
+        <span className="text-[10px] text-muted tracking-widest uppercase">
+          {hp.batchId === 0n ? "Stuck USDC" : "Not filled"}
+        </span>
+        {hp.batchId > 0n && (
+          <span className="text-[9px] text-muted-dim ml-auto">#{hp.batchId.toString()}</span>
+        )}
       </div>
 
       {hp.marketQuestion && (
@@ -438,8 +442,10 @@ function UnfilledCard({ hp, onSweep }: {
       {(hp.side === YES_BUY || hp.side === NO_BUY) ? (
         <div className="space-y-2">
           <p className="text-[9px] text-muted-dim leading-snug">
-            Your limit was below the batch clearing price.
-            {amountDisplay && <> {amountDisplay} USDC remains in your ephemeral wallet.</>}
+            {hp.batchId === 0n
+              ? <>Order was not submitted to a batch — {amountDisplay ?? "USDC"} is stuck in your ephemeral wallet.</>
+              : <>Your limit was below the batch clearing price. {amountDisplay && <>{amountDisplay} USDC remains in your ephemeral wallet.</>}</>
+            }
           </p>
 
           {hp.ephemeralKey && !swept && (
@@ -530,6 +536,12 @@ export default function PositionsPanel({
   const [currentEphemeral, setCurrentEphemeral] = useState<{
     key: string; address: string; amount: bigint;
   } | null>(null);
+  // Pending (never-committed) orders whose USDC is stuck in the ephemeral wallet
+  // because the relayer failed/timed-out after the user funded the ephemeral wallet.
+  const [stuckEphemeralOrders, setStuckEphemeralOrders] = useState<Array<{
+    ephemeralKey: string; ephemeralAddress: string;
+    amount: bigint; marketQuestion?: string; side: number;
+  }>>([]);
 
   // ── Fetch current batch position when settled ────────────────────────────────
   useEffect(() => {
@@ -767,6 +779,38 @@ export default function PositionsPanel({
     results.sort((a, b) => (a.batchId > b.batchId ? -1 : 1));
     setHistoricalPositions(results);
     setAllStoredOrders(rawActivity);
+
+    // ── Detect stuck USDC: pending orders that were never committed ──────────
+    // These have commitment=null / pending=true in localStorage (saved immediately
+    // after funding the ephemeral wallet, before the relayer submission). If the
+    // relayer timed out or restarted, the USDC is left stranded in the ephemeral
+    // wallet. Surface them with a SWEEP button so the user can recover the funds.
+    const pendingWithKey = storedOrders
+      .filter((o) => !marketId || o.marketId === marketId)
+      .filter((o) => (o as any).pending === true && (o as any).ephemeralKey && (o as any).ephemeralAddress && !(o as any).swept);
+    const stuck: typeof stuckEphemeralOrders = [];
+    await Promise.allSettled(
+      pendingWithKey.map(async (o: any) => {
+        try {
+          const bal = await publicClient.readContract({
+            address: contracts.usdc, abi: ERC20_ABI,
+            functionName: "balanceOf",
+            args: [o.ephemeralAddress as `0x${string}`],
+          }) as bigint;
+          if (bal > 0n) {
+            stuck.push({
+              ephemeralKey:     o.ephemeralKey,
+              ephemeralAddress: o.ephemeralAddress,
+              amount:           bal,
+              marketQuestion:   o.marketQuestion,
+              side:             o.side ?? YES_BUY,
+            });
+          }
+        } catch { /* RPC hiccup — skip */ }
+      })
+    );
+    setStuckEphemeralOrders(stuck);
+
     setScanning(false);
 
     const uniqueMarketIds = [...new Set(results.map((r) => r.batchMarketId))];
@@ -1018,6 +1062,34 @@ export default function PositionsPanel({
                 ) : (
                   <UnfilledCard key={hp.batchId.toString()} hp={hp} onSweep={onSweepUnfilled} />
                 )
+              ))}
+
+              {/* Stuck USDC: pending orders where relayer failed before commitOrderFor */}
+              {stuckEphemeralOrders.map((stuck, idx) => (
+                <UnfilledCard
+                  key={`stuck-${stuck.ephemeralAddress}-${idx}`}
+                  hp={{
+                    batchId:          0n,
+                    batchMarketId:    ("0x" + "0".repeat(64)) as `0x${string}`,
+                    batchStatus:      BatchStatus.SETTLED,
+                    clearingPrice:    0n,
+                    side:             stuck.side,
+                    marketQuestion:   stuck.marketQuestion,
+                    position:         { filledAmount: 0n, refundAmount: 0n, side: stuck.side, claimed: false },
+                    unfilled:         true,
+                    ephemeralKey:     stuck.ephemeralKey,
+                    ephemeralAddress: stuck.ephemeralAddress,
+                    unfilledAmount:   stuck.amount,
+                    swept:            false,
+                  }}
+                  onSweep={async (key, addr, amount) => {
+                    await onSweepUnfilled?.(key, addr, amount);
+                    // Remove from stuck list once swept
+                    setStuckEphemeralOrders((prev) =>
+                      prev.filter((s) => s.ephemeralAddress !== addr)
+                    );
+                  }}
+                />
               ))}
 
               {/* Historical active (unclaimed settled with fill) */}
