@@ -146,23 +146,41 @@ export class ZKProver {
     const circuit = _require("../circuits/batch_clearing.json") as any;
 
     // Probe the bundled bb binary before attempting a proof so we get a clear
-    // error in the logs rather than a silent exit-code-1 from the socket backend.
-    const { findBbBinary } = await import("@aztec/bb.js/dest/node/bb_backends/node/platform.js");
-    const { execFileSync } = await import("child_process");
-    const bbBin = findBbBinary(undefined);
-    console.log(`[ZKProver] bb binary path: ${bbBin ?? "NOT FOUND (will use WASM)"}`);
-    if (bbBin) {
-      try {
-        const ver = execFileSync(bbBin, ["--version"], { encoding: "utf8", timeout: 5000 }).trim();
-        console.log(`[ZKProver] bb binary version: ${ver}`);
-      } catch (e: any) {
-        console.error(`[ZKProver] bb binary self-test FAILED: ${e.message} (exit ${e.status})`);
-        console.error(`[ZKProver] stderr: ${e.stderr ?? "(empty)"}`);
+    // error in the logs rather than a silent "exit code 1" from the socket backend.
+    {
+      const nodePath = await import("path");
+      const nodeFs   = await import("fs");
+      const nodeOs   = await import("os");
+      const { execFileSync } = await import("child_process");
+      const { createRequire } = await import("module");
+      const _req = createRequire(import.meta.url);
+      // Locate the @aztec/bb.js package root via its package.json
+      const pkgJsonPath = _req.resolve("@aztec/bb.js/package.json");
+      const pkgRoot     = nodePath.default.dirname(pkgJsonPath);
+      const archMap: Record<string, string> = {
+        "x64-linux":    "amd64-linux",
+        "arm64-linux":  "arm64-linux",
+        "x64-darwin":   "amd64-macos",
+        "arm64-darwin": "arm64-macos",
+      };
+      const platformKey = `${nodeOs.default.arch() === "x64" ? "x64" : nodeOs.default.arch()}-${nodeOs.default.platform()}`;
+      const buildDir    = archMap[platformKey];
+      const bbBin       = buildDir ? nodePath.default.join(pkgRoot, "build", buildDir, "bb") : null;
+      console.log(`[ZKProver] platform=${platformKey} buildDir=${buildDir ?? "UNKNOWN"} bbBin=${bbBin ?? "N/A"}`);
+      if (bbBin && nodeFs.default.existsSync(bbBin)) {
+        try {
+          const ver = execFileSync(bbBin, ["--version"], { encoding: "utf8", timeout: 5000 }).trim();
+          console.log(`[ZKProver] bb --version ok: ${ver}`);
+        } catch (e: any) {
+          console.error(`[ZKProver] bb --version FAILED (exit ${e.status}): ${(e.stderr ?? e.message ?? "").slice(0, 400)}`);
+        }
+      } else {
+        console.warn(`[ZKProver] bundled bb binary not found — Barretenberg.new() will fall back to WASM`);
       }
     }
 
     console.log("[ZKProver] Initialising Barretenberg backend...");
-    // Pipe bb binary's stdout/stderr so we can see crash reasons in Railway logs.
+    // Pass a logger so bb's stdout/stderr appears in Railway logs as [bb] lines.
     const bbLogger = (msg: string) => console.log(`[bb] ${msg}`);
     const api = await Barretenberg.new({ logger: bbLogger });
 
