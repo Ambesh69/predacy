@@ -38,9 +38,9 @@ const publicClient = createPublicClient({
   chain: ACTIVE_CHAIN,
   transport: IS_MAINNET
     ? fallback([
-        http("https://polygon.llamarpc.com"),
         http("https://polygon.meowrpc.com"),
         http("https://rpc.ankr.com/polygon"),
+        http("https://polygon.drpc.org"),
       ])
     : http(),
 });
