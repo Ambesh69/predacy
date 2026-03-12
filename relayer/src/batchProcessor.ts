@@ -1536,8 +1536,61 @@ export class BatchProcessor {
       const detail   = errName
         ? (errArgs ? `${errName}(${errArgs.join(", ")})` : errName)
         : fallback;
-      console.error(`[BatchProcessor] settleBatch simulation FAILED: ${detail}`);
-      throw new Error(`settleBatch would revert: ${detail}`, { cause: simErr });
+
+      // "SafeMath: subtraction overflow" in the simulation comes from the Gnosis CTF
+      // contract's ERC-1155 balance check inside settleBatch.  This can be a false
+      // negative when the simulation hits a lagging RPC node that hasn't yet indexed
+      // the CLOB buy tx — the node sees stale balance = 0 even though the tokens
+      // already landed on-chain.
+      //
+      // Recovery: if the error is SafeMath AND we can independently confirm the
+      // relayer's balance is sufficient, bypass the simulation and proceed to the live
+      // tx.  The live tx goes through the mempool and always executes against the
+      // latest state, so it will succeed.
+      const isSafeMath = detail.includes("SafeMath: subtraction overflow");
+      if (isSafeMath && this.config.ctfAddress) {
+        const relayerAddr = this.walletClient.account!.address;
+        let balanceOk = true;
+
+        if (yesGap > 0n && cachedYesToken) {
+          const bal = await this.publicClient.readContract({
+            address:      this.config.ctfAddress as `0x${string}`,
+            abi:          CTF_ABI,
+            functionName: "balanceOf",
+            args:         [relayerAddr, BigInt(cachedYesToken)],
+          }) as bigint;
+          if (bal < yesGap) {
+            console.error(`[BatchProcessor] settleBatch simulation SafeMath: relayer YES balance ${bal} < yesGap ${yesGap} — real error`);
+            balanceOk = false;
+          } else {
+            console.warn(`[BatchProcessor] settleBatch simulation SafeMath but relayer YES balance ${bal} ≥ yesGap ${yesGap} — stale RPC; proceeding`);
+          }
+        }
+        if (balanceOk && noGap > 0n && cachedNoToken) {
+          const bal = await this.publicClient.readContract({
+            address:      this.config.ctfAddress as `0x${string}`,
+            abi:          CTF_ABI,
+            functionName: "balanceOf",
+            args:         [relayerAddr, BigInt(cachedNoToken)],
+          }) as bigint;
+          if (bal < noGap) {
+            console.error(`[BatchProcessor] settleBatch simulation SafeMath: relayer NO balance ${bal} < noGap ${noGap} — real error`);
+            balanceOk = false;
+          } else {
+            console.warn(`[BatchProcessor] settleBatch simulation SafeMath but relayer NO balance ${bal} ≥ noGap ${noGap} — stale RPC; proceeding`);
+          }
+        }
+
+        if (!balanceOk) {
+          console.error(`[BatchProcessor] settleBatch simulation FAILED: ${detail}`);
+          throw new Error(`settleBatch would revert: ${detail}`, { cause: simErr });
+        }
+        // balanceOk = true → fall through to the live settleBatch tx
+        console.log(`[BatchProcessor] settleBatch proceeding despite stale simulation — tokens confirmed on-chain ✓`);
+      } else {
+        console.error(`[BatchProcessor] settleBatch simulation FAILED: ${detail}`);
+        throw new Error(`settleBatch would revert: ${detail}`, { cause: simErr });
+      }
     }
 
     console.log(`[BatchProcessor] Phase 2: calling settleBatch for batch ${batchId}`);
