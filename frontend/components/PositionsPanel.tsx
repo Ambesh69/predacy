@@ -954,7 +954,7 @@ export default function PositionsPanel({
           <div className="border-b border-border/50 flex items-center px-4 gap-4 flex-shrink-0">
             {(["active", "closed"] as const).map((sub) => {
               const count = sub === "active"
-                ? activePositions.length + pendingPositions.length + (currentPositionInActive ? 1 : 0)
+                ? activePositions.length + pendingPositions.length + stuckEphemeralOrders.length + (currentPositionInActive ? 1 : 0)
                 : closedPositions.length + (currentPositionInClosed ? 1 : 0);
               return (
                 <button
@@ -981,6 +981,34 @@ export default function PositionsPanel({
           {/* ── ACTIVE sub-tab ───────────────────────────────────────────── */}
           {posTab === "active" && (
           <div className="flex-1 overflow-y-auto">
+
+              {/* Stuck USDC: pending orders where relayer failed before commitOrderFor — shown first */}
+              {stuckEphemeralOrders.map((stuck, idx) => (
+                <UnfilledCard
+                  key={`stuck-${stuck.ephemeralAddress}-${idx}`}
+                  hp={{
+                    batchId:          0n,
+                    batchMarketId:    ("0x" + "0".repeat(64)) as `0x${string}`,
+                    batchStatus:      BatchStatus.SETTLED,
+                    clearingPrice:    0n,
+                    side:             stuck.side,
+                    marketQuestion:   stuck.marketQuestion,
+                    position:         { filledAmount: 0n, refundAmount: 0n, side: stuck.side, claimed: false },
+                    unfilled:         true,
+                    ephemeralKey:     stuck.ephemeralKey,
+                    ephemeralAddress: stuck.ephemeralAddress,
+                    unfilledAmount:   stuck.amount,
+                    swept:            false,
+                  }}
+                  onSweep={async (key, addr, amount) => {
+                    await onSweepUnfilled?.(key, addr, amount);
+                    // Remove from stuck list once swept
+                    setStuckEphemeralOrders((prev) =>
+                      prev.filter((s) => s.ephemeralAddress !== addr)
+                    );
+                  }}
+                />
+              ))}
 
               {/* Current batch status */}
               {currentBatchStatus === BatchStatus.OPEN && hasCurrentOrder && (
@@ -1064,41 +1092,13 @@ export default function PositionsPanel({
                 )
               ))}
 
-              {/* Stuck USDC: pending orders where relayer failed before commitOrderFor */}
-              {stuckEphemeralOrders.map((stuck, idx) => (
-                <UnfilledCard
-                  key={`stuck-${stuck.ephemeralAddress}-${idx}`}
-                  hp={{
-                    batchId:          0n,
-                    batchMarketId:    ("0x" + "0".repeat(64)) as `0x${string}`,
-                    batchStatus:      BatchStatus.SETTLED,
-                    clearingPrice:    0n,
-                    side:             stuck.side,
-                    marketQuestion:   stuck.marketQuestion,
-                    position:         { filledAmount: 0n, refundAmount: 0n, side: stuck.side, claimed: false },
-                    unfilled:         true,
-                    ephemeralKey:     stuck.ephemeralKey,
-                    ephemeralAddress: stuck.ephemeralAddress,
-                    unfilledAmount:   stuck.amount,
-                    swept:            false,
-                  }}
-                  onSweep={async (key, addr, amount) => {
-                    await onSweepUnfilled?.(key, addr, amount);
-                    // Remove from stuck list once swept
-                    setStuckEphemeralOrders((prev) =>
-                      prev.filter((s) => s.ephemeralAddress !== addr)
-                    );
-                  }}
-                />
-              ))}
-
               {/* Historical active (unclaimed settled with fill) */}
               {scanning ? (
                 <div>
                   <SkeletonRow />
                   <SkeletonRow />
                 </div>
-              ) : activePositions.length === 0 && pendingPositions.length === 0 && !currentIsActive && !hasCurrentOrder ? (
+              ) : activePositions.length === 0 && pendingPositions.length === 0 && stuckEphemeralOrders.length === 0 && !currentIsActive && !hasCurrentOrder ? (
                 <div className="px-4 py-8 text-center">
                   <p className="text-[11px] text-muted-dim">No active positions.</p>
                   <p className="text-[10px] text-muted-dim mt-1">

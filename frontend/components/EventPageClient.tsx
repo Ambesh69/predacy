@@ -425,6 +425,11 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   // reset currentBatchId to 0n; we fall back to this ref so fetchBatch can
   // still detect the SETTLING → SETTLED transition.
   const lastBatchIdRef = useRef<bigint>(0n);
+
+  // ── Stuck USDC detection ─────────────────────────────────────────────────────
+  // Scan localStorage for buy orders that were funded but never committed (e.g.
+  // due to a relayer restart mid-request). Show a banner so the user can sweep.
+  const [stuckUsdcCount, setStuckUsdcCount] = useState(0);
   const pushToast = (message: string, type: "success" | "error") => {
     const id = ++toastIdRef.current;
     setToast({ id, message, type });
@@ -469,6 +474,50 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   const wallet        = wallets[0];
   const walletAddress = wallet?.address as `0x${string}` | undefined;
   const isConnected   = authenticated && !!walletAddress;
+
+  // ── Stuck USDC background scan ───────────────────────────────────────────────
+  // On mount (and every 60s while connected), look for buy orders that were saved
+  // with pending=true — meaning the ephemeral wallet was funded but the relayer POST
+  // failed before commitOrderFor was called. Check live USDC balance via RPC so
+  // we only show the banner when there's actually something to sweep.
+  useEffect(() => {
+    if (!isConnected) return;
+    const contracts = getContracts(ACTIVE_CHAIN.id);
+    let cancelled = false;
+
+    const scan = async () => {
+      if (cancelled) return;
+      try {
+        const keys = Object.keys(localStorage).filter((k) => k.startsWith("order-"));
+        const pendingWithKey = keys.flatMap((k) => {
+          try { return [JSON.parse(localStorage.getItem(k) ?? "")]; } catch { return []; }
+        }).filter((o: any) => o?.pending === true && o?.ephemeralKey && o?.ephemeralAddress && !o?.swept);
+
+        if (pendingWithKey.length === 0) { setStuckUsdcCount(0); return; }
+
+        const balances = await Promise.allSettled(
+          pendingWithKey.map((o: any) =>
+            publicClient.readContract({
+              address: contracts.usdc,
+              abi:     ERC20_ABI,
+              functionName: "balanceOf",
+              args:    [o.ephemeralAddress as `0x${string}`],
+            }) as Promise<bigint>
+          )
+        );
+
+        if (cancelled) return;
+        const nonZero = balances.filter(
+          (r) => r.status === "fulfilled" && (r.value as bigint) > 0n
+        ).length;
+        setStuckUsdcCount(nonZero);
+      } catch { /* RPC hiccup — try again next interval */ }
+    };
+
+    scan();
+    const iv = setInterval(scan, 60_000);
+    return () => { cancelled = true; clearInterval(iv); };
+  }, [isConnected]);
 
   // ── Load event + 30-second price polling ─────────────────────────────────────
   // Polymarket prices update continuously. We poll every 30s so displayed prices
@@ -1592,6 +1641,26 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         <div className="mx-6 mt-3 px-3 py-2 border border-danger/30 bg-danger/5 text-[11px] text-danger">
           {chainError}
           <button onClick={() => setChainError(null)} className="ml-2 opacity-60 hover:opacity-100">✕</button>
+        </div>
+      )}
+
+      {/* Stuck USDC banner — shown when funded ephemeral wallets were never committed */}
+      {stuckUsdcCount > 0 && (
+        <div className="mx-6 mt-3 px-3 py-2 border border-yellow-500/40 bg-yellow-500/5 text-[11px] text-yellow-400 flex items-center gap-2">
+          <span className="text-yellow-500">⚠</span>
+          <span className="flex-1">
+            {stuckUsdcCount === 1
+              ? "1 order has USDC stuck in an ephemeral wallet — it was funded but never submitted to a batch."
+              : `${stuckUsdcCount} orders have USDC stuck in ephemeral wallets — funded but never submitted to a batch.`}
+            {" "}
+            <button
+              className="underline underline-offset-2 hover:text-yellow-300 transition-colors"
+              onClick={() => { setLeftTab("positions"); setStuckUsdcCount(0); }}
+            >
+              Open My Positions to sweep
+            </button>
+          </span>
+          <button onClick={() => setStuckUsdcCount(0)} className="opacity-60 hover:opacity-100 transition-opacity">✕</button>
         </div>
       )}
 
