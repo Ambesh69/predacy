@@ -16,11 +16,11 @@ const INTERVALS = [
 type Interval = typeof INTERVALS[number]["value"];
 
 // Map interval → visible seconds for liveline window prop
-const WINDOW_SECS: Record<Interval, number> = {
-  "6h":  6  * 3_600,
-  "1d":  24 * 3_600,
-  "1w":  7  * 86_400,
-  "max": 50 * 365 * 86_400,  // effectively "show all"
+// "max" is omitted — computed dynamically from data span at render time
+const WINDOW_SECS: Partial<Record<Interval, number>> = {
+  "6h": 6  * 3_600,
+  "1d": 24 * 3_600,
+  "1w": 7  * 86_400,
 };
 
 // ── Colours ───────────────────────────────────────────────────────────────────
@@ -111,7 +111,11 @@ export default function PriceChart({ tokenId, currentPrice }: PriceChartProps) {
               { id: "yes", data: yesData, value: yesLast, color: YES_COLOR, label: "YES" },
               { id: "no",  data: noData,  value: noLast,  color: NO_COLOR,  label: "NO"  },
             ]}
-            window={WINDOW_SECS[iv]}
+            window={iv !== "max" ? WINDOW_SECS[iv] : (() => {
+              const nowSec = Date.now() / 1000;
+              const minT = raw.length > 0 ? raw[0].t : nowSec;
+              return Math.ceil((nowSec - minT) * 1.05) || 7 * 86_400;
+            })()}
             theme="dark"
             grid
             scrub

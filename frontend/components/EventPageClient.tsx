@@ -160,11 +160,11 @@ const INTERVALS: { label: string; value: Interval; fidelity: number }[] = [
 interface ChartSeries { marketId: string; name: string; color: string; pts: Array<{ t: number; p: number }>; }
 
 // ── Chart window sizes ────────────────────────────────────────────────────────
-const WINDOW_SECS: Record<Interval, number> = {
-  "6h":  6  * 3_600,
-  "1d":  24 * 3_600,
-  "1w":  7  * 86_400,
-  "max": 50 * 365 * 86_400,
+const WINDOW_SECS: Partial<Record<Interval, number>> = {
+  "6h": 6  * 3_600,
+  "1d": 24 * 3_600,
+  "1w": 7  * 86_400,
+  // "max" is computed dynamically from data span — see chartWindow below
 };
 
 // lerp: used by legend to show hover-interpolated prices from liveline's onHover time
@@ -276,7 +276,16 @@ function MultiOutcomeChart({ markets, selectedMarketId }: { markets: Market[]; s
             // no label — end-of-line text suppressed; custom legend above shows names
           }))}
           seriesToggleCompact
-          window={WINDOW_SECS[iv]}
+          window={(() => {
+            if (iv !== "max") return WINDOW_SECS[iv];
+            // For ALL: span from earliest data point to now + 5% margin
+            const nowSec = Date.now() / 1000;
+            let minT = nowSec;
+            for (const l of lines) {
+              if (l.pts.length > 0 && l.pts[0].t < minT) minT = l.pts[0].t;
+            }
+            return Math.ceil((nowSec - minT) * 1.05) || 7 * 86_400;
+          })()}
           theme="dark"
           grid
           scrub
