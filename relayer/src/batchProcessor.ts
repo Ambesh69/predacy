@@ -990,7 +990,7 @@ export class BatchProcessor {
    *
    * @param hash        - tx hash to wait for
    * @param batchId     - batch being processed (for on-chain status check)
-   * @param okStatus    - BatchStatus value that confirms the tx succeeded (2=LOCKED, 4=SETTLED)
+   * @param okStatus    - BatchStatus value that confirms the tx succeeded (2=LOCKED, 3=SETTLED)
    * @param label       - log label for diagnostics
    */
   private async _waitReceiptOrVerify(
@@ -1003,23 +1003,40 @@ export class BatchProcessor {
       await this.publicClient.waitForTransactionReceipt({ hash, timeout: 120_000 });
     } catch (err: any) {
       const msg: string = err?.message ?? "";
-      if (!msg.includes("could not be found") && !msg.includes("not be processed")) {
+      if (
+        !msg.includes("could not be found") &&
+        !msg.includes("not be processed") &&
+        !msg.includes("Timed out") &&
+        !msg.includes("timed out")
+      ) {
         throw err; // real error (revert, network failure) — propagate
       }
-      // Receipt polling timed out — verify on-chain status instead.
+      // Receipt polling timed out — poll on-chain status up to 3 times (30s apart) to allow
+      // slow-mining txs to confirm before declaring failure.
       console.warn(`[BatchProcessor] ${label} receipt timeout for ${hash} — verifying on-chain status`);
-      const batchInfo = await this.publicClient.readContract({
-        address:      this.config.vaultAddress,
-        abi:          BATCH_VAULT_ABI,
-        functionName: "getBatch",
-        args:         [batchId],
-      }) as { status: number };
-      if (batchInfo.status !== okStatus) {
-        throw new Error(
-          `[BatchProcessor] ${label} receipt timeout and on-chain status=${batchInfo.status} ≠ expected ${okStatus} — tx may have failed`,
-        );
+      for (let poll = 1; poll <= 3; poll++) {
+        const batchInfo = await this.publicClient.readContract({
+          address:      this.config.vaultAddress,
+          abi:          BATCH_VAULT_ABI,
+          functionName: "getBatch",
+          args:         [batchId],
+        }) as { status: number };
+        if (batchInfo.status === okStatus) {
+          console.log(`[BatchProcessor] ${label} confirmed via on-chain status (${okStatus}) ✓ (poll ${poll}/3)`);
+          return;
+        }
+        if (poll < 3) {
+          console.warn(
+            `[BatchProcessor] ${label} receipt timeout and on-chain status=${batchInfo.status} ≠ expected ${okStatus} — ` +
+            `waiting 30s and retrying (poll ${poll}/3)`,
+          );
+          await new Promise<void>(resolve => setTimeout(resolve, 30_000));
+        } else {
+          throw new Error(
+            `[BatchProcessor] ${label} receipt timeout and on-chain status=${batchInfo.status} ≠ expected ${okStatus} — tx may have failed`,
+          );
+        }
       }
-      console.log(`[BatchProcessor] ${label} confirmed via on-chain status (${okStatus}) ✓`);
     }
   }
 
@@ -1537,7 +1554,7 @@ export class BatchProcessor {
       maxFeePerGas:         300_000_000_000n,    // 300 gwei — 10M × 300 gwei = 3 MATIC
     });
 
-    await this._waitReceiptOrVerify(settleHash, batchId, 4 /* SETTLED */, "settleBatch");
+    await this._waitReceiptOrVerify(settleHash, batchId, 3 /* SETTLED */, "settleBatch");
     console.log(`[BatchProcessor] Batch ${batchId} settled! tx: ${settleHash}`);
 
     // Clean up order store

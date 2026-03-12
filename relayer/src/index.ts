@@ -1332,6 +1332,40 @@ async function onSettleFail(state: MarketState, marketKey: string, batchId: bigi
   console.error(`[Relayer] processBatch ${batchId} (market ${marketKey}) failed (attempt ${n}/3):`, msg);
 
   if (n >= 3 || isUnresolvable) {
+    // Before permanently failing, do a final on-chain status check.
+    // If lockFunds mined AFTER the receipt-check timeout, the batch will be LOCKED even
+    // though processBatch thinks it failed.  Rescue it by re-triggering processBatch
+    // (which will skip lockFunds and proceed to CLOB + settleBatch) instead of abandoning.
+    if (!isUnresolvable) {
+      try {
+        const batchInfo = await publicClient.readContract({
+          address: baseConfig.vaultAddress,
+          abi:     BATCH_VAULT_ABI,
+          functionName: "getBatch",
+          args:    [batchId],
+        }) as { status: number };
+        const LOCKED = 2;
+        if (batchInfo.status === LOCKED) {
+          console.warn(
+            `[Relayer] Batch ${batchId} is LOCKED on-chain (lockFunds mined after receipt timeout) — ` +
+            `rescuing: will skip lockFunds and proceed to settleBatch`,
+          );
+          state.settleFailures.delete(key);
+          if (!state.processingBatch) {
+            state.processingBatch = true;
+            state.settlingBatchId = batchId;
+            state.processor.processBatch(batchId)
+              .then(() => { state.settleFailures.delete(key); })
+              .catch(async (rescueErr) => { await onSettleFail(state, marketKey, batchId, rescueErr); })
+              .finally(() => { state.processingBatch = false; state.settlingBatchId = null; });
+          }
+          return;
+        }
+      } catch (checkErr: any) {
+        console.warn(`[Relayer] Final status check for batch ${batchId} failed (continuing to permanently fail):`, checkErr.message);
+      }
+    }
+
     console.warn(`[Relayer] Batch ${batchId} giving up after ${n} attempt(s) — force-opening next batch`);
     await markPermanentlyFailed(batchId);
     state.settleFailures.delete(key);
