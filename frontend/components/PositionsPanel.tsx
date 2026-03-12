@@ -649,6 +649,15 @@ export default function PositionsPanel({
           const isBuyOrder = orderSide === YES_BUY || orderSide === NO_BUY;
 
           if (posRaw.filledAmount === 0n && posRaw.refundAmount === 0n) {
+            // SELL orders that are included in a batch always have refundAmount > 0 when
+            // unfilled (the pre-deposited YES/NO tokens are returned). If both amounts are
+            // zero in a SETTLED batch, the commitment was never committed on-chain — it's a
+            // stale localStorage entry (e.g. from a previous vault version or cancelled attempt).
+            // Skip silently so it doesn't show as a phantom "SELL YES — NOT FILLED" card.
+            // BUY orders legitimately have 0/0 when unfilled (EIP-3009 deferred, no pre-deposit).
+            const isSellOrder = orderSide === YES_SELL || orderSide === NO_SELL;
+            if (isSellOrder && (batchRaw.status as BatchStatus) === BatchStatus.SETTLED) return;
+
             // Enrich activity row
             const idx = rawActivity.findIndex((r) => r.batchId === order.batchId);
             if (idx >= 0) rawActivity[idx].batchStatus = batchRaw.status as BatchStatus;
