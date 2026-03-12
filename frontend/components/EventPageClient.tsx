@@ -59,6 +59,61 @@ const MOCK_BATCH = {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+/**
+ * POST to the relayer with automatic retry on transient failures.
+ *
+ * After the ephemeral wallet is funded the USDC is on-chain, so if the relayer
+ * POST fails (restart, timeout, 5xx) we can safely resend the same signed payload
+ * — the relayer will call commitOrderFor with the same transferAuth, which is
+ * idempotent (a duplicate nonce would simply revert, not double-spend).
+ *
+ * We retry on: network errors, HTTP 5xx, and the known "Relayer request timed out"
+ * 502 that Vercel emits when the serverless function hits its time limit.
+ * We do NOT retry on 4xx (bad request — retrying won't help).
+ */
+async function relayerPostWithRetry(
+  url:      string,
+  body:     object,
+  onRetry?: (attempt: number) => void,
+  maxRetries = 3,
+  delayMs    = 6_000,
+): Promise<{ ok: boolean; status: number; data: any }> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (attempt > 0) {
+      onRetry?.(attempt);
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+    try {
+      const resp = await fetch(url, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify(body),
+      });
+      const data = await resp.json().catch(() => ({}));
+      // Don't retry 4xx — those are permanent failures (bad input, signature mismatch, etc.)
+      if (resp.status >= 400 && resp.status < 500) return { ok: false, status: resp.status, data };
+      if (resp.ok) return { ok: true, status: resp.status, data };
+      // 5xx or unexpected: retry if attempts remain
+      if (attempt < maxRetries) {
+        console.warn(`[Relayer] Attempt ${attempt + 1}/${maxRetries + 1} failed (${resp.status}) — retrying in ${delayMs / 1000}s`);
+        lastErr = new Error(data?.error ?? `Relayer returned ${resp.status}`);
+        continue;
+      }
+      return { ok: false, status: resp.status, data };
+    } catch (e) {
+      // Network error (timeout, connection reset, Railway restart mid-request)
+      if (attempt < maxRetries) {
+        console.warn(`[Relayer] Attempt ${attempt + 1}/${maxRetries + 1} network error — retrying in ${delayMs / 1000}s`, (e as Error).message);
+        lastErr = e;
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastErr;
+}
+
 // Auto-split: orders larger than this are silently split into ≤$5 000 chunks
 // so no single batch is dominated by one order (price-impact cap + privacy mixing).
 const MAX_CHUNK_USDC_MICRO = 5_000_000_000n; // $5 000 in USDC micro-units (6 decimals)
@@ -1259,10 +1314,11 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
 
       let actualBatchId = batch.batchId.toString();
       for (const chunk of chunkOrders) {
-        const resp = await fetch(`${relayerUrl}/order`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
+        // Use retry-wrapper: USDC is already in the ephemeral wallet, so resending
+        // the same signed payload is safe — the relayer's commitOrderFor is idempotent.
+        const { ok: chunkOk, data: relayerData } = await relayerPostWithRetry(
+          `${relayerUrl}/order`,
+          {
             marketId:       selectedMarket.conditionId,
             batchId:        actualBatchId,
             signer:         ephemeralAddress,
@@ -1282,10 +1338,10 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
             // Cross-device history sync: relayer stores summary keyed by real wallet
             walletAddress:  walletAddress ?? null,
             marketQuestion: selectedMarket.question ?? null,
-          }),
-        });
-        const relayerData = await resp.json().catch(() => ({}));
-        if (!resp.ok) throw new Error(relayerData.error ?? `Relayer returned ${resp.status}`);
+          },
+          (attempt) => setSubmitStep(`retrying (${attempt}/3)…` as any),
+        );
+        if (!chunkOk) throw new Error(relayerData?.error ?? `Relayer returned error`);
 
         // Track the batchId from each response — a large order may span two batches.
         actualBatchId = relayerData.batchId ?? actualBatchId;
@@ -1370,10 +1426,9 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
 
     const relayerUrl = getRelayerUrl();
     if (!relayerUrl) throw new Error("NEXT_PUBLIC_RELAYER_URL is not set");
-    const resp = await fetch(`${relayerUrl}/order`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    const { ok: sellOk, data: sellData } = await relayerPostWithRetry(
+      `${relayerUrl}/order`,
+      {
         marketId:       selectedMarket.conditionId,
         batchId:        batch.batchId.toString(),
         signer:         walletAddress,
@@ -1389,12 +1444,10 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
         // Cross-device history sync: relayer stores summary keyed by real wallet
         walletAddress:  walletAddress ?? null,
         marketQuestion: selectedMarket.question ?? null,
-      }),
-    });
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({ error: "Relayer error" }));
-      throw new Error(err.error ?? `Relayer returned ${resp.status}`);
-    }
+      },
+      (attempt) => setSubmitStep(`retrying (${attempt}/3)…` as any),
+    );
+    if (!sellOk) throw new Error(sellData?.error ?? `Relayer returned error`);
     if (walletAddress) {
       setCommitments((prev) => [...prev, { hash: params.commitment, amount: params.amount, trader: walletAddress, timestamp: Date.now() }]);
       setBatch((prev) => ({ ...prev, commitmentCount: prev.commitmentCount + 1 }));
