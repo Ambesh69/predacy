@@ -997,10 +997,15 @@ const server = createServer((req, res) => {
           send(409, { error: `Batch ${batchId} is already being processed` });
           return;
         }
+        // Un-flag as permanently failed so the poll doesn't skip it on future retries.
+        permanentlyFailedBatches.delete(batchId);
+        if (_failRedis) {
+          _failRedis.srem("predacy:failed_batches", batchId).catch(() => {});
+        }
         state.settlingBatchId = batchIdBig;
         state.processingBatch = true;
         const phaseLabel = batchInfo.status === LOCKED ? "LOCKED (CLOB retry)" : "SETTLING";
-        console.log(`[Relayer] /admin/recover-batch: manually recovering ${phaseLabel} batch ${batchId}`);
+        console.log(`[Relayer] /admin/recover-batch: manually recovering ${phaseLabel} batch ${batchId} (cleared permanently-failed flag)`);
         send(200, { ok: true, batchId, status: phaseLabel });
         state.processor.processBatch(batchIdBig)
           .then(() => {
