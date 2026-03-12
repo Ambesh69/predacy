@@ -1024,13 +1024,28 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     }
 
     const { txHash } = await resp.json();
-    // Receipt polling — treat timeout as success (tx is already submitted).
-    try {
-      await publicClient.waitForTransactionReceipt({ hash: txHash as `0x${string}`, timeout: 120_000 });
-    } catch (receiptErr: any) {
-      const msg: string = receiptErr?.message ?? "";
-      if (!msg.includes("could not be found") && !msg.includes("not be processed")) throw receiptErr;
-      // Timeout — tx is in-flight, continue to clear proxyWalletAddress
+    // Receipt polling — on timeout verify the ProxyWallet balance dropped to 0
+    // before clearing proxyWalletAddress. If balance is still > 0 the tx never
+    // mined and the user needs to retry "MOVE TO WALLET".
+    if (txHash) {
+      try {
+        await publicClient.waitForTransactionReceipt({ hash: txHash as `0x${string}`, timeout: 120_000 });
+      } catch (receiptErr: any) {
+        const msg: string = receiptErr?.message ?? "";
+        if (!msg.includes("could not be found") && !msg.includes("not be processed") &&
+            !msg.includes("Timed out") && !msg.includes("timed out")) throw receiptErr;
+        // Receipt timed out — check on-chain balance to confirm tokens actually moved.
+        const postBalance = await publicClient.readContract({
+          address: contracts.ctf, abi: CTF_ABI, functionName: "balanceOf",
+          args: [proxyWallet, tokenId],
+        }) as bigint;
+        if (postBalance > 0n) {
+          // Tokens still in ProxyWallet — tx didn't mine. Keep proxyWalletAddress set
+          // so the user can retry "MOVE TO WALLET".
+          throw new Error("Transfer tx timed out and tokens are still in the ProxyWallet — please try again");
+        }
+        // postBalance === 0n: tokens moved (tx mined slowly), continue to clear.
+      }
     }
 
     // Clear proxyWalletAddress from localStorage — tokens are now in main wallet.
