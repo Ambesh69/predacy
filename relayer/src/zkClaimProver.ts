@@ -261,15 +261,53 @@ export class ZKClaimProver {
     publicInputs: `0x${string}`[],
   ): Promise<ClaimProofOutput> {
     const { Noir }                   = await import("@noir-lang/noir_js");
-    const { Barretenberg, UltraHonkBackend } = await import("@aztec/bb.js");
+    const { Barretenberg, UltraHonkBackend, BackendType } = await import("@aztec/bb.js");
     const { createRequire }          = await import("module");
     const _require                   = createRequire(import.meta.url);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const circuit                    = _require("../circuits/claim.json") as any;
 
-    // Pipe bb binary's stdout/stderr so we can see crash reasons in Railway logs.
+    // Probe bundled bb binary — detect glibc mismatch before the socket backend tries it.
+    // Falls back to WASM if the binary exits with code 1 (missing glibc symbols).
+    let nativeBinOk = false;
+    {
+      const nodePath = await import("path");
+      const nodeFs   = await import("fs");
+      const nodeOs   = await import("os");
+      const { execFileSync } = await import("child_process");
+      const _req = createRequire(import.meta.url);
+      const bbJsMain = _req.resolve("@aztec/bb.js");
+      const pkgRoot  = nodePath.default.resolve(bbJsMain, "../../..");
+      const archMap: Record<string, string> = {
+        "x64-linux":    "amd64-linux",
+        "arm64-linux":  "arm64-linux",
+        "x64-darwin":   "amd64-macos",
+        "arm64-darwin": "arm64-macos",
+      };
+      const platformKey = `${nodeOs.default.arch() === "x64" ? "x64" : nodeOs.default.arch()}-${nodeOs.default.platform()}`;
+      const buildDir    = archMap[platformKey];
+      const bbBin       = buildDir ? nodePath.default.join(pkgRoot, "build", buildDir, "bb") : null;
+      console.log(`[ZKClaimProver] platform=${platformKey} bbBin=${bbBin ?? "N/A"}`);
+      if (bbBin && nodeFs.default.existsSync(bbBin)) {
+        try {
+          const ver = execFileSync(bbBin, ["--version"], { encoding: "utf8", timeout: 5000 }).trim();
+          console.log(`[ZKClaimProver] bb --version ok: ${ver} — using native backend`);
+          nativeBinOk = true;
+        } catch (e: any) {
+          console.error(`[ZKClaimProver] bb --version FAILED (exit ${e.status}): ${(e.stderr ?? e.message ?? "").slice(0, 400)}`);
+          console.warn("[ZKClaimProver] Native bb binary unusable — falling back to WASM backend");
+        }
+      } else {
+        console.warn(`[ZKClaimProver] bundled bb binary not found — using WASM backend`);
+      }
+    }
+
+    console.log(`[ZKClaimProver] Initialising Barretenberg (${nativeBinOk ? "native" : "WASM"})...`);
     const bbLogger = (msg: string) => console.log(`[bb-claim] ${msg}`);
-    const api    = await Barretenberg.new({ logger: bbLogger });
+    const api = await Barretenberg.new({
+      ...(nativeBinOk ? {} : { backend: BackendType.Wasm }),
+      logger: bbLogger,
+    });
     const backend = new UltraHonkBackend(circuit.bytecode, api);
     const noir    = new Noir(circuit);
 

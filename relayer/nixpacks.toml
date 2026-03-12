@@ -8,6 +8,15 @@
 # Barretenberg.new({}) with no bbPath so bb.js auto-discovers the bundled binary.
 # This avoids the mismatch where bbup-installed ~/.bb/bb can be a different version
 # that exits with code 1 during proof generation.
+#
+# Ubuntu 24.04 required: the bundled bb binary in @aztec/bb.js@4.0.0-nightly needs
+# glibc >= 2.38 (libm) and 2.39 (libc) + GLIBCXX_3.4.31/32 (libstdc++).
+# Nixpacks defaults to Ubuntu 22.04 (glibc 2.35) which causes "exit code 1" at
+# proof generation time. Ubuntu 24.04 ships glibc 2.39 and GLIBCXX_3.4.32.
+# zkProver.ts also has a WASM fallback in case the native binary still fails.
+
+[variables]
+NIXPACKS_UBUNTU_VERSION = "24.04"
 
 [phases.build]
 cmds = [

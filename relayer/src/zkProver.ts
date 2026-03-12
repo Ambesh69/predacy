@@ -135,7 +135,7 @@ export class ZKProver {
   ): Promise<ProofOutput> {
     // Dynamic imports to avoid loading large WASM modules unless needed
     const { Noir } = await import("@noir-lang/noir_js");
-    const { Barretenberg, UltraHonkBackend } = await import("@aztec/bb.js");
+    const { Barretenberg, UltraHonkBackend, BackendType } = await import("@aztec/bb.js");
 
     // Load compiled circuit JSON (ESM-compatible require)
     const { createRequire } = await import("module");
@@ -147,6 +147,9 @@ export class ZKProver {
 
     // Probe the bundled bb binary before attempting a proof so we get a clear
     // error in the logs rather than a silent "exit code 1" from the socket backend.
+    // Also gates the WASM fallback: if the binary fails (e.g. glibc too old), we
+    // initialise Barretenberg with BackendType.Wasm so proving still succeeds.
+    let nativeBinOk = false;
     {
       const nodePath = await import("path");
       const nodeFs   = await import("fs");
@@ -170,19 +173,23 @@ export class ZKProver {
       if (bbBin && nodeFs.default.existsSync(bbBin)) {
         try {
           const ver = execFileSync(bbBin, ["--version"], { encoding: "utf8", timeout: 5000 }).trim();
-          console.log(`[ZKProver] bb --version ok: ${ver}`);
+          console.log(`[ZKProver] bb --version ok: ${ver} — using native backend`);
+          nativeBinOk = true;
         } catch (e: any) {
           console.error(`[ZKProver] bb --version FAILED (exit ${e.status}): ${(e.stderr ?? e.message ?? "").slice(0, 400)}`);
+          console.warn("[ZKProver] Native bb binary unusable (glibc mismatch?) — falling back to WASM backend");
         }
       } else {
-        console.warn(`[ZKProver] bundled bb binary not found — Barretenberg.new() will fall back to WASM`);
+        console.warn(`[ZKProver] bundled bb binary not found — using WASM backend`);
       }
     }
 
-    console.log("[ZKProver] Initialising Barretenberg backend...");
-    // Pass a logger so bb's stdout/stderr appears in Railway logs as [bb] lines.
+    console.log(`[ZKProver] Initialising Barretenberg backend (${nativeBinOk ? "native" : "WASM"})...`);
     const bbLogger = (msg: string) => console.log(`[bb] ${msg}`);
-    const api = await Barretenberg.new({ logger: bbLogger });
+    const api = await Barretenberg.new({
+      ...(nativeBinOk ? {} : { backend: BackendType.Wasm }),
+      logger: bbLogger,
+    });
 
     const backend = new UltraHonkBackend(circuit.bytecode, api);
     const noir    = new Noir(circuit);
