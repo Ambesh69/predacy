@@ -290,7 +290,8 @@ export class ZKClaimProver {
       console.log(`[ZKClaimProver] platform=${platformKey} bbBin=${bbBin ?? "N/A"}`);
       if (bbBin && nodeFs.default.existsSync(bbBin)) {
         try {
-          const ver = execFileSync(bbBin, ["--version"], { encoding: "utf8", timeout: 5000 }).trim();
+          // stdio:'pipe' captures child stderr so glibc errors don't bleed into Railway's red log stream.
+          const ver = execFileSync(bbBin, ["--version"], { encoding: "utf8", timeout: 5000, stdio: "pipe" }).trim();
           console.log(`[ZKClaimProver] bb --version ok: ${ver} — using native backend`);
           nativeBinOk = true;
         } catch (e: any) {
