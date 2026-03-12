@@ -1,19 +1,14 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { createPublicClient, http, encodePacked, keccak256 } from "viem";
+import { encodePacked, keccak256 } from "viem";
 import { clsx } from "clsx";
 import { computeCommitment, generateSalt } from "@/lib/commitmentHash";
 import { getErrorMessage } from "@/lib/validation";
 import { getContracts, CTF_ABI, BATCH_VAULT_ABI } from "@/lib/contracts";
 import { ACTIVE_CHAIN } from "@/lib/chain";
 import type { Market } from "@/lib/polymarket";
-
-// Module-level read-only client (same pattern as MarketPageClient)
-const publicClient = createPublicClient({
-  chain: ACTIVE_CHAIN,
-  transport: http(),
-});
+import { publicClient } from "@/lib/publicClient";
 
 // OrderSide mirrors BatchVault v8 enum
 export const YES_BUY  = 0;

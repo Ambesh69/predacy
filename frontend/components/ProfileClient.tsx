@@ -4,13 +4,14 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import Link from "next/link";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
 import {
-  createPublicClient, createWalletClient, custom, http, parseAbiItem,
+  createWalletClient, custom, http, parseAbiItem,
   keccak256, encodeAbiParameters,
 } from "viem";
 import { clsx } from "clsx";
 import { BATCH_VAULT_ABI, ERC20_ABI, BatchStatus, getContracts } from "@/lib/contracts";
 import { getRelayerUrl } from "@/lib/relayerUrl";
 import { ACTIVE_CHAIN } from "@/lib/chain";
+import { publicClient } from "@/lib/publicClient";
 
 const YES_BUY = 0, YES_SELL = 1, NO_BUY = 2, NO_SELL = 3;
 
@@ -32,11 +33,6 @@ function sideBadgeClass(side: number) {
     return "border-danger/30 text-danger bg-danger/5";
   return "border-accent/30 text-accent bg-accent/5";
 }
-
-const publicClient = createPublicClient({
-  chain: ACTIVE_CHAIN,
-  transport: http(),
-});
 
 const EXPLORER =
   ACTIVE_CHAIN.blockExplorers?.default.url ?? "https://amoy.polygonscan.com";

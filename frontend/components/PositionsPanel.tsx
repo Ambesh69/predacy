@@ -1,15 +1,11 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { createPublicClient, http, keccak256, encodeAbiParameters } from "viem";
+import { keccak256, encodeAbiParameters } from "viem";
 import { clsx } from "clsx";
 import { BATCH_VAULT_ABI, PROXY_WALLET_FACTORY_ABI, BatchStatus, getContracts } from "@/lib/contracts";
 import { ACTIVE_CHAIN, IS_MAINNET } from "@/lib/chain";
-
-const publicClient = createPublicClient({
-  chain: ACTIVE_CHAIN,
-  transport: http(),
-});
+import { publicClient } from "@/lib/publicClient";
 
 // ProxyWalletFactory address — env var preferred, falls back to known mainnet address.
 const PROXY_WALLET_FACTORY = (

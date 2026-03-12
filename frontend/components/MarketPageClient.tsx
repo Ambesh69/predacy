@@ -2,7 +2,7 @@
 
 import { useState, useEffect, use } from "react";
 import Link from "next/link";
-import { createPublicClient, createWalletClient, custom, http, fallback, parseAbiItem, encodeFunctionData } from "viem";
+import { createWalletClient, custom, http, fallback, parseAbiItem, encodeFunctionData } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
 import BatchTimer from "@/components/BatchTimer";
@@ -29,21 +29,10 @@ import {
   CHAIN_GAS,
   IS_MAINNET,
 } from "@/lib/chain";
+import { publicClient } from "@/lib/publicClient";
 import { clsx } from "clsx";
 
 // ── Viem public client (read-only, no wallet needed) ─────────────────────────
-// polygon-rpc.com shut down Feb 2026 — viem's default transport for Polygon
-// would resolve to it and silently break balance reads. Use explicit working RPCs.
-const publicClient = createPublicClient({
-  chain: ACTIVE_CHAIN,
-  transport: IS_MAINNET
-    ? fallback([
-        http("https://polygon.meowrpc.com"),
-        http("https://rpc.ankr.com/polygon"),
-        http("https://polygon.drpc.org"),
-      ])
-    : http(),
-});
 
 // ── Fallback batch state shown before chain data loads ────────────────────────
 const MOCK_BATCH = {

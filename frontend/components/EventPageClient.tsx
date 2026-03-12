@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useCallback, use } from "react";
 import Link from "next/link";
 import { clsx } from "clsx";
 import {
-  createPublicClient, createWalletClient, custom, http, fallback, parseAbiItem, pad, toHex,
+  createWalletClient, custom, http, fallback, parseAbiItem, pad, toHex,
   keccak256, encodeAbiParameters, encodeFunctionData,
 } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
@@ -32,6 +32,7 @@ import {
   ACTIVE_CHAIN, ACTIVE_CHAIN_ID_HEX, ACTIVE_CHAIN_NAME,
   CHAIN_GAS, IS_MAINNET,
 } from "@/lib/chain";
+import { publicClient } from "@/lib/publicClient";
 
 // USDC.e on Polygon mainnet uses EIP712Domain with `salt` (bytes32 chainId) instead
 // of `chainId` (uint256). Testnet MockUSDC uses the standard chainId domain.
@@ -43,18 +44,6 @@ function usdcDomain(verifyingContract: `0x${string}`) {
 }
 
 // ── Viem public client ────────────────────────────────────────────────────────
-// polygon-rpc.com shut down Feb 2026 — viem's default transport for Polygon
-// would resolve to it and silently break balance reads. Use explicit working RPCs.
-const publicClient = createPublicClient({
-  chain: ACTIVE_CHAIN,
-  transport: IS_MAINNET
-    ? fallback([
-        http("https://polygon.meowrpc.com"),
-        http("https://rpc.ankr.com/polygon"),
-        http("https://polygon.drpc.org"),
-      ])
-    : http(),
-});
 
 // ── Batch fallback ────────────────────────────────────────────────────────────
 const MOCK_BATCH = {
