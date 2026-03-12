@@ -145,13 +145,26 @@ export class ZKProver {
     // so it's accessible on Railway (which only mounts the relayer/ root dir).
     const circuit = _require("../circuits/batch_clearing.json") as any;
 
+    // Probe the bundled bb binary before attempting a proof so we get a clear
+    // error in the logs rather than a silent exit-code-1 from the socket backend.
+    const { findBbBinary } = await import("@aztec/bb.js/dest/node/bb_backends/node/platform.js");
+    const { execFileSync } = await import("child_process");
+    const bbBin = findBbBinary(undefined);
+    console.log(`[ZKProver] bb binary path: ${bbBin ?? "NOT FOUND (will use WASM)"}`);
+    if (bbBin) {
+      try {
+        const ver = execFileSync(bbBin, ["--version"], { encoding: "utf8", timeout: 5000 }).trim();
+        console.log(`[ZKProver] bb binary version: ${ver}`);
+      } catch (e: any) {
+        console.error(`[ZKProver] bb binary self-test FAILED: ${e.message} (exit ${e.status})`);
+        console.error(`[ZKProver] stderr: ${e.stderr ?? "(empty)"}`);
+      }
+    }
+
     console.log("[ZKProver] Initialising Barretenberg backend...");
-    // Use the bb binary bundled inside @aztec/bb.js (auto-discovered from node_modules).
-    // DO NOT pass a custom bbPath — the bbup-installed binary at ~/.bb/bb can be a
-    // mismatched version that exits with code 1 during proof generation.
-    // The bundled binary (node_modules/@aztec/bb.js/build/<platform>/bb) is always
-    // version-matched to the installed package, so no BB_PATH env var is needed.
-    const api = await Barretenberg.new({});
+    // Pipe bb binary's stdout/stderr so we can see crash reasons in Railway logs.
+    const bbLogger = (msg: string) => console.log(`[bb] ${msg}`);
+    const api = await Barretenberg.new({ logger: bbLogger });
 
     const backend = new UltraHonkBackend(circuit.bytecode, api);
     const noir    = new Noir(circuit);

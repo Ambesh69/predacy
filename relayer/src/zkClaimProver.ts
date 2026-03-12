@@ -267,8 +267,9 @@ export class ZKClaimProver {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const circuit                    = _require("../circuits/claim.json") as any;
 
-    // Use the bundled binary — see zkProver.ts for explanation.
-    const api    = await Barretenberg.new({});
+    // Pipe bb binary's stdout/stderr so we can see crash reasons in Railway logs.
+    const bbLogger = (msg: string) => console.log(`[bb-claim] ${msg}`);
+    const api    = await Barretenberg.new({ logger: bbLogger });
     const backend = new UltraHonkBackend(circuit.bytecode, api);
     const noir    = new Noir(circuit);
 
