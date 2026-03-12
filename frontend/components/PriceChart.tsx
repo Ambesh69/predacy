@@ -120,6 +120,16 @@ export default function PriceChart({ tokenId, currentPrice }: PriceChartProps) {
             grid
             scrub
             formatValue={(v: number) => `${Math.round(v * 100)}%`}
+            formatTime={(t: number) => {
+              const d = new Date(t * 1000);
+              if (iv === "6h" || iv === "1d") {
+                return `${d.getHours().toString().padStart(2, "0")}:${d.getMinutes().toString().padStart(2, "0")}`;
+              }
+              if (iv === "1w") {
+                return d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+              }
+              return d.toLocaleDateString("en-US", { month: "short", year: "2-digit" }).replace(" ", " '");
+            }}
           />
         ) : !loading ? (
           <div className="flex items-center justify-center h-full text-[10px] tracking-widest text-muted-dim font-mono">

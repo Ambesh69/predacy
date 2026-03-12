@@ -292,6 +292,17 @@ function MultiOutcomeChart({ markets, selectedMarketId }: { markets: Market[]; s
           loading={loading}
           emptyText="NO PRICE HISTORY"
           formatValue={(v: number) => `${Math.round(v * 100)}%`}
+          formatTime={(t: number) => {
+            const d = new Date(t * 1000);
+            if (iv === "6h" || iv === "1d") {
+              return `${d.getHours().toString().padStart(2, "0")}:${d.getMinutes().toString().padStart(2, "0")}`;
+            }
+            if (iv === "1w") {
+              return d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+            }
+            // "max" — month + year, e.g. "Aug '24"
+            return d.toLocaleDateString("en-US", { month: "short", year: "2-digit" }).replace(" ", " '");
+          }}
           onHover={(pt) => pt && setHoverT(pt.time)}
           style={{ height: "290px" }}
         />
