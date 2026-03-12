@@ -807,6 +807,26 @@ const server = createServer((req, res) => {
           await pwm.ensureDeployed(ephemeralAddress as `0x${string}`);
         }
 
+        // Idempotency guard: if the ProxyWallet's token balance is already 0, a prior
+        // request (possibly concurrent or a receipt-timeout retry) already transferred
+        // the tokens.  Return success immediately so the frontend clears the position.
+        const CTF_BALANCE_ABI = [{
+          name: "balanceOf", type: "function" as const,
+          inputs: [{ name: "account", type: "address" }, { name: "id", type: "uint256" }],
+          outputs: [{ name: "", type: "uint256" }], stateMutability: "view",
+        }] as const;
+        const currentBalance = await publicClient.readContract({
+          address:      ctfAddress as `0x${string}`,
+          abi:          CTF_BALANCE_ABI,
+          functionName: "balanceOf",
+          args:         [proxyWallet as `0x${string}`, BigInt(tokenId)],
+        }) as bigint;
+        if (currentBalance === 0n) {
+          console.log(`[Relayer] proxy-transfer: ${proxyWallet} balance=0 — already transferred`);
+          send(200, { ok: true, alreadyTransferred: true });
+          return;
+        }
+
         // Build CTF.safeTransferFrom(proxyWallet, to, tokenId, amount, "0x") calldata
         const CTF_SAFE_TRANSFER_ABI = [{
           name: "safeTransferFrom",

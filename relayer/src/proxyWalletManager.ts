@@ -201,7 +201,33 @@ export class ProxyWalletManager {
       account:      this.cfg.walletClient.account,
     });
     const hash = await this.cfg.walletClient.writeContract(request as any);
-    await this.cfg.publicClient.waitForTransactionReceipt({ hash });
+    try {
+      await this.cfg.publicClient.waitForTransactionReceipt({ hash, timeout: 60_000 });
+    } catch (receiptErr: any) {
+      const msg: string = receiptErr?.message ?? "";
+      if (
+        msg.includes("could not be found") ||
+        msg.includes("not be processed") ||
+        msg.includes("Timed out") ||
+        msg.includes("timed out")
+      ) {
+        // Receipt polling timed out — RPC may be slow but the tx likely landed.
+        // Confirm via walletOf before proceeding.
+        console.warn(`[ProxyWalletManager] ensureDeployed receipt timeout for ${hash} — verifying via walletOf`);
+        const check = await this.cfg.publicClient.readContract({
+          address:      this.cfg.factoryAddress,
+          abi:          FACTORY_ABI,
+          functionName: "walletOf",
+          args:         [ephemeralEOA],
+        }) as Address;
+        if (check === "0x0000000000000000000000000000000000000000") {
+          throw new Error(`ProxyWallet deploy timed out and wallet not found for ${ephemeralEOA}`);
+        }
+        console.log(`[ProxyWalletManager] deploy confirmed via walletOf: ${check}`);
+        return check;
+      }
+      throw receiptErr;
+    }
 
     const deployed = await this.cfg.publicClient.readContract({
       address:      this.cfg.factoryAddress,
