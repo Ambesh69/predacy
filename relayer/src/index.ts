@@ -87,6 +87,7 @@ interface MarketState {
   closingBatch:         boolean;
   settleFailures:       Map<string, number>;
   batchRunningUsdMicro: bigint;          // running USDC sum for current batch (6-dec)
+  lastOrderSubmitAt:    number;          // unix-seconds: set just before each order tx; blocks idle-eviction during confirmation window
 }
 
 /** activeMarkets: marketId (lowercase hex) → MarketState */
@@ -118,6 +119,7 @@ function createMarketState(marketId: `0x${string}`): MarketState {
     closingBatch:         false,
     settleFailures:       new Map(),
     batchRunningUsdMicro: 0n,
+    lastOrderSubmitAt:    0,
   };
 }
 
@@ -343,6 +345,11 @@ const server = createServer((req, res) => {
             send(400, { error: "Privacy path requires: signer, commitment, nonce, deadline, signature" });
             return;
           }
+          // Stamp in-flight time BEFORE submitting — prevents the idle-eviction check
+          // from racing during tx confirmation (commitmentCount is still 0 on-chain
+          // while the tx is pending, which would otherwise trigger eviction).
+          state.lastOrderSubmitAt = Math.floor(Date.now() / 1000);
+
           // SELL orders (YES_SELL=1, NO_SELL=3): tokens pre-deposited on-chain
           const isSellSide = sideNum === 1 || sideNum === 3;
           if (isSellSide) {
@@ -415,9 +422,23 @@ const server = createServer((req, res) => {
         // Re-ensure market is tracked after tx confirmation — the poll loop may have
         // evicted it while we awaited the on-chain tx (commitmentCount was 0 during
         // the confirmation window, triggering the idle-eviction check).
+        // NOTE: with the lastOrderSubmitAt guard above this should rarely happen, but
+        // we keep this fallback path and now immediately seal if the window has elapsed.
         const mktKey = (marketId as string).toLowerCase();
         if (!activeMarkets.has(mktKey)) {
-          ensureMarket(marketId as `0x${string}`).catch(() => {});
+          ensureMarket(marketId as `0x${string}`)
+            .then((reState) => {
+              console.log(`[Relayer] Re-registered evicted market ${marketId} — batch ${reState.currentBatchId}`);
+              // Batch window was already exceeded (that's why it was evicted) so seal now
+              // rather than waiting up to another poll interval for the loop to catch it.
+              if (orders > 0 && reState.currentBatchId !== null &&
+                  !reState.closingBatch && !reState.processingBatch) {
+                console.log(`[Relayer] Sealing re-registered batch ${reState.currentBatchId} immediately (window overdue)`);
+                sealBatch(reState, marketId as `0x${string}`, mktKey)
+                  .catch((e: any) => console.error(`[Relayer] sealBatch (eviction-recover, ${mktKey}) failed:`, e.message));
+              }
+            })
+            .catch((e: any) => console.error(`[Relayer] Re-registration failed for ${marketId}:`, e.message));
         }
 
         // Return the ACTUAL on-chain batchId (not the one from the request body,
@@ -1503,8 +1524,13 @@ const poll = async () => {
           const nowSec    = Math.floor(Date.now() / 1000);
           const windowSec = baseConfig.batchWindowMs / 1000;
 
-          // Evict idle markets: OPEN for > 2× window with zero orders — stop polling them
-          if (batchInfo.commitmentCount === 0n && nowSec >= Number(batchInfo.openedAt) + windowSec * 2) {
+          // Evict idle markets: OPEN for > 2× window with zero orders AND no in-flight
+          // order tx.  The lastOrderSubmitAt guard prevents evicting a market whose
+          // commitmentCount is still 0 on-chain while a commitSellOrderFor / commitOrderFor
+          // tx is pending — without it the poll loop races the tx confirmation window and
+          // evicts the market just before the first order lands, leaving the batch stuck OPEN.
+          const recentSubmit = nowSec <= state.lastOrderSubmitAt + windowSec;
+          if (batchInfo.commitmentCount === 0n && nowSec >= Number(batchInfo.openedAt) + windowSec * 2 && !recentSubmit) {
             console.log(`[Relayer] Evicting idle market ${marketKey} — no orders in ${windowSec * 2}s`);
             activeMarkets.delete(marketKey);
             continue;
