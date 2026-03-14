@@ -898,14 +898,28 @@ const server = createServer((req, res) => {
           account:      walletClientGlobal.account,
         });
         const txHash = await walletClientGlobal.writeContract(request as any);
-        // Wait up to 120 s. If receipt polling times out the tx is already submitted
-        // and will land — treat as success so the frontend clears the proxyWalletAddress.
+        // Wait up to 120 s for receipt. ALWAYS check receipt.status — a reverted tx
+        // must return 400 so the frontend retains proxyWalletAddress and can retry.
         try {
-          await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 120_000 });
+          const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 120_000 });
+          if (receipt.status === "reverted") {
+            throw new Error(`executeWithSig reverted on-chain (tx ${txHash})`);
+          }
         } catch (receiptErr: any) {
           const msg: string = receiptErr?.message ?? "";
           if (msg.includes("could not be found") || msg.includes("not be processed")) {
-            console.warn(`[Relayer] proxy-transfer receipt timeout for ${txHash} — tx submitted, treating as done`);
+            // Timeout: tx submitted but not yet mined. Check if tokens actually moved.
+            const postBalance = await publicClient.readContract({
+              address:      ctfAddress as `0x${string}`,
+              abi:          CTF_BALANCE_ABI,
+              functionName: "balanceOf",
+              args:         [proxyWallet as `0x${string}`, BigInt(tokenId)],
+            }) as bigint;
+            if (postBalance > 0n) {
+              // Tokens still in ProxyWallet — tx didn't mine. Let frontend retry.
+              throw new Error(`proxy-transfer tx ${txHash} timed out and tokens are still in ProxyWallet`);
+            }
+            console.warn(`[Relayer] proxy-transfer receipt timeout for ${txHash} — balance=0, tokens moved`);
           } else {
             throw receiptErr;
           }

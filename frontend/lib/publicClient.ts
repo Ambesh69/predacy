@@ -22,7 +22,7 @@ export const publicClient = createPublicClient({
         ...(process.env.NEXT_PUBLIC_RPC_URL
           ? [http(process.env.NEXT_PUBLIC_RPC_URL)]
           : []),
-        http("https://polygon.llamarpc.com"),   // primary free — reliable
+        http("https://polygon-bor-rpc.publicnode.com"), // primary free — reliable
         http("https://rpc.ankr.com/polygon"),   // secondary free
         http("https://polygon.drpc.org"),       // tertiary free
       ])

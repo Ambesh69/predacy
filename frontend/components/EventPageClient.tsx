@@ -1140,7 +1140,12 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     // mined and the user needs to retry "MOVE TO WALLET".
     if (txHash) {
       try {
-        await publicClient.waitForTransactionReceipt({ hash: txHash as `0x${string}`, timeout: 120_000 });
+        const receipt = await publicClient.waitForTransactionReceipt({ hash: txHash as `0x${string}`, timeout: 120_000 });
+        // Explicitly check status — a reverted tx still produces a receipt but tokens
+        // never moved.  Return an error so proxyWalletAddress is NOT cleared.
+        if (receipt.status === "reverted") {
+          throw new Error(`Transfer tx reverted on-chain (tx ${txHash}) — tokens still in ProxyWallet, please try again`);
+        }
       } catch (receiptErr: any) {
         const msg: string = receiptErr?.message ?? "";
         if (!msg.includes("could not be found") && !msg.includes("not be processed") &&

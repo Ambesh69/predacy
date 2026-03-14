@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { keccak256, encodeAbiParameters } from "viem";
 import { clsx } from "clsx";
-import { BATCH_VAULT_ABI, PROXY_WALLET_FACTORY_ABI, ERC20_ABI, BatchStatus, getContracts } from "@/lib/contracts";
+import { BATCH_VAULT_ABI, CTF_ABI, PROXY_WALLET_FACTORY_ABI, ERC20_ABI, BatchStatus, getContracts } from "@/lib/contracts";
 import { ACTIVE_CHAIN, IS_MAINNET } from "@/lib/chain";
 import { publicClient } from "@/lib/publicClient";
 
@@ -750,6 +750,51 @@ export default function PositionsPanel({
                 all.map((o) => o.batchId === order.batchId ? { ...o, proxyWalletAddress: derived } : o)
               ));
             } catch { /* ignore — will just show CLOSE POSITION as fallback */ }
+          }
+
+          // Recovery: if proxyWalletAddress was set to null (transfer appeared to succeed
+          // but receipt.status was not checked), verify on-chain that tokens actually moved.
+          // If the ProxyWallet still has tokens (tx reverted silently), restore the address
+          // so "MOVE TO WALLET" button reappears and the user can retry.
+          if (claimed && order.proxyWalletAddress === null && order.ephemeralAddress && order.marketId && PROXY_WALLET_FACTORY) {
+            try {
+              const isBuyOrder2 = orderSide === 0 || orderSide === 2; // YES_BUY or NO_BUY
+              if (isBuyOrder2) {
+                const [derivedProxy, tokenId] = await Promise.all([
+                  publicClient.readContract({
+                    address:      PROXY_WALLET_FACTORY,
+                    abi:          PROXY_WALLET_FACTORY_ABI,
+                    functionName: "computeAddress",
+                    args:         [order.ephemeralAddress as `0x${string}`],
+                  }) as Promise<`0x${string}`>,
+                  publicClient.readContract({
+                    address:      contracts.batchVault,
+                    abi:          BATCH_VAULT_ABI,
+                    functionName: orderSide === 2 ? "noTokenIds" : "yesTokenIds",
+                    args:         [order.marketId as `0x${string}`],
+                  }) as Promise<bigint>,
+                ]);
+                if (tokenId !== 0n) {
+                  const stuckBal = await publicClient.readContract({
+                    address:      contracts.ctf,
+                    abi:          CTF_ABI,
+                    functionName: "balanceOf",
+                    args:         [derivedProxy, tokenId],
+                  }) as bigint;
+                  if (stuckBal > 0n) {
+                    // Tokens still at ProxyWallet — transfer tx must have reverted.
+                    // Restore proxyWalletAddress so "MOVE TO WALLET" shows again.
+                    console.warn(`[PositionsPanel] Stuck tokens detected at ProxyWallet ${derivedProxy} — restoring for retry`);
+                    order.proxyWalletAddress = derivedProxy;
+                    const sk = `predacy:orders:${walletAddress.toLowerCase()}`;
+                    const all: Array<Record<string, unknown>> = JSON.parse(localStorage.getItem(sk) ?? "[]");
+                    localStorage.setItem(sk, JSON.stringify(
+                      all.map((o) => o.batchId === order.batchId ? { ...o, proxyWalletAddress: derivedProxy } : o)
+                    ));
+                  }
+                }
+              }
+            } catch { /* ignore — best-effort recovery */ }
           }
 
           const clearingPrice = batchRaw.clearingPrice ?? 0n;
