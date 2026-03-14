@@ -187,6 +187,7 @@ export default function OrderForm({
           marketId,
           ...candidateMarketIds,
         ])];
+        console.log("[OrderForm] Balance check | wallet:", walletAddress, "| condIds:", allIds);
         let totalYes = 0n;
         let totalNo  = 0n;
         for (const condId of allIds) {
@@ -218,11 +219,13 @@ export default function OrderForm({
                 functionName: "noTokenIds", args: [condId],
               }) as Promise<bigint>,
             ]);
+            console.log(`[OrderForm] condId=${condId.slice(0,10)} | stdYes=${yesBal} stdNo=${noBal} | negRiskYesId=${negRiskYesId} negRiskNoId=${negRiskNoId}`);
             if (negRiskYesId !== 0n) {
               const negRiskYesBal = await publicClient.readContract({
                 address: contracts.ctf, abi: CTF_ABI, functionName: "balanceOf",
                 args: [walletAddress, negRiskYesId],
               }) as bigint;
+              console.log(`[OrderForm] negRiskYesBal=${negRiskYesBal} for tokenId=${negRiskYesId}`);
               totalYes += negRiskYesBal;
             }
             if (negRiskNoId !== 0n) {
@@ -237,6 +240,7 @@ export default function OrderForm({
             console.warn(`[OrderForm] Balance check failed for condId ${condId}:`, condErr);
           }
         }
+        console.log("[OrderForm] Balance result | totalYes:", totalYes, "totalNo:", totalNo);
         if (!cancelled) { setYesBalance(totalYes); setNoBalance(totalNo); }
       } catch (err) {
         // Outer catch for setup errors (e.g. getContracts throws on unsupported chain).
