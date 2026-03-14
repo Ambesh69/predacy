@@ -148,6 +148,7 @@ export default function OrderForm({
   const [yesBalance, setYesBalance] = useState<bigint | null>(null);
   const [noBalance,  setNoBalance]  = useState<bigint | null>(null);
   const [yesBalanceLoading, setYesBalanceLoading] = useState(false);
+  const [balanceError, setBalanceError] = useState<string | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);  // manual ↻ button
 
   const effectiveLimitPrice = mode === "sell"
@@ -176,6 +177,7 @@ export default function OrderForm({
   useEffect(() => {
     if (mode !== "sell" || !walletAddress) return;
     setYesBalanceLoading(true);
+    setBalanceError(null);
     let cancelled = false;
     (async () => {
       try {
@@ -188,50 +190,62 @@ export default function OrderForm({
         let totalYes = 0n;
         let totalNo  = 0n;
         for (const condId of allIds) {
-          // Standard CTF token IDs (indexSet convention)
-          const [yesBal, noBal] = await Promise.all([
-            publicClient.readContract({
-              address: contracts.ctf, abi: CTF_ABI, functionName: "balanceOf",
-              args: [walletAddress, computeYesTokenId(contracts.usdc, condId)],
-            }) as Promise<bigint>,
-            publicClient.readContract({
-              address: contracts.ctf, abi: CTF_ABI, functionName: "balanceOf",
-              args: [walletAddress, computeNoTokenId(contracts.usdc, condId)],
-            }) as Promise<bigint>,
-          ]);
-          totalYes += yesBal;
-          totalNo  += noBal;
+          // Per-condId isolation: a single bad market ID (e.g. from old testnet orders)
+          // must not zero out the entire balance by crashing the outer try-block.
+          try {
+            // Standard CTF token IDs (indexSet convention)
+            const [yesBal, noBal] = await Promise.all([
+              publicClient.readContract({
+                address: contracts.ctf, abi: CTF_ABI, functionName: "balanceOf",
+                args: [walletAddress, computeYesTokenId(contracts.usdc, condId)],
+              }) as Promise<bigint>,
+              publicClient.readContract({
+                address: contracts.ctf, abi: CTF_ABI, functionName: "balanceOf",
+                args: [walletAddress, computeNoTokenId(contracts.usdc, condId)],
+              }) as Promise<bigint>,
+            ]);
+            totalYes += yesBal;
+            totalNo  += noBal;
 
-          // NegRisk token IDs (v10: stored on BatchVault, different from standard CTF IDs)
-          const [negRiskYesId, negRiskNoId] = await Promise.all([
-            publicClient.readContract({
-              address: contracts.batchVault, abi: BATCH_VAULT_ABI,
-              functionName: "yesTokenIds", args: [condId],
-            }) as Promise<bigint>,
-            publicClient.readContract({
-              address: contracts.batchVault, abi: BATCH_VAULT_ABI,
-              functionName: "noTokenIds", args: [condId],
-            }) as Promise<bigint>,
-          ]);
-          if (negRiskYesId !== 0n) {
-            const negRiskYesBal = await publicClient.readContract({
-              address: contracts.ctf, abi: CTF_ABI, functionName: "balanceOf",
-              args: [walletAddress, negRiskYesId],
-            }) as bigint;
-            totalYes += negRiskYesBal;
-          }
-          if (negRiskNoId !== 0n) {
-            const negRiskNoBal = await publicClient.readContract({
-              address: contracts.ctf, abi: CTF_ABI, functionName: "balanceOf",
-              args: [walletAddress, negRiskNoId],
-            }) as bigint;
-            totalNo += negRiskNoBal;
+            // NegRisk token IDs (v10: stored on BatchVault, different from standard CTF IDs)
+            const [negRiskYesId, negRiskNoId] = await Promise.all([
+              publicClient.readContract({
+                address: contracts.batchVault, abi: BATCH_VAULT_ABI,
+                functionName: "yesTokenIds", args: [condId],
+              }) as Promise<bigint>,
+              publicClient.readContract({
+                address: contracts.batchVault, abi: BATCH_VAULT_ABI,
+                functionName: "noTokenIds", args: [condId],
+              }) as Promise<bigint>,
+            ]);
+            if (negRiskYesId !== 0n) {
+              const negRiskYesBal = await publicClient.readContract({
+                address: contracts.ctf, abi: CTF_ABI, functionName: "balanceOf",
+                args: [walletAddress, negRiskYesId],
+              }) as bigint;
+              totalYes += negRiskYesBal;
+            }
+            if (negRiskNoId !== 0n) {
+              const negRiskNoBal = await publicClient.readContract({
+                address: contracts.ctf, abi: CTF_ABI, functionName: "balanceOf",
+                args: [walletAddress, negRiskNoId],
+              }) as bigint;
+              totalNo += negRiskNoBal;
+            }
+          } catch (condErr) {
+            // One bad condId — log and skip; don't let it wipe the whole balance.
+            console.warn(`[OrderForm] Balance check failed for condId ${condId}:`, condErr);
           }
         }
         if (!cancelled) { setYesBalance(totalYes); setNoBalance(totalNo); }
       } catch (err) {
+        // Outer catch for setup errors (e.g. getContracts throws on unsupported chain).
         console.error("[OrderForm] Failed to fetch token balance:", err);
-        if (!cancelled) { setYesBalance(0n); setNoBalance(0n); }
+        if (!cancelled) {
+          setYesBalance(null);
+          setNoBalance(null);
+          setBalanceError("Balance unavailable");
+        }
       } finally {
         if (!cancelled) setYesBalanceLoading(false);
       }
@@ -476,10 +490,16 @@ export default function OrderForm({
                   <div className="flex items-center justify-between">
                     <label className="text-[10px] text-muted tracking-widest uppercase">{tokenLabel} Tokens to Sell</label>
                     {isConnected && (
-                      <span className="flex items-center gap-1 text-[10px] text-muted-dim tabular-nums">
-                        {yesBalanceLoading ? "loading…" : balDisplay !== null ? `Balance: ${balDisplay}` : "Balance: —"}
+                      <span className="flex items-center gap-1 text-[10px] tabular-nums">
+                        {yesBalanceLoading
+                          ? <span className="text-muted-dim">loading…</span>
+                          : balanceError
+                          ? <span className="text-amber-400">⚠ {balanceError}</span>
+                          : balDisplay !== null
+                          ? <span className="text-muted-dim">Balance: {balDisplay}</span>
+                          : <span className="text-muted-dim">Balance: —</span>}
                         <button type="button" onClick={() => setRefreshTick(t => t + 1)}
-                          className="hover:text-muted transition-colors leading-none" title="Refresh balance">↻</button>
+                          className="text-muted-dim hover:text-muted transition-colors leading-none" title="Refresh balance">↻</button>
                       </span>
                     )}
                   </div>
