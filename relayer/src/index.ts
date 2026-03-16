@@ -1184,7 +1184,11 @@ if (missingVars.length > 0) {
 
 // Build a fallback transport so transient dRPC errors (500, 410 GRPC, etc.) automatically
 // retry on the next endpoint. Mirrors the same pattern used inside BatchProcessor.
-const _MAINNET_FALLBACKS = ["https://polygon.drpc.org"];
+const _MAINNET_FALLBACKS = [
+  "https://polygon-bor-rpc.publicnode.com", // reliable, already used by frontend
+  "https://rpc.ankr.com/polygon",           // reliable, already used by frontend
+  "https://polygon.drpc.org",               // keep as last resort
+];
 const _buildTransport = () => {
   if (chain.id === polygon.id) {
     const extras = _MAINNET_FALLBACKS.filter((u) => u !== baseConfig.rpcUrl);

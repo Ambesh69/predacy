@@ -1446,6 +1446,10 @@ export class BatchProcessor {
         `${isNegRisk ? " (NegRisk CLOB token)" : ""} (expecting ${usdcExpected} USDC)`,
       );
       try {
+        // Refresh CLOB's cached balance before the sell. lockFunds just moved tokens
+        // into the relayer wallet; the CLOB off-chain cache may still show the pre-lockFunds
+        // balance and reject with "not enough balance / allowance".
+        await this.polymarket.updateClobBalance("CONDITIONAL", cachedYesToken);
         const { orderId } = await this.polymarket.placeMarketSell(cachedYesToken, finalExcessYes);
         console.log(`[BatchProcessor] Excess YES sell placed: orderId=${orderId}`);
         // Wait for USDC proceeds to arrive before calling settleBatch.
@@ -1464,6 +1468,8 @@ export class BatchProcessor {
         `${isNegRisk ? " (NegRisk CLOB token)" : ""} (expecting ${usdcExpected} USDC)`,
       );
       try {
+        // Same CLOB balance refresh as the YES sell path above.
+        await this.polymarket.updateClobBalance("CONDITIONAL", cachedNoToken);
         const { orderId } = await this.polymarket.placeMarketSell(cachedNoToken, finalExcessNo);
         console.log(`[BatchProcessor] Excess NO sell placed: orderId=${orderId}`);
         await this._waitForUsdcProceeds(usdcExpected, "excess NO sell");
