@@ -570,17 +570,35 @@ export class PolymarketClient {
       console.log(`[PolymarketClient] buyYesForSettlement: no asks, using mid*1.02=${limitPrice}`);
     }
 
-    const TOKEN_PREC = 10n;
-    const USDC_PREC  = 10000n;
+    const TOKEN_PREC    = 10n;
+    const USDC_PREC     = 10000n;
+    const CLOB_MIN_USDC = 1_000_000n; // Polymarket enforces $1 minimum order size
+
     // Round UP deficit to nearest token precision
-    const takerAmount = deficit % TOKEN_PREC === 0n
+    let takerAmount = deficit % TOKEN_PREC === 0n
       ? deficit
       : deficit + (TOKEN_PREC - deficit % TOKEN_PREC);
     // Round UP makerAmount to nearest USDC precision
-    const makerAmountRaw = BigInt(Math.ceil(Number(takerAmount) * limitPrice));
-    const makerAmount    = makerAmountRaw % USDC_PREC === 0n
+    let makerAmountRaw = BigInt(Math.ceil(Number(takerAmount) * limitPrice));
+    let makerAmount    = makerAmountRaw % USDC_PREC === 0n
       ? makerAmountRaw
       : makerAmountRaw + (USDC_PREC - makerAmountRaw % USDC_PREC);
+
+    // Enforce Polymarket's $1 minimum order size. When the deficit is very small
+    // (e.g. < $1 of tokens), bump up to $1 and recompute takerAmount accordingly.
+    // The relayer buys slightly more than needed; excess tokens stay in relayer
+    // wallet and count as "have" for the next batch — no capital wasted.
+    if (makerAmount < CLOB_MIN_USDC) {
+      makerAmount = CLOB_MIN_USDC;
+      const takerRaw = BigInt(Math.ceil(Number(makerAmount) / limitPrice));
+      takerAmount    = takerRaw % TOKEN_PREC === 0n
+        ? takerRaw
+        : takerRaw + (TOKEN_PREC - takerRaw % TOKEN_PREC);
+      console.log(
+        `[PolymarketClient] buyYesForSettlement: deficit (${deficit}) below $1 min — ` +
+        `bumping makerAmount to ${makerAmount} USDC, takerAmount to ${takerAmount} tokens`,
+      );
+    }
 
     console.log(`[PolymarketClient] Placing FOK buy: ${usdcToSpend} USDC available, ordering ${takerAmount} YES tokens (${makerAmount} USDC) for YES token ${tokenId.slice(0, 10)}…`);
 

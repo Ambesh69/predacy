@@ -33,6 +33,7 @@ import {
   CHAIN_GAS, IS_MAINNET,
 } from "@/lib/chain";
 import { publicClient } from "@/lib/publicClient";
+import { usePostHog } from "posthog-js/react";
 
 // USDC.e on Polygon mainnet uses EIP712Domain with `salt` (bytes32 chainId) instead
 // of `chainId` (uint256). Testnet MockUSDC uses the standard chainId domain.
@@ -471,6 +472,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   // ── Wallet ───────────────────────────────────────────────────────────────────
   const { authenticated, login } = usePrivy();
   const { wallets } = useWallets();
+  const posthog = usePostHog();
   const wallet        = wallets[0];
   const walletAddress = wallet?.address as `0x${string}` | undefined;
   const isConnected   = authenticated && !!walletAddress;
@@ -1193,6 +1195,14 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   }) => {
     if (!selectedMarket) return;
     setChainError(null);
+    posthog?.capture("order_submitted", {
+      market_id:   selectedMarket.conditionId,
+      market_name: selectedMarket.question,
+      side:        params.side,         // 0=YES_BUY 1=YES_SELL 2=NO_BUY 3=NO_SELL
+      amount_usd:  Number(params.amount) / 1e6,
+      limit_price: Number(params.limitPrice) / 1e6,
+      wallet:      walletAddress,
+    });
     const contracts = getContracts(ACTIVE_CHAIN.id);
     const deadline  = BigInt(Math.floor(Date.now() / 1000) + 600);
 

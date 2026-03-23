@@ -2,6 +2,7 @@
 
 import { PrivyProvider, type PrivyClientConfig } from "@privy-io/react-auth";
 import { polygon, polygonAmoy } from "viem/chains";
+import PostHogPageView from "./PostHogPageView";
 
 const PRIVY_APP_ID = process.env.NEXT_PUBLIC_PRIVY_APP_ID;
 
@@ -29,6 +30,7 @@ export default function PrivyInner({ children }: { children: React.ReactNode }) 
   }
   return (
     <PrivyProvider appId={PRIVY_APP_ID} config={privyConfig}>
+      <PostHogPageView />
       {children}
     </PrivyProvider>
   );
