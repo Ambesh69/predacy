@@ -169,7 +169,7 @@ export default function OrderForm({
           : BigInt(limitPrice));
       setCommitment(computeCommitment({ marketId, side: orderSide, amount: amountParsed, limitPrice: effLP, salt }));
     } catch { /* ignore parse errors while typing */ }
-  }, [walletAddress, amountDisplay, isBuy, sellYes, limitPrice, orderType, marketId, salt, mode, marketBuyLimit, marketNoBuyLimit, orderSide]);
+  }, [walletAddress, amountDisplay, isBuy, limitPrice, orderType, marketId, salt, mode, marketBuyLimit, marketNoBuyLimit, orderSide]);
 
   useEffect(() => { updateCommitment(); }, [updateCommitment]);
 
