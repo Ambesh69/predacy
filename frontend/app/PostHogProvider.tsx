@@ -11,10 +11,11 @@ export default function PostHogProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!POSTHOG_KEY) return;
     posthog.init(POSTHOG_KEY, {
-      api_host:             POSTHOG_HOST,
-      capture_pageview:     false, // we use the manual pageview below
-      capture_pageleave:    true,
-      person_profiles:      "identified_only",
+      api_host:          "/ingest",        // proxied through Vercel — bypasses ad blockers
+      ui_host:           POSTHOG_HOST,     // keeps PostHog UI links correct
+      capture_pageview:  false,            // manual pageview in PostHogPageView
+      capture_pageleave: true,
+      person_profiles:   "identified_only",
     });
   }, []);
 
