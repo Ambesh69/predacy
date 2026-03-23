@@ -5,7 +5,7 @@ import { usePathname, useSearchParams } from "next/navigation";
 import { useEffect, Suspense } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 
-function _PageView() {
+function PageViewInner() {
   const pathname      = usePathname();
   const searchParams  = useSearchParams();
   const posthog       = usePostHog();
@@ -36,7 +36,7 @@ function _PageView() {
 export default function PostHogPageView() {
   return (
     <Suspense fallback={null}>
-      <_PageView />
+      <PageViewInner />
     </Suspense>
   );
 }
