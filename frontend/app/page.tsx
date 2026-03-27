@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import EventCard from "@/components/EventCard";
 import WalletButton from "@/components/WalletButton";
+import Logo from "@/components/Logo";
 import { MOCK_MARKETS, getEvents, type PolyEvent } from "@/lib/polymarket";
 import { getRelayerUrl } from "@/lib/relayerUrl";
 import {
@@ -156,7 +157,9 @@ export default function HomePage() {
 
       {/* Header */}
       <header className="border-b border-border px-4 md:px-6 py-[22px] flex items-end justify-between bg-surface/25 backdrop-blur-[2px]">
-        <div>
+        <div className="flex items-center gap-3">
+          <Logo size={38} />
+          <div>
           <h1
             className="text-[2.65rem] font-black tracking-tight leading-none text-text glow-blue"
             style={{ fontFamily: "var(--font-display)" }}
@@ -167,6 +170,7 @@ export default function HomePage() {
             DARK POOL PREDICTION MARKETS ·{" "}
             <span className="text-accent/70">SEALED-BID BATCH AUCTIONS</span>
           </p>
+          </div>
         </div>
 
         <div className="flex items-center gap-4">
