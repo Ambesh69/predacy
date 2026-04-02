@@ -543,7 +543,11 @@ export class BatchProcessor {
     // the primary is always config.rpcUrl (Railway env var) so ops can override.
     // NOTE: polygon-rpc.com / 1rpc.io block eth_getLogs from Railway IPs (401 tenant disabled).
     // NOTE: polygon.meowrpc.com removed — returns invalid JSON (HTML error pages) for eth_getLogs.
-    const MAINNET_FALLBACKS = ["https://polygon.drpc.org"];
+    const MAINNET_FALLBACKS = [
+      "https://polygon-bor-rpc.publicnode.com",
+      "https://rpc.ankr.com/polygon",
+      "https://polygon.drpc.org",  // last resort
+    ];
     const buildTransport = () => {
       if (config.chainId === polygon.id) {
         const primary = config.rpcUrl;

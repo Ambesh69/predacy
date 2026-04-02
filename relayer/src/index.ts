@@ -1251,6 +1251,7 @@ const BATCH_SETTLED_EVENT = parseAbiItem(
 );
 
 let fromBlock = 0n;
+let _pollLogErrCount = 0;
 
 // ── Permanent failure tracking ─────────────────────────────────────────────────
 // Batches that can never be settled (e.g. commitment hash computed with wrong
@@ -1518,12 +1519,24 @@ const poll = async () => {
     const toBlock = (await publicClient.getBlockNumber()) - 2n; // avoid dRPC "Unknown block" (code 26) for chain-tip blocks
     if (toBlock < fromBlock) return;
 
-    const [closedLogs, settledLogs] = await Promise.all([
-      publicClient.getLogs({ address: baseConfig.vaultAddress, event: BATCH_CLOSED_EVENT,  fromBlock, toBlock }),
-      publicClient.getLogs({ address: baseConfig.vaultAddress, event: BATCH_SETTLED_EVENT, fromBlock, toBlock }),
-    ]);
-
-    fromBlock = toBlock + 1n;
+    let closedLogs: any[]  = [];
+    let settledLogs: any[] = [];
+    try {
+      [closedLogs, settledLogs] = await Promise.all([
+        publicClient.getLogs({ address: baseConfig.vaultAddress, event: BATCH_CLOSED_EVENT,  fromBlock, toBlock }),
+        publicClient.getLogs({ address: baseConfig.vaultAddress, event: BATCH_SETTLED_EVENT, fromBlock, toBlock }),
+      ]);
+      fromBlock = toBlock + 1n;
+      _pollLogErrCount = 0;
+    } catch (logErr: any) {
+      _pollLogErrCount++;
+      if (_pollLogErrCount === 1 || _pollLogErrCount % 12 === 0) {
+        console.error(`[Relayer] getLogs failed (${_pollLogErrCount}×), blocks ${fromBlock}–${toBlock}:`, logErr?.shortMessage ?? logErr);
+      } else {
+        console.warn(`[Relayer] getLogs failed (${_pollLogErrCount}×) — retrying next poll`);
+      }
+      // Fall through to status-based polling below
+    }
 
     // ── Per-market status checks ─────────────────────────────────────────────
     for (const [marketKey, state] of activeMarkets) {
