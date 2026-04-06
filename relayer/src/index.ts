@@ -1251,7 +1251,7 @@ const BATCH_SETTLED_EVENT = parseAbiItem(
 );
 
 let fromBlock = 0n;
-let _pollLogErrCount = 0;
+let _lastLogErrTs = 0; // timestamp of last logged getLogs error
 
 // ── Permanent failure tracking ─────────────────────────────────────────────────
 // Batches that can never be settled (e.g. commitment hash computed with wrong
@@ -1527,13 +1527,12 @@ const poll = async () => {
         publicClient.getLogs({ address: baseConfig.vaultAddress, event: BATCH_SETTLED_EVENT, fromBlock, toBlock }),
       ]);
       fromBlock = toBlock + 1n;
-      _pollLogErrCount = 0;
     } catch (logErr: any) {
-      _pollLogErrCount++;
-      if (_pollLogErrCount === 1 || _pollLogErrCount % 12 === 0) {
-        console.error(`[Relayer] getLogs failed (${_pollLogErrCount}×), blocks ${fromBlock}–${toBlock}:`, logErr?.shortMessage ?? logErr);
-      } else {
-        console.warn(`[Relayer] getLogs failed (${_pollLogErrCount}×) — retrying next poll`);
+      const now = Date.now();
+      if (now - _lastLogErrTs > 60_000) {
+        // Log at most once per 60 s to avoid spamming Railway logs
+        console.warn(`[Relayer] getLogs failed (blocks ${fromBlock}–${toBlock}): ${logErr?.shortMessage ?? "RPC error"} — retrying`);
+        _lastLogErrTs = now;
       }
       // Fall through to status-based polling below
     }
