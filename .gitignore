@@ -18,6 +18,9 @@ relayer/.env
 contracts/out/
 contracts/cache/
 contracts/broadcast/
+contracts/v11-verifier/out/
+contracts/v11-verifier/cache/
+contracts/v11-verifier/broadcast/
 
 # Noir — ignore generated artifacts but keep compiled circuit JSON for Railway
 circuits/**/Prover.toml

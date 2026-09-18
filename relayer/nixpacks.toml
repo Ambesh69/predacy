@@ -1,6 +1,5 @@
-# Skip tsc (build) — tsx executes TypeScript directly at runtime.
-# Nixpacks would otherwise run `npm run build` which fails on strict
-# viem generic inference that tsx handles fine at runtime.
+# tsx executes TypeScript directly at runtime. Type checking is run separately
+# with `npm run build`; the deploy build only needs to install dependencies.
 #
 # bb (Barretenberg) native binary: NO separate install needed.
 # @aztec/bb.js bundles its own version-matched bb binary inside the npm package
@@ -17,6 +16,7 @@
 
 [variables]
 NIXPACKS_UBUNTU_VERSION = "24.04"
+NIXPACKS_NODE_VERSION = "24"
 
 [phases.build]
 cmds = [

@@ -1,7 +1,9 @@
 # Zero-subsidy settlement v11
 
-Status: design and accounting tests only. This document does not authorize
-mainnet trading. The deployed v10 vault cannot be upgraded in place.
+Status: experimental vault, per-order proof, conversion bridge, and SDK
+primitives implemented on `codex/zero-subsidy-settlement`. None is wired to
+production trading. This document does not authorize mainnet trading. The
+deployed v10 vault cannot be upgraded in place.
 
 ## Accounting contract
 
@@ -19,8 +21,32 @@ CLOB, minus assets actually spent or sent to the CLOB. All arithmetic is in
 base units with exact integer equality; dust belongs to a specific user's
 refund, not to the operator. The model lives in
 `contracts/src/SettlementAccounting.sol` and
-`relayer/src/settlementAccounting.ts`. These are validators, not an integrated
-settlement path: their caller can currently supply fictitious external fills.
+`relayer/src/settlementAccounting.ts`. `BatchVaultV11` applies the Solidity
+validator to measured asset balances and requires an allocation proof for
+every escrowed order. The operator still controls the routed Deposit Wallet;
+on-chain balance equality establishes solvency at finalization, not the
+provenance of each CLOB fill.
+
+The proof component is `circuits/allocation_v11`: one proof per order
+binds the public allocation to a committed, hidden limit and salt. Its
+generated verifier is kept in `contracts/v11-verifier`, which uses a separate
+non-IR, size-optimized Foundry profile. The v11 vault verifies each proof and
+checks whole-batch conservation on chain, including outstanding claims from
+previous batches. A real generated proof has been tested through escrow,
+finalization, and claim. The USDC.e/pUSD conversion primitive in
+`contracts/src/PolymarketCollateralBridge.sol` is tested on a Polygon fork and
+called by the experimental vault, but no production vault calls it.
+
+Current limitations: batches are serial and capped at four orders; claims are
+direct owner-only transfers, so settlement is not private. The allocation
+struct's `limitPrice` is not proof-bound and must not be presented as the
+committed user limit; the hidden limit check is in the proof. There is no
+durable execution journal, live CLOB order runner, returned-asset recovery
+workflow, frontend approval/proof integration, or v11 deployment. The official
+Deposit Wallet SDK primitives are isolated in the relayer, not invoked from
+the production route. That SDK requires Node 24, now pinned in the relayer
+package and Nixpacks configuration; the actual Railway build must still be
+validated before migration.
 
 ## Required on-chain sequence
 
@@ -45,15 +71,16 @@ settlement path: their caller can currently supply fictitious external fills.
    assume a timeout means no fill. Store actual filled shares and net pUSD,
    including fees. Reconcile Deposit Wallet balances again after settlement.
 5. Return all purchased tokens and unspent pUSD to the new vault, unwrapping
-   pUSD proceeds to USDC.e as needed. The vault must measure balance deltas,
-   not trust relayer-reported fills or the CLOB response alone. A v11 clearing
-   proof must bind every committed order, limit, allocation, actual batch
-   asset delta, and claim leaf to one immutable settlement root. Verify the
-   accounting equalities before finalizing that root.
+   pUSD proceeds to USDC.e as needed. The experimental vault measures actual
+   balances and verifies each committed order's allocation proof, then checks
+   exact whole-batch conservation. Before production, ensure the durable
+   journal reconciles those balances with the CLOB fill and Polygon receipts.
 6. Permit each order to claim its shares or net USDC plus its original-asset
-   refund exactly once. Both private proof and direct recovery paths must use
-   the same allocation and nullifier. A claim must never be computed from a
-   nominal clearing price after a real CLOB fill.
+   refund exactly once. The experimental direct claim path uses the escrowed
+   owner and a single claimed flag. A future private claim path needs a
+   separate, owner-bound authorization secret and shared nullifier; the
+   relayer must not be able to redirect a claim using a salt it knows. A claim
+   must never be computed from a nominal clearing price after a real CLOB fill.
 
 ## Recovery and trust boundary
 
@@ -85,3 +112,18 @@ fresh claim test are deployed together.
   and operator custody model. Production monitoring and an emergency stop.
 
 Until these pass, keep `tradingEnabled: false` on mainnet.
+
+## Local verification
+
+Build the isolated verifier artifact before the vault integration test:
+
+```sh
+cd contracts/v11-verifier && forge build --offline
+cd ../.. && cd circuits/allocation_v11 && nargo test
+cd ../.. && cd contracts && forge test --offline --ffi
+cd ../relayer && npm run build && npm test
+```
+
+The real proof tests require a native Barretenberg binary and its local cache;
+they may need execution outside a restricted sandbox. The Polygon conversion
+fork test runs separately with a Polygon RPC URL.
