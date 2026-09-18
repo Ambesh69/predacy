@@ -2,7 +2,16 @@
 
 Private sealed-bid batch auction layer on top of [Polymarket](https://polymarket.com).
 
-Users submit encrypted commitments to a prediction market. Orders batch-clear at a uniform price, net positions route to Polymarket, and payouts are claimed with a zero-knowledge proof — without ever linking the trader's identity to their position on-chain.
+**Launch status:** Mainnet trading is disabled. The current and experimental
+vaults do not provide full on-chain trade-detail privacy. Polymarket CLOB
+matches settle publicly on Polygon, so hiding market, side, size, and fills
+requires a different execution architecture or a narrower privacy promise.
+See [the launch gate](docs/launch-readiness.md).
+
+The original design uses order commitments, batch clearing, and zero-knowledge
+claims to reduce identity linkage. These mechanisms do not hide Polymarket's
+public exchange trades, and the experimental v11 vault exposes per-order
+escrow and allocation data. The privacy design is not launch-ready.
 
 ---
 

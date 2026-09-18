@@ -5,6 +5,26 @@ and the relayer signs for the former CTF exchanges. Polymarket now documents
 pUSD collateral and CTF Exchange V2. Do not remove the relayer's mainnet order
 guard until the migration and the checks below are complete.
 
+## Privacy decision
+
+The product requirement is to hide market, side, size, and fill details on-chain,
+not merely the link to a customer's main wallet. That requirement is incompatible
+with direct Polymarket CLOB execution: matched orders settle through public
+Polygon exchange contracts that transfer outcome tokens and pUSD. An omnibus
+Deposit Wallet and confidential customer accounting could obscure which user
+caused an aggregate trade, but the aggregate market, direction, and amount
+would still be observable. The current v11 prototype also publishes each
+escrow's market, side, deposit, owner, and final allocation; it is not a private
+vault. Do not deploy it as the privacy solution or describe Railgun-funded
+ephemeral accounts as hiding the exchange trades.
+
+The production PostgreSQL service is provisioned and a `V11_DATABASE_URL`
+reference is configured on the relayer without redeploying it. This does not
+change the privacy boundary or enable v11 execution. A public launch requires
+either a revised, explicitly narrower privacy promise (customer-to-trade
+unlinkability with public aggregate trades) and a new private accounting design,
+or a venue/settlement architecture that does not publish the trades on Polygon.
+
 The current vault also requires exact settlement at its batch clearing price:
 it sends `gap * clearingPrice` to buy the missing shares and later demands
 `excess * clearingPrice` from sales. Actual CLOB execution can cross at a

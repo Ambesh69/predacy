@@ -1346,7 +1346,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
                 {/* Header */}
                 <div className="flex items-center justify-between">
                   <p className="text-[10px] text-accent tracking-widest uppercase font-bold">
-                    Private Mode — Awaiting Railgun Transfer
+                    Railgun Funding — Awaiting Transfer
                   </p>
                   <div className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />
                 </div>
@@ -1413,9 +1413,8 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
                 </div>
 
                 <p className="text-[9px] text-muted-dim">
-                  Why Railgun? Your wallet address never appears on-chain as the sender —
-                  only the Railgun smart contract is visible. This breaks the link between
-                  your identity and this order.
+                  Railgun can obscure the funding wallet, but it does not hide
+                  trade details on Polymarket or guarantee that this order is unlinkable.
                 </p>
               </div>
 
@@ -1430,12 +1429,12 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
           ) : (
             /* Order form — shown while batch is OPEN or SETTLING */
             <div className="flex-1">
-              {/* Private Mode toggle — mainnet only (Railgun not on testnet) */}
+              {/* Railgun funding is available only on mainnet. */}
               {IS_MAINNET && (
                 <div className="border-b border-border px-4 py-2 flex items-center justify-between">
                   <div className="flex flex-col">
-                    <span className="text-[10px] text-text tracking-widest uppercase">Private Mode</span>
-                    <span className="text-[9px] text-muted-dim">Fund via Railgun — hides wallet link</span>
+                    <span className="text-[10px] text-text tracking-widest uppercase">Railgun Funding</span>
+                    <span className="text-[9px] text-muted-dim">May obscure funding; trades remain public</span>
                   </div>
                   <button
                     onClick={() => setUseRailgun((v) => !v)}
@@ -1443,7 +1442,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
                       "relative w-8 h-4 rounded-full transition-colors",
                       useRailgun ? "bg-accent/40" : "bg-border",
                     )}
-                    aria-label="Toggle Private Mode"
+                    aria-label="Toggle Railgun funding"
                   >
                     <span className={clsx(
                       "absolute top-0.5 left-0.5 w-3 h-3 rounded-full transition-transform",

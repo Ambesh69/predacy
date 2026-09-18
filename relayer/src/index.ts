@@ -16,7 +16,7 @@ const missingVars = ["VAULT_ADDRESS", "RELAYER_PRIVATE_KEY"].filter((v) => !proc
 const chainId = parseInt(process.env.CHAIN_ID ?? "80002");
 const chain   = chainId === polygon.id ? polygon : polygonAmoy;
 const tradingBlocker = chainId === polygon.id
-  ? "Mainnet trading is disabled until the Deposit Wallet/pUSD bridge and CLOB execution-price settlement are tested"
+  ? "Mainnet trading is disabled: full trade-detail privacy cannot be provided by Polymarket's public on-chain settlement; v11 execution is also incomplete"
   : null;
 
 const baseConfig = {

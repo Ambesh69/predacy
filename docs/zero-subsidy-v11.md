@@ -6,6 +6,14 @@ journal module, and SDK execution primitives implemented on
 document does not authorize mainnet trading. The deployed v10 vault cannot be
 upgraded in place.
 
+The required launch privacy is **all trade details hidden on-chain**. This
+prototype does not meet it: escrow and allocations are public, and Polymarket's
+own matched trades settle on public Polygon exchange contracts. Funding through
+Railgun or using an omnibus Deposit Wallet could hide an individual's link to
+an aggregate trade, but cannot hide the aggregate exchange execution itself.
+The production PostgreSQL service and relayer reference variable exist, but
+neither resolves this incompatibility nor activates the v11 code.
+
 ## Accounting contract
 
 Each committed order has one signed maximum buy price or minimum sell price.
@@ -120,8 +128,8 @@ fresh claim test are deployed together.
   partial/no fill, refund, claim, restart/recovery, and position exit.
 - Independent review of vault, proof/public inputs, commitment/refund binding,
   and operator custody model. Production monitoring and an emergency stop.
-- Explicit product decision on whether transparent escrow and claims are
-  acceptable; current v11 is not a private trading flow.
+- Resolve the full on-chain trade-detail privacy requirement. Current v11 and
+  direct Polymarket CLOB execution cannot satisfy it.
 
 Until these pass, keep `tradingEnabled: false` on mainnet.
 
