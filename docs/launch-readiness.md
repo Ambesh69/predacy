@@ -25,6 +25,14 @@ either a revised, explicitly narrower privacy promise (customer-to-trade
 unlinkability with public aggregate trades) and a new private accounting design,
 or a venue/settlement architecture that does not publish the trades on Polygon.
 
+The product decision is now the second path: replace Polymarket execution to
+keep trade details private. `circuits/private_match_v1` is a local Noir proof
+prototype for one confidential buy/sell match. It is **not** connected to
+funded notes or a private execution network. The active Polygon app and the
+experimental v11 Deposit Wallet flow remain disabled. Aztec testnet is a
+candidate evaluation environment; no private-market contracts have been
+deployed there, and no mainnet opening is authorized by this decision alone.
+
 The current vault also requires exact settlement at its batch clearing price:
 it sends `gap * clearingPrice` to buy the missing shares and later demands
 `excess * clearingPrice` from sales. Actual CLOB execution can cross at a

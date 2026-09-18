@@ -8,6 +8,10 @@ matches settle publicly on Polygon, so hiding market, side, size, and fills
 requires a different execution architecture or a narrower privacy promise.
 See [the launch gate](docs/launch-readiness.md).
 
+The selected direction is a new private execution architecture. The first
+research circuit is [private_match_v1](circuits/private_match_v1/README.md);
+it is not a live venue, vault, or funded trading path.
+
 The original design uses order commitments, batch clearing, and zero-knowledge
 claims to reduce identity linkage. These mechanisms do not hide Polymarket's
 public exchange trades, and the experimental v11 vault exposes per-order
