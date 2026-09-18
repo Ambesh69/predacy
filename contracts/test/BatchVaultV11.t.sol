@@ -94,6 +94,7 @@ contract BatchVaultV11Test is Test {
     address constant BUYER = address(0xA11CE);
     address constant SELLER = address(0xB0B);
     address constant WALLET = address(0xD0D0);
+    address constant GUARDIAN = address(0xBEEF);
     bytes32 constant MARKET = bytes32(uint256(1));
     uint256 constant YES = 11;
     uint256 constant NO = 12;
@@ -107,8 +108,10 @@ contract BatchVaultV11Test is Test {
         verifier = new V11Verifier();
         vault = new BatchVaultV11(
             usdce, pusd, onramp, offramp, IConditionalTokens(address(ctf)),
-            verifier, address(this), WALLET
+            verifier, address(this), GUARDIAN, WALLET
         );
+        vm.prank(GUARDIAN);
+        vault.setTradingPaused(false);
     }
 
     function test_partialNoBuyRoutesPusdAndRefundsUnspentCollateral() public {
@@ -128,7 +131,7 @@ contract BatchVaultV11Test is Test {
 
         SettlementAccounting.Allocation[] memory allocations = new SettlementAccounting.Allocation[](1);
         allocations[0] = SettlementAccounting.Allocation(
-            SettlementAccounting.Side.NO_BUY, 410_000, 420_000, 1_000_000, 405_000, 5_000
+            SettlementAccounting.Side.NO_BUY, 410_000, 0, 1_000_000, 405_000, 5_000
         );
         vault.finalize(id, allocations, _proofs(1), 5_000);
         assertEq(vault.reservedUsdc(), 5_000);
@@ -154,7 +157,7 @@ contract BatchVaultV11Test is Test {
         pusd.transfer(address(vault), 575_000);
         SettlementAccounting.Allocation[] memory allocations = new SettlementAccounting.Allocation[](1);
         allocations[0] = SettlementAccounting.Allocation(
-            SettlementAccounting.Side.YES_SELL, 1_000_000, 550_000, 1_000_000, 575_000, 0
+            SettlementAccounting.Side.YES_SELL, 1_000_000, 0, 1_000_000, 575_000, 0
         );
         vault.finalize(id, allocations, _proofs(1), 575_000);
 
@@ -175,7 +178,7 @@ contract BatchVaultV11Test is Test {
 
         SettlementAccounting.Allocation[] memory allocations = new SettlementAccounting.Allocation[](1);
         allocations[0] = SettlementAccounting.Allocation(
-            SettlementAccounting.Side.YES_BUY, 400_000, 450_000, 1_000_000, 400_000, 0
+            SettlementAccounting.Side.YES_BUY, 400_000, 0, 1_000_000, 400_000, 0
         );
         vm.expectRevert(abi.encodeWithSelector(SettlementAccounting.AssetMismatch.selector, uint8(1)));
         vault.finalize(id, allocations, _proofs(1), 0);
@@ -230,6 +233,81 @@ contract BatchVaultV11Test is Test {
         assertEq(usdce.balanceOf(BUYER), 400_000);
     }
 
+    function test_unboundPublicLimitCannotBePresentedAsUserLimit() public {
+        uint256 id = vault.openBatch(MARKET, YES, NO);
+        _buy(id, SettlementAccounting.Side.NO_BUY, 400_000, bytes32(uint256(8)));
+        _close(id);
+        vault.routeAssets(id, 0, 0, 0);
+        SettlementAccounting.Allocation[] memory proposed = new SettlementAccounting.Allocation[](1);
+        proposed[0] = SettlementAccounting.Allocation(
+            SettlementAccounting.Side.NO_BUY, 400_000, 999_999, 0, 0, 400_000
+        );
+        vm.expectRevert(BatchVaultV11.InvalidOrder.selector);
+        vault.finalize(id, proposed, _proofs(1), 0);
+    }
+
+    function test_guardianPauseBlocksNewRoutingButAllowsRecoveryAndClaims() public {
+        uint256 id = vault.openBatch(MARKET, YES, NO);
+        _buy(id, SettlementAccounting.Side.YES_BUY, 400_000, bytes32(uint256(9)));
+        _close(id);
+        vm.prank(GUARDIAN);
+        vault.setTradingPaused(true);
+        vm.expectRevert(BatchVaultV11.TradingPaused.selector);
+        vault.routeAssets(id, 400_000, 0, 0);
+        vm.expectRevert(BatchVaultV11.TradingPaused.selector);
+        vault.openBatch(bytes32(uint256(2)), YES, NO);
+        vm.warp(block.timestamp + vault.RESCUE_DELAY());
+        vault.abortUnrouted(id);
+        vm.prank(BUYER);
+        vault.claim(id, 0);
+        assertEq(usdce.balanceOf(BUYER), 400_000);
+        vm.prank(BUYER);
+        vm.expectRevert(BatchVaultV11.OnlyGuardian.selector);
+        vault.setTradingPaused(false);
+    }
+
+    function test_guardianCanFinalizeReturnedAssetsWhilePaused() public {
+        uint256 id = vault.openBatch(MARKET, YES, NO);
+        _buy(id, SettlementAccounting.Side.YES_BUY, 400_000, bytes32(uint256(13)));
+        _close(id);
+        vault.routeAssets(id, 0, 0, 0);
+        vm.prank(GUARDIAN);
+        vault.setTradingPaused(true);
+        SettlementAccounting.Allocation[] memory proposed = new SettlementAccounting.Allocation[](1);
+        proposed[0] = SettlementAccounting.Allocation(
+            SettlementAccounting.Side.YES_BUY, 400_000, 0, 0, 0, 400_000
+        );
+        vm.prank(GUARDIAN);
+        vault.finalize(id, proposed, _proofs(1), 0);
+        vm.prank(BUYER);
+        vault.claim(id, 0);
+        assertEq(usdce.balanceOf(BUYER), 400_000);
+    }
+
+    function test_unsolicitedCtfTransferCannotContaminateBatchBalance() public {
+        ctf.mint(SELLER, YES, 1_000_000);
+        vm.prank(SELLER);
+        vm.expectRevert(BatchVaultV11.InvalidAsset.selector);
+        ctf.safeTransferFrom(SELLER, address(vault), YES, 1_000_000, "");
+        assertEq(ctf.balanceOf(address(vault), YES), 0);
+    }
+
+    function test_ownerCanClaimToAnotherRecipientOnlyOnce() public {
+        uint256 id = vault.openBatch(MARKET, YES, NO);
+        _buy(id, SettlementAccounting.Side.NO_BUY, 400_000, bytes32(uint256(14)));
+        vm.warp(block.timestamp + vault.BATCH_WINDOW() + vault.RESCUE_DELAY());
+        vault.abortUnrouted(id);
+        vm.prank(SELLER);
+        vm.expectRevert(BatchVaultV11.NotOwner.selector);
+        vault.claimTo(id, 0, SELLER);
+        vm.prank(BUYER);
+        vault.claimTo(id, 0, SELLER);
+        assertEq(usdce.balanceOf(SELLER), 400_000);
+        vm.prank(BUYER);
+        vm.expectRevert(BatchVaultV11.AlreadyClaimed.selector);
+        vault.claim(id, 0);
+    }
+
     function test_laterBatchCannotConsumeEarlierUnclaimedAssets() public {
         uint256 first = vault.openBatch(MARKET, YES, NO);
         _buy(first, SettlementAccounting.Side.YES_BUY, 600_000, bytes32(uint256(10)));
@@ -238,10 +316,10 @@ contract BatchVaultV11Test is Test {
         vault.routeAssets(first, 0, 0, 0);
         SettlementAccounting.Allocation[] memory firstAllocations = new SettlementAccounting.Allocation[](2);
         firstAllocations[0] = SettlementAccounting.Allocation(
-            SettlementAccounting.Side.YES_BUY, 600_000, 700_000, 1_000_000, 600_000, 0
+            SettlementAccounting.Side.YES_BUY, 600_000, 0, 1_000_000, 600_000, 0
         );
         firstAllocations[1] = SettlementAccounting.Allocation(
-            SettlementAccounting.Side.YES_SELL, 1_000_000, 550_000, 1_000_000, 600_000, 0
+            SettlementAccounting.Side.YES_SELL, 1_000_000, 0, 1_000_000, 600_000, 0
         );
         vault.finalize(first, firstAllocations, _proofs(2), 0);
         assertEq(vault.reservedUsdc(), 600_000);
@@ -258,7 +336,7 @@ contract BatchVaultV11Test is Test {
         ctf.safeTransferFrom(WALLET, address(vault), NO, 1_000_000, "");
         SettlementAccounting.Allocation[] memory secondAllocations = new SettlementAccounting.Allocation[](1);
         secondAllocations[0] = SettlementAccounting.Allocation(
-            SettlementAccounting.Side.NO_BUY, 400_000, 450_000, 1_000_000, 400_000, 0
+            SettlementAccounting.Side.NO_BUY, 400_000, 0, 1_000_000, 400_000, 0
         );
         vault.finalize(second, secondAllocations, _proofs(1), 0);
 

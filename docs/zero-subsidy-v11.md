@@ -1,9 +1,10 @@
 # Zero-subsidy settlement v11
 
-Status: experimental vault, per-order proof, conversion bridge, and SDK
-primitives implemented on `codex/zero-subsidy-settlement`. None is wired to
-production trading. This document does not authorize mainnet trading. The
-deployed v10 vault cannot be upgraded in place.
+Status: experimental vault, per-order proof, conversion bridge, durable-order
+journal module, and SDK execution primitives implemented on
+`codex/zero-subsidy-settlement`. None is wired to production trading. This
+document does not authorize mainnet trading. The deployed v10 vault cannot be
+upgraded in place.
 
 ## Accounting contract
 
@@ -38,13 +39,15 @@ finalization, and claim. The USDC.e/pUSD conversion primitive in
 called by the experimental vault, but no production vault calls it.
 
 Current limitations: batches are serial and capped at four orders; claims are
-direct owner-only transfers, so settlement is not private. The allocation
-struct's `limitPrice` is not proof-bound and must not be presented as the
-committed user limit; the hidden limit check is in the proof. There is no
-durable execution journal, live CLOB order runner, returned-asset recovery
-workflow, frontend approval/proof integration, or v11 deployment. The official
-Deposit Wallet SDK primitives are isolated in the relayer, not invoked from
-the production route. That SDK requires Node 24, now pinned in the relayer
+owner-authorized direct transfers, so settlement is not private. The allocation
+struct's public `limitPrice` is required to be zero because only the hidden
+limit in the proof is authoritative. The PostgreSQL order journal, fee-aware
+FAK signing, read-only trade reconciliation, receipt gate, and Deposit Wallet
+withdrawal helpers are isolated modules. There is no orchestrated live CLOB
+runner, complete ambiguous-response recovery, returned-asset accounting
+workflow, frontend approval/proof integration, v11 deployment, or production
+PostgreSQL service. The official Deposit Wallet SDK primitives are not invoked
+from the production route. That SDK requires Node 24, now pinned in the relayer
 package and Nixpacks configuration; the actual Railway build must still be
 validated before migration.
 
@@ -65,11 +68,14 @@ validated before migration.
    conditional tokens for sells. Confirm each Polygon receipt and Deposit
    Wallet balance before creating a CLOB order. The exchange must be the
    current V2 address for the market's risk type.
-4. Persist the intended leg and idempotency key before submission. Submit a
-   bounded FOK order through the official client. On timeout, reconcile by
-   order ID, trade history, and on-chain transfers before retrying; never
-   assume a timeout means no fill. Store actual filled shares and net pUSD,
-   including fees. Reconcile Deposit Wallet balances again after settlement.
+4. Persist the exact signed order before submission. Submit one fee-buffered,
+   tick-aligned FAK order through the official client. The current 0.02
+   USDC/share buffer assumes Polymarket's published maximum 0.07 taker fee
+   parameter, two-decimal share precision, and no additional fee; revalidate
+   that envelope before trading. A timeout is quarantined, never blindly
+   retried. Reconcile order status, trade history, confirmed Polygon receipts,
+   and on-chain balance deltas before deciding any recovery action. Store
+   actual filled shares and net pUSD, including fees.
 5. Return all purchased tokens and unspent pUSD to the new vault, unwrapping
    pUSD proceeds to USDC.e as needed. The experimental vault measures actual
    balances and verifies each committed order's allocation proof, then checks
@@ -93,6 +99,10 @@ itself eliminate custody risk. This needs an explicit threat-model review and
 operator controls before taking public funds. A ledger stored only in a Redis
 cache is insufficient for exactly-once CLOB execution; use durable storage
 with backups and an auditable operator recovery procedure.
+The v11 journal module requires `V11_DATABASE_URL`; it has not been connected
+to production, and its live PostgreSQL integration test needs
+`TEST_V11_DATABASE_URL`. Accepted or ambiguous CLOB submissions must be
+resolved before a new order is allowed to consume the same routed assets.
 
 Existing v10 batches and claims stay on v10. Do not point old proofs at v11,
 change v10 verifier addresses, or sweep its balances. New market orders may
@@ -110,6 +120,8 @@ fresh claim test are deployed together.
   partial/no fill, refund, claim, restart/recovery, and position exit.
 - Independent review of vault, proof/public inputs, commitment/refund binding,
   and operator custody model. Production monitoring and an emergency stop.
+- Explicit product decision on whether transparent escrow and claims are
+  acceptable; current v11 is not a private trading flow.
 
 Until these pass, keep `tradingEnabled: false` on mainnet.
 

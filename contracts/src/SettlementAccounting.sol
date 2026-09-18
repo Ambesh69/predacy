@@ -42,18 +42,41 @@ library SettlementAccounting {
         uint256 mergedShares,
         Execution memory execution
     ) internal pure returns (Assets memory available) {
+        return _validate(orders, splitShares, mergedShares, execution, true);
+    }
+
+    /// @dev Use only after a verifier has checked each order's hidden committed limit.
+    function validateProven(
+        Allocation[] memory orders,
+        uint256 splitShares,
+        uint256 mergedShares,
+        Execution memory execution
+    ) internal pure returns (Assets memory available) {
+        return _validate(orders, splitShares, mergedShares, execution, false);
+    }
+
+    function _validate(
+        Allocation[] memory orders,
+        uint256 splitShares,
+        uint256 mergedShares,
+        Execution memory execution,
+        bool enforcePublicLimit
+    ) private pure returns (Assets memory available) {
         Assets memory escrow;
         Assets memory claims;
 
         for (uint256 i = 0; i < orders.length; i++) {
             Allocation memory order = orders[i];
-            if (order.limitPrice == 0 || order.limitPrice >= PRICE_SCALE) revert InvalidLimit(i);
+            if (enforcePublicLimit && (order.limitPrice == 0 || order.limitPrice >= PRICE_SCALE)) {
+                revert InvalidLimit(i);
+            }
 
             if (order.side == Side.YES_BUY || order.side == Side.NO_BUY) {
                 escrow.usdc += order.deposit;
                 if (order.usdcPayout + order.refund != order.deposit) revert InvalidAllocation(i);
                 if ((order.filledShares == 0) != (order.usdcPayout == 0)) revert InvalidAllocation(i);
-                if (order.usdcPayout * PRICE_SCALE > order.filledShares * order.limitPrice) revert LimitViolated(i);
+                if (enforcePublicLimit &&
+                    order.usdcPayout * PRICE_SCALE > order.filledShares * order.limitPrice) revert LimitViolated(i);
                 claims.usdc += order.refund;
                 if (order.side == Side.YES_BUY) claims.yes += order.filledShares;
                 else claims.no += order.filledShares;
@@ -62,7 +85,8 @@ library SettlementAccounting {
                 else escrow.no += order.deposit;
                 if (order.filledShares + order.refund != order.deposit) revert InvalidAllocation(i);
                 if ((order.filledShares == 0) != (order.usdcPayout == 0)) revert InvalidAllocation(i);
-                if (order.usdcPayout * PRICE_SCALE < order.filledShares * order.limitPrice) revert LimitViolated(i);
+                if (enforcePublicLimit &&
+                    order.usdcPayout * PRICE_SCALE < order.filledShares * order.limitPrice) revert LimitViolated(i);
                 claims.usdc += order.usdcPayout;
                 if (order.side == Side.YES_SELL) claims.yes += order.refund;
                 else claims.no += order.refund;

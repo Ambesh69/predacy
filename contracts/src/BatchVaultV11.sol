@@ -54,7 +54,9 @@ contract BatchVaultV11 {
     IConditionalTokens public immutable ctf;
     IAllocationVerifier public immutable allocationVerifier;
     address public immutable relayer;
+    address public immutable guardian;
     address public immutable depositWallet;
+    bool public tradingPaused = true;
 
     uint256 public nextBatchId = 1;
     uint256 public activeBatchId;
@@ -71,9 +73,13 @@ contract BatchVaultV11 {
     event BatchRouted(uint256 indexed batchId, uint256 usdceAmount, uint256 yesAmount, uint256 noAmount);
     event BatchSettled(uint256 indexed batchId, uint256 usdcLiability, uint256 yesLiability, uint256 noLiability);
     event BatchAborted(uint256 indexed batchId);
-    event Claimed(uint256 indexed batchId, uint256 indexed index, address indexed owner);
+    event Claimed(uint256 indexed batchId, uint256 indexed index, address indexed owner, address recipient);
+    event TradingPauseChanged(bool paused);
 
     error OnlyRelayer();
+    error OnlyGuardian();
+    error OnlyOperator();
+    error TradingPaused();
     error InvalidStatus();
     error InvalidOrder();
     error InvalidAsset();
@@ -87,6 +93,16 @@ contract BatchVaultV11 {
 
     modifier onlyRelayer() {
         if (msg.sender != relayer) revert OnlyRelayer();
+        _;
+    }
+
+    modifier onlyOperator() {
+        if (msg.sender != relayer && msg.sender != guardian) revert OnlyOperator();
+        _;
+    }
+
+    modifier whenTrading() {
+        if (tradingPaused) revert TradingPaused();
         _;
     }
 
@@ -105,9 +121,10 @@ contract BatchVaultV11 {
         IConditionalTokens ctf_,
         IAllocationVerifier verifier_,
         address relayer_,
+        address guardian_,
         address depositWallet_
     ) {
-        if (relayer_ == address(0) || depositWallet_ == address(0) ||
+        if (relayer_ == address(0) || guardian_ == address(0) || depositWallet_ == address(0) ||
             address(usdce_) == address(0) || address(pusd_) == address(0) ||
             address(onramp_) == address(0) || address(offramp_) == address(0) ||
             address(ctf_) == address(0) || address(verifier_) == address(0)) revert InvalidAsset();
@@ -118,11 +135,18 @@ contract BatchVaultV11 {
         ctf = ctf_;
         allocationVerifier = verifier_;
         relayer = relayer_;
+        guardian = guardian_;
         depositWallet = depositWallet_;
     }
 
+    function setTradingPaused(bool paused) external {
+        if (msg.sender != guardian) revert OnlyGuardian();
+        tradingPaused = paused;
+        emit TradingPauseChanged(paused);
+    }
+
     function openBatch(bytes32 marketId, uint256 yesTokenId, uint256 noTokenId)
-        external onlyRelayer returns (uint256 batchId)
+        external onlyRelayer whenTrading returns (uint256 batchId)
     {
         Status previous = batches[activeBatchId].status;
         if (previous != Status.NONE && previous != Status.SETTLED && previous != Status.ABORTED) {
@@ -145,7 +169,7 @@ contract BatchVaultV11 {
     function commitBuy(
         uint256 batchId, bytes32 commitment, SettlementAccounting.Side side,
         uint256 deposit, bytes calldata initialProof
-    ) external nonReentrant {
+    ) external whenTrading nonReentrant {
         if (side != SettlementAccounting.Side.YES_BUY && side != SettlementAccounting.Side.NO_BUY) revert InvalidOrder();
         _commit(batchId, commitment, side, deposit, initialProof);
         uint256 beforeBalance = usdce.balanceOf(address(this));
@@ -157,7 +181,7 @@ contract BatchVaultV11 {
     function commitSell(
         uint256 batchId, bytes32 commitment, SettlementAccounting.Side side,
         uint256 deposit, bytes calldata initialProof
-    ) external nonReentrant {
+    ) external whenTrading nonReentrant {
         if (side != SettlementAccounting.Side.YES_SELL && side != SettlementAccounting.Side.NO_SELL) revert InvalidOrder();
         _commit(batchId, commitment, side, deposit, initialProof);
         Batch storage batch = batches[batchId];
@@ -178,7 +202,7 @@ contract BatchVaultV11 {
     }
 
     function routeAssets(uint256 batchId, uint256 usdcAmount, uint256 yesAmount, uint256 noAmount)
-        external onlyRelayer nonReentrant
+        external onlyRelayer whenTrading nonReentrant
     {
         Batch storage batch = batches[batchId];
         if (batch.status != Status.CLOSED) revert InvalidStatus();
@@ -196,8 +220,8 @@ contract BatchVaultV11 {
         if (usdcAmount > 0) {
             PolymarketCollateralBridge.wrapToDepositWallet(usdce, pusd, onramp, depositWallet, usdcAmount);
         }
-        if (yesAmount > 0) ctf.safeTransferFrom(address(this), depositWallet, batch.yesTokenId, yesAmount, "");
-        if (noAmount > 0) ctf.safeTransferFrom(address(this), depositWallet, batch.noTokenId, noAmount, "");
+        if (yesAmount > 0) _routeToken(batch.yesTokenId, yesAmount);
+        if (noAmount > 0) _routeToken(batch.noTokenId, noAmount);
         emit BatchRouted(batchId, usdcAmount, yesAmount, noAmount);
     }
 
@@ -206,7 +230,7 @@ contract BatchVaultV11 {
         SettlementAccounting.Allocation[] calldata proposed,
         bytes[] calldata proofs,
         uint256 returnedPusd
-    ) external onlyRelayer nonReentrant {
+    ) external onlyOperator nonReentrant {
         Batch storage batch = batches[batchId];
         if (batch.status != Status.ROUTED) revert InvalidStatus();
         if (proposed.length != batch.orderCount || proofs.length != proposed.length) revert InvalidOrder();
@@ -219,7 +243,8 @@ contract BatchVaultV11 {
         for (uint256 i = 0; i < proposed.length; i++) {
             Order storage order = orders[batchId][i];
             SettlementAccounting.Allocation memory allocation = proposed[i];
-            if (allocation.side != order.side || allocation.deposit != order.deposit) revert InvalidOrder();
+            if (allocation.side != order.side || allocation.deposit != order.deposit ||
+                allocation.limitPrice != 0) revert InvalidOrder();
             _verify(batch.marketId, order.commitment, allocation, proofs[i]);
             checked[i] = allocation;
             allocations[batchId][i] = allocation;
@@ -227,7 +252,7 @@ contract BatchVaultV11 {
 
         SettlementAccounting.Assets memory actual = _available(batch);
         SettlementAccounting.Execution memory execution = _netExecution(batch, actual);
-        SettlementAccounting.Assets memory claims = SettlementAccounting.validate(checked, 0, 0, execution);
+        SettlementAccounting.Assets memory claims = SettlementAccounting.validateProven(checked, 0, 0, execution);
         if (claims.usdc != actual.usdc || claims.yes != actual.yes || claims.no != actual.no) {
             revert InsufficientAssets();
         }
@@ -251,6 +276,15 @@ contract BatchVaultV11 {
     }
 
     function claim(uint256 batchId, uint256 index) external nonReentrant {
+        _claim(batchId, index, msg.sender);
+    }
+
+    function claimTo(uint256 batchId, uint256 index, address recipient) external nonReentrant {
+        if (recipient == address(0)) revert InvalidAsset();
+        _claim(batchId, index, recipient);
+    }
+
+    function _claim(uint256 batchId, uint256 index, address recipient) private {
         Batch storage batch = batches[batchId];
         if (batch.status != Status.SETTLED && batch.status != Status.ABORTED) revert InvalidStatus();
         if (index >= batch.orderCount) revert InvalidOrder();
@@ -265,16 +299,16 @@ contract BatchVaultV11 {
         }
         if (order.side == SettlementAccounting.Side.YES_BUY || order.side == SettlementAccounting.Side.NO_BUY) {
             reservedUsdc -= allocation.refund;
-            if (allocation.refund > 0 && !usdce.transfer(order.owner, allocation.refund)) revert TransferFailed();
+            if (allocation.refund > 0 && !usdce.transfer(recipient, allocation.refund)) revert TransferFailed();
             uint256 tokenId = order.side == SettlementAccounting.Side.YES_BUY ? batch.yesTokenId : batch.noTokenId;
-            _sendToken(tokenId, order.owner, allocation.filledShares);
+            _sendToken(tokenId, recipient, allocation.filledShares);
         } else {
             reservedUsdc -= allocation.usdcPayout;
-            if (allocation.usdcPayout > 0 && !usdce.transfer(order.owner, allocation.usdcPayout)) revert TransferFailed();
+            if (allocation.usdcPayout > 0 && !usdce.transfer(recipient, allocation.usdcPayout)) revert TransferFailed();
             uint256 tokenId = order.side == SettlementAccounting.Side.YES_SELL ? batch.yesTokenId : batch.noTokenId;
-            _sendToken(tokenId, order.owner, allocation.refund);
+            _sendToken(tokenId, recipient, allocation.refund);
         }
-        emit Claimed(batchId, index, order.owner);
+        emit Claimed(batchId, index, order.owner, recipient);
     }
 
     function _commit(
@@ -341,10 +375,17 @@ contract BatchVaultV11 {
         ctf.safeTransferFrom(address(this), to, tokenId, amount, "");
     }
 
-    function onERC1155Received(address, address, uint256, uint256, bytes calldata)
+    function _routeToken(uint256 tokenId, uint256 amount) private {
+        uint256 beforeBalance = ctf.balanceOf(depositWallet, tokenId);
+        ctf.safeTransferFrom(address(this), depositWallet, tokenId, amount, "");
+        if (ctf.balanceOf(depositWallet, tokenId) != beforeBalance + amount) revert InvalidAsset();
+    }
+
+    function onERC1155Received(address operator, address from, uint256, uint256, bytes calldata)
         external view returns (bytes4)
     {
-        if (msg.sender != address(ctf)) revert InvalidAsset();
+        if (msg.sender != address(ctf) ||
+            (operator != address(this) && from != depositWallet)) revert InvalidAsset();
         return this.onERC1155Received.selector;
     }
 }

@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Signer, TransactionHandle } from "@polymarket/client";
-import { completeGaslessWorkflow, type GaslessWorkflow } from "./depositWalletWithdrawals.js";
+import {
+  completeGaslessWorkflow, withdrawPusdFromDepositWallet, type GaslessWorkflow,
+} from "./depositWalletWithdrawals.js";
+import type { DepositWalletClient } from "./depositWalletClient.js";
 
 const address = "0x0000000000000000000000000000000000000001";
 const signature = `0x${"11".repeat(65)}`;
@@ -27,5 +30,12 @@ describe("Deposit Wallet gasless workflow", () => {
     expect(signer.getAddress).toHaveBeenCalledOnce();
     expect(signer.signMessage).toHaveBeenCalledOnce();
     expect(signer.signTypedData).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a non-Deposit Wallet before initiating a pUSD transfer", async () => {
+    const client = { account: { walletType: -1 } } as unknown as DepositWalletClient;
+    await expect(withdrawPusdFromDepositWallet(
+      client, {} as Signer, "https://polygon.invalid", address, address, 1n,
+    )).rejects.toThrow(/requires a Deposit Wallet/);
   });
 });

@@ -38,8 +38,9 @@ contract BatchVaultV11RealProofTest is Test {
         assertTrue(verifier != address(0));
         BatchVaultV11 vault = new BatchVaultV11(
             usdce, pusd, new V11Onramp(usdce, pusd), new V11Offramp(usdce, pusd),
-            IConditionalTokens(address(ctf)), IAllocationVerifier(verifier), address(this), wallet
+            IConditionalTokens(address(ctf)), IAllocationVerifier(verifier), address(this), address(this), wallet
         );
+        vault.setTradingPaused(false);
         uint256 batchId = vault.openBatch(market, 11, 12);
         usdce.mint(buyer, 410_000);
         vm.startPrank(buyer);
@@ -60,7 +61,7 @@ contract BatchVaultV11RealProofTest is Test {
 
         SettlementAccounting.Allocation[] memory proposed = new SettlementAccounting.Allocation[](1);
         proposed[0] = SettlementAccounting.Allocation(
-            SettlementAccounting.Side.NO_BUY, 410_000, 420_000, 1_000_000, 405_000, 5_000
+            SettlementAccounting.Side.NO_BUY, 410_000, 0, 1_000_000, 405_000, 5_000
         );
         bytes[] memory proofs = new bytes[](1);
         proofs[0] = finalProof;

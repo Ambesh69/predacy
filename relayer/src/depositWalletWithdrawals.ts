@@ -18,6 +18,10 @@ const ctfAbi = parseAbi([
   "function safeTransferFrom(address from, address to, uint256 id, uint256 amount, bytes data)",
   "function balanceOf(address account, uint256 id) view returns (uint256)",
 ]);
+const erc20Abi = parseAbi([
+  "function transfer(address to, uint256 amount) returns (bool)",
+  "function balanceOf(address account) view returns (uint256)",
+]);
 
 export type GaslessWorkflow = Awaited<ReturnType<typeof prepareGaslessTransaction>>;
 
@@ -82,4 +86,44 @@ export async function withdrawPositionFromDepositWallet(
     await new Promise((resolve) => setTimeout(resolve, 2_000));
   }
   throw new Error("Deposit Wallet withdrawal confirmation is uncertain; reconcile before retrying");
+}
+
+/** Returns pUSD to the vault for unwrapping. Never retry an uncertain gasless transaction blindly. */
+export async function withdrawPusdFromDepositWallet(
+  client: DepositWalletClient,
+  signer: Signer,
+  rpcUrl: string,
+  pusdAddress: Address,
+  vaultAddress: Address,
+  amount: bigint,
+): Promise<TransactionHandle> {
+  if (client.account.walletType !== WalletType.DEPOSIT_WALLET) {
+    throw new Error("pUSD withdrawal requires a Deposit Wallet");
+  }
+  if (amount <= 0n) throw new Error("pUSD withdrawal amount must be positive");
+
+  const reader = createPublicClient({ chain: polygon, transport: http(rpcUrl) });
+  if (await reader.getChainId() !== polygon.id) throw new Error("pUSD withdrawal RPC is not Polygon mainnet");
+  const walletBalance = await reader.readContract({
+    address: pusdAddress, abi: erc20Abi, functionName: "balanceOf", args: [client.account.wallet],
+  });
+  if (walletBalance < amount) throw new Error("Deposit Wallet has insufficient pUSD");
+  const before = await reader.readContract({
+    address: pusdAddress, abi: erc20Abi, functionName: "balanceOf", args: [vaultAddress],
+  });
+  const data = encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [vaultAddress, amount] });
+  const workflow = await prepareGaslessTransaction(client, {
+    calls: [{ to: pusdAddress, data }],
+    metadata: `Return ${amount} pUSD to vault`,
+  });
+  const handle = await completeGaslessWorkflow(workflow, signer);
+  await handle.wait();
+  for (let attempt = 0; attempt < 30; attempt++) {
+    const after = await reader.readContract({
+      address: pusdAddress, abi: erc20Abi, functionName: "balanceOf", args: [vaultAddress],
+    });
+    if (after >= before + amount) return handle;
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+  }
+  throw new Error("Deposit Wallet pUSD return confirmation is uncertain; reconcile before retrying");
 }
