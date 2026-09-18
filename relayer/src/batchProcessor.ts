@@ -488,9 +488,8 @@ export class BatchProcessor {
    * Mirrors the YES-token balance poll in polymarketClient.buyYesForSettlement.
    * settleBatch pulls USDC from the relayer — this must complete first.
    */
-  private async _waitForUsdcProceeds(usdcExpected: bigint, label: string): Promise<void> {
-    if (!this.config.usdcAddress || usdcExpected === 0n) return;
-
+  private async _getUsdcBalance(): Promise<bigint> {
+    if (!this.config.usdcAddress) throw new Error("USDC address is required for settlement");
     const ERC20_BALANCE_ABI = [{
       name: "balanceOf",
       type: "function" as const,
@@ -499,24 +498,26 @@ export class BatchProcessor {
       stateMutability: "view",
     }] as const;
 
-    const relayerAddress = this.walletClient.account!.address;
-    const getBalance = () => this.publicClient.readContract({
+    return this.publicClient.readContract({
       address:      this.config.usdcAddress as `0x${string}`,
       abi:          ERC20_BALANCE_ABI,
       functionName: "balanceOf",
-      args:         [relayerAddress],
+      args:         [this.walletClient.account!.address],
     }) as Promise<bigint>;
+  }
 
-    const preBal  = await getBalance();
-    // Accept ≥90% of expected to allow minor price/rounding differences
-    const target  = preBal + (usdcExpected * 9n / 10n);
+  private async _waitForUsdcProceeds(usdcExpected: bigint, label: string, preBal: bigint): Promise<void> {
+    if (usdcExpected === 0n) return;
+
+    // settleBatch pulls the exact amount; a partial CLOB fill is not sufficient.
+    const target  = preBal + usdcExpected;
 
     const POLL_MS  = 2500;
     const MAX_POLL = 12; // 30s total
 
     for (let i = 0; i < MAX_POLL; i++) {
       await new Promise(r => setTimeout(r, POLL_MS));
-      const bal = await getBalance();
+      const bal = await this._getUsdcBalance();
       console.log(`[BatchProcessor] ${label}: USDC check ${i + 1}/${MAX_POLL}: ${bal} (need ≥${target})`);
       if (bal >= target) {
         console.log(`[BatchProcessor] ${label}: USDC proceeds received ✓`);
@@ -524,11 +525,11 @@ export class BatchProcessor {
       }
     }
 
-    const finalBal = await getBalance();
+    const finalBal = await this._getUsdcBalance();
     if (finalBal < target) {
-      console.warn(
+      throw new Error(
         `[BatchProcessor] ${label}: USDC balance ${finalBal} < target ${target} after 30s ` +
-        `— settleBatch may fail (ERC20: transfer amount exceeds balance)`,
+        `— cannot settle with incomplete CLOB proceeds`,
       );
     }
   }
@@ -610,16 +611,10 @@ export class BatchProcessor {
 
     const relayerAddress = this.walletClient.account!.address;
 
-    // ── CTF: setApprovalForAll(operator, true) for all operators that pull tokens ──
-    // The vault pulls gap tokens in settleBatch; CTFExchange + NegRiskExchange pull
-    // tokens when the relayer places CLOB SELL orders (selling excess / NegRisk tokens).
+    // The vault pulls gap tokens in settleBatch. CLOB V1 is retired, and V2
+    // trading approvals belong to the Deposit Wallet rather than this EOA.
     const CTF_OPERATOR_APPROVALS = [
-      [this.config.vaultAddress,                                        "vault"           ],
-      ["0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E" as `0x${string}`, "CTFExchange"     ],
-      ["0xC5d563A36AE78145C45a50134d48A1215220f80a" as `0x${string}`, "NegRiskExchange" ],
-      // NegRiskAdapter also needs CTF approval: it is the contract that actually calls
-      // CTF.safeTransferFrom when routing NegRisk SELL orders through the exchange
-      ["0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296" as `0x${string}`, "NegRiskAdapter"  ],
+      [this.config.vaultAddress, "vault"],
     ] as const satisfies readonly (readonly [`0x${string}`, string])[];
 
     for (const [operator, label] of CTF_OPERATOR_APPROVALS) {
@@ -1274,6 +1269,13 @@ export class BatchProcessor {
       finalExcessNo  = batchInfo.finalExcessNo;
     }
 
+    if (this.config.chainId === 137 && (yesGap > 0n || noGap > 0n || finalExcessYes > 0n || finalExcessNo > 0n)) {
+      throw new Error(
+        `Batch ${batchId} requires CLOB trading, but the mainnet Deposit Wallet/pUSD bridge is not implemented; ` +
+        `refusing to lock funds or replay orders`,
+      );
+    }
+
     // 5. Build EIP-3009 TransferAuth[] — one per order (parallel to orders[]).
     //    For filled BUY orders (YES_BUY and NO_BUY): use stored TransferAuth (pulls USDC).
     //    For SELL orders / unfilled BUY orders: zero struct (contract skips these).
@@ -1440,46 +1442,39 @@ export class BatchProcessor {
     // _getYesTokenId → returns the registered NegRisk CLOB ID → sends those tokens to
     // the relayer. The relayer can sell them on the CLOB normally.
     //
-    // If the sell fails for any reason (e.g. a historical batch where tokens are wrong type),
-    // the catch block lets settlement proceed; settleBatch will pull USDC from the relayer
-    // wallet as a fallback (same behaviour as before).
+    // A failed sell must pause the locked batch. Never substitute relayer funds
+    // for proceeds from vault-owned tokens.
     if (cachedYesToken && finalExcessYes > 0n && this.config.chainId === 137) {
       const usdcExpected = (finalExcessYes * effectiveClearingPrice) / PRICE_DEC;
+      const preBal = await this._getUsdcBalance();
       console.log(
         `[BatchProcessor] Selling ${finalExcessYes} excess YES tokens on CLOB` +
         `${isNegRisk ? " (NegRisk CLOB token)" : ""} (expecting ${usdcExpected} USDC)`,
       );
-      try {
-        // Refresh CLOB's cached balance before the sell. lockFunds just moved tokens
-        // into the relayer wallet; the CLOB off-chain cache may still show the pre-lockFunds
-        // balance and reject with "not enough balance / allowance".
-        await this.polymarket.updateClobBalance("CONDITIONAL", cachedYesToken);
-        const { orderId } = await this.polymarket.placeMarketSell(cachedYesToken, finalExcessYes);
-        console.log(`[BatchProcessor] Excess YES sell placed: orderId=${orderId}`);
-        // Wait for USDC proceeds to arrive before calling settleBatch.
-        await this._waitForUsdcProceeds(usdcExpected, "excess YES sell");
-      } catch (sellErr) {
-        console.warn(`[BatchProcessor] Excess YES sell failed (settleBatch will pull USDC from relayer wallet instead):`, sellErr);
-      }
+      // Refresh CLOB's cached balance before the sell. lockFunds just moved tokens
+      // into the relayer wallet; the CLOB off-chain cache may still show the pre-lockFunds
+      // balance and reject with "not enough balance / allowance".
+      await this.polymarket.updateClobBalance("CONDITIONAL", cachedYesToken);
+      const { orderId } = await this.polymarket.placeMarketSell(cachedYesToken, finalExcessYes);
+      console.log(`[BatchProcessor] Excess YES sell placed: orderId=${orderId}`);
+      // Wait for USDC proceeds to arrive before calling settleBatch.
+      await this._waitForUsdcProceeds(usdcExpected, "excess YES sell", preBal);
     } else if (finalExcessYes > 0n && this.config.chainId !== 137) {
       console.log(`[BatchProcessor] Testnet: skipping excess YES sell (${finalExcessYes} tokens)`);
     }
 
     if (cachedNoToken && finalExcessNo > 0n && this.config.chainId === 137) {
       const usdcExpected = (finalExcessNo * noPrice) / PRICE_DEC;
+      const preBal = await this._getUsdcBalance();
       console.log(
         `[BatchProcessor] Selling ${finalExcessNo} excess NO tokens on CLOB` +
         `${isNegRisk ? " (NegRisk CLOB token)" : ""} (expecting ${usdcExpected} USDC)`,
       );
-      try {
-        // Same CLOB balance refresh as the YES sell path above.
-        await this.polymarket.updateClobBalance("CONDITIONAL", cachedNoToken);
-        const { orderId } = await this.polymarket.placeMarketSell(cachedNoToken, finalExcessNo);
-        console.log(`[BatchProcessor] Excess NO sell placed: orderId=${orderId}`);
-        await this._waitForUsdcProceeds(usdcExpected, "excess NO sell");
-      } catch (sellErr) {
-        console.warn(`[BatchProcessor] Excess NO sell failed (settleBatch will pull USDC from relayer wallet instead):`, sellErr);
-      }
+      // Same CLOB balance refresh as the YES sell path above.
+      await this.polymarket.updateClobBalance("CONDITIONAL", cachedNoToken);
+      const { orderId } = await this.polymarket.placeMarketSell(cachedNoToken, finalExcessNo);
+      console.log(`[BatchProcessor] Excess NO sell placed: orderId=${orderId}`);
+      await this._waitForUsdcProceeds(usdcExpected, "excess NO sell", preBal);
     } else if (finalExcessNo > 0n && this.config.chainId !== 137) {
       console.log(`[BatchProcessor] Testnet: skipping excess NO sell (${finalExcessNo} tokens)`);
     }

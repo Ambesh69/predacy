@@ -11,8 +11,10 @@ import OrderForm from "@/components/OrderForm";
 import PositionsPanel from "@/components/PositionsPanel";
 import PriceChart from "@/components/PriceChart";
 import WalletButton from "@/components/WalletButton";
+import BrandMark from "@/components/BrandMark";
 import { getMarket, MOCK_MARKETS, type Market } from "@/lib/polymarket";
 import { getRelayerUrl } from "@/lib/relayerUrl";
+import { assertTradingReady } from "@/lib/tradingReadiness";
 import {
   BATCH_VAULT_ABI,
   CTF_ABI,
@@ -536,6 +538,10 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
     limitPrice: bigint;
   }) => {
     setChainError(null);
+    if (IS_MAINNET) {
+      throw new Error("Trading is temporarily unavailable while the Polymarket settlement integration is upgraded.");
+    }
+    await assertTradingReady();
     const contracts = getContracts(ACTIVE_CHAIN.id);
     const deadline  = BigInt(Math.floor(Date.now() / 1000) + 600); // 10 min from now
 
@@ -1056,6 +1062,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
           Markets
         </Link>
         <span className="text-border">|</span>
+        <BrandMark size={28} />
         <h1
           className="text-lg font-black text-text tracking-tight leading-tight"
           style={{ fontFamily: "var(--font-display)" }}
@@ -1449,6 +1456,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
                 market={market}
                 marketId={batch.batchMarketId}
                 batchOpen={batch.status === BatchStatus.OPEN}
+                tradingDisabledReason={IS_MAINNET ? "Trading temporarily unavailable" : undefined}
                 onSubmit={handleOrderSubmit}
                 walletAddress={walletAddress}
                 isConnected={isConnected}

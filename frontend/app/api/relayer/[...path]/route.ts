@@ -29,6 +29,9 @@ async function proxyRequest(
   method: "GET" | "POST",
 ): Promise<NextResponse> {
   try {
+    if (params.path[0] === "admin") {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
     const base = getRelayerBase();
     const path = params.path.join("/");
     const { searchParams } = new URL(req.url);

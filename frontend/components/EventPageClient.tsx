@@ -10,6 +10,7 @@ import {
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
 import WalletButton from "@/components/WalletButton";
+import BrandMark from "@/components/BrandMark";
 import { Liveline } from "liveline";
 import BatchTimer from "@/components/BatchTimer";
 import OrderForm from "@/components/OrderForm";
@@ -17,6 +18,7 @@ import PositionsPanel from "@/components/PositionsPanel";
 import OrderbookPanel from "@/components/OrderbookPanel";
 import type { Market } from "@/lib/polymarket";
 import { getRelayerUrl } from "@/lib/relayerUrl";
+import { assertTradingReady } from "@/lib/tradingReadiness";
 import {
   filterAndDeduplicateMarkets,
   outcomeLabel,
@@ -1195,6 +1197,10 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   }) => {
     if (!selectedMarket) return;
     setChainError(null);
+    if (IS_MAINNET) {
+      throw new Error("Trading is temporarily unavailable while the Polymarket settlement integration is upgraded.");
+    }
+    await assertTradingReady();
     posthog?.capture("order_submitted", {
       market_id:   selectedMarket.conditionId,
       market_name: selectedMarket.question,
@@ -1603,6 +1609,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
             Markets
           </Link>
           <span className="text-border">|</span>
+          <BrandMark size={32} />
           <Link href="/" className="text-xl font-black tracking-tight text-text" style={{ fontFamily: "var(--font-display)" }}>
             PREDACY
           </Link>
@@ -1968,6 +1975,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                         market={selectedMarket}
                         marketId={selectedMarket.conditionId as `0x${string}`}
                         batchOpen={batch.status === BatchStatus.OPEN}
+                        tradingDisabledReason={IS_MAINNET ? "Trading temporarily unavailable" : undefined}
                         onSubmit={async (p) => {
                           setOrderSealed(false);
                           setSubmitStep(null);

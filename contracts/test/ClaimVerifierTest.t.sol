@@ -96,14 +96,14 @@ contract ClaimVerifierTest is Test {
     }
 
     /**
-     * @notice Deployed bytecode is under the EIP-170 24,576-byte limit.
+     * @notice Deployed bytecode fits Polygon PoS's 32 KiB PIP-30 limit.
      */
-    function test_verifier_sizeUnderEIP170() public {
+    function test_verifier_sizeUnderPolygonLimit() public {
         address v = address(verifier);
         uint256 size;
         assembly { size := extcodesize(v) }
         emit log_named_uint("ClaimHonkVerifier deployed bytecode size (bytes)", size);
-        assertLt(size, 24576, "ClaimHonkVerifier must stay under EIP-170 limit");
+        assertLe(size, 32768, "ClaimHonkVerifier must fit Polygon PoS code-size limit");
     }
 
     // ─── Real ZK proof test (requires --ffi) ─────────────────────────────────
@@ -131,16 +131,18 @@ contract ClaimVerifierTest is Test {
      *   [7]  fills               = 1 (true)
      *   [8]  fill_amount         = 1_000_000
      *   [9]  refund_amount       = 0
-     *   [10] is_buy_out          = 1 (true)
+     *   [10] side_out            = 0 (YES_BUY)
      *
      * Expected: verify() returns true.
      *
      * Run with: forge test --match-test test_realProof --ffi -vv
      */
     function test_realProof_filledBuy() public {
-        string[] memory args = new string[](2);
-        args[0] = "../relayer/node_modules/.bin/tsx";
-        args[1] = "../relayer/scripts/generateClaimProof.ts";
+        string[] memory args = new string[](4);
+        args[0] = "node";
+        args[1] = "--import";
+        args[2] = "../relayer/node_modules/tsx/dist/loader.mjs";
+        args[3] = "../relayer/scripts/generateClaimProof.ts";
 
         emit log_string("[ClaimVerifierTest] Calling generateClaimProof.ts via vm.ffi...");
         emit log_string("  This may take 5-10 minutes (claim circuit: N=262144, LOG_N=18).");
@@ -165,7 +167,7 @@ contract ClaimVerifierTest is Test {
         emit log_named_bytes32("  [3] clearing_price", publicInputs[3]);
         emit log_named_uint("  [7] fills", uint256(publicInputs[7]));
         emit log_named_uint("  [8] fill_amount", uint256(publicInputs[8]));
-        emit log_named_uint("  [10] is_buy_out", uint256(publicInputs[10]));
+        emit log_named_uint("  [10] side_out", uint256(publicInputs[10]));
 
         // ── THE KEY ASSERTION ────────────────────────────────────────────────
         // If this passes, the full ZK claim pipeline is working end-to-end:

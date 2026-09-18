@@ -7,7 +7,7 @@
  *
  * Scenario: 1 filled buy order in a single-order batch.
  *   - market_id    = 0x00..00
- *   - is_buy       = true
+ *   - side         = 0 (YES_BUY)
  *   - amount       = 1_000_000 (1 USDC, 6 decimals)
  *   - limit_price  = 650_000  (0.65)
  *   - salt         = 0x01..01
@@ -100,12 +100,12 @@ function getMerklePath(nodes: `0x${string}`[], leafIndex: number): `0x${string}`
 }
 
 /**
- * Commitment = keccak256(abi.encode(marketId, isBuy, amount, limitPrice, salt))
+ * Commitment = keccak256(abi.encode(marketId, side, amount, limitPrice, salt))
  * Matches BatchVault._verifyCommitments and compute_commitment() in Noir circuit.
  */
 function computeCommitment(
   marketId:   `0x${string}`,
-  isBuy:      boolean,
+  side:       number,
   amount:     bigint,
   limitPrice: bigint,
   salt:       `0x${string}`,
@@ -114,12 +114,12 @@ function computeCommitment(
     encodeAbiParameters(
       [
         { type: "bytes32" }, // marketId
-        { type: "bool"    }, // isBuy
+        { type: "uint8"   }, // side
         { type: "uint256" }, // amount
         { type: "uint256" }, // limitPrice
         { type: "bytes32" }, // salt
       ],
-      [marketId, isBuy, amount, limitPrice, salt],
+      [marketId, side, amount, limitPrice, salt],
     ),
   ) as `0x${string}`;
 }
@@ -151,7 +151,7 @@ async function main(): Promise<void> {
   const marketId      = ZERO_BYTES32;
   const salt          = ("0x" + "01".repeat(32)) as `0x${string}`;
   const batchId       = 1n;
-  const isBuy         = true;
+  const side          = 0;        // YES_BUY
   const amount        = 1_000_000n;   // 1 USDC (6 decimals)
   const limitPrice    = 650_000n;     // 0.65
   const clearingPrice = 650_000n;     // buy fills: limit_price >= clearing_price
@@ -163,7 +163,7 @@ async function main(): Promise<void> {
   const refundAmount = 0n;
 
   // ── Commitment + Merkle tree ─────────────────────────────────────────────
-  const commitment = computeCommitment(marketId, isBuy, amount, limitPrice, salt);
+  const commitment = computeCommitment(marketId, side, amount, limitPrice, salt);
   process.stderr.write(`[generateClaimProof] commitment = ${commitment}\n`);
 
   // 512-leaf tree with commitment at slot 0, all others = 0
@@ -220,7 +220,7 @@ async function main(): Promise<void> {
   const witnessInputs = {
     // Private inputs
     market_id:   hexToByteArray(marketId, 32),
-    is_buy:      isBuy,
+    side,
     amount:      amount.toString(),
     limit_price: limitPrice.toString(),
     salt:        hexToByteArray(salt, 32),
@@ -237,7 +237,7 @@ async function main(): Promise<void> {
     fills,
     fill_amount:        fillAmount.toString(),
     refund_amount:      refundAmount.toString(),
-    is_buy_out:         isBuy,
+    side_out:           side,
   };
 
   // ── Execute circuit ───────────────────────────────────────────────────────

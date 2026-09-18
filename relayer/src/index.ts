@@ -7,6 +7,7 @@ import { createWalletClient } from "viem";
 import { BatchProcessor, BATCH_VAULT_ABI, type RelayerConfig, type RequeueResult } from "./batchProcessor.js";
 import { ZKClaimProver } from "./zkClaimProver.js";
 import { ProxyWalletManager } from "./proxyWalletManager.js";
+import { isAdminAuthorized } from "./adminAuth.js";
 
 // ── Environment ───────────────────────────────────────────────────────────────
 const missingVars = ["VAULT_ADDRESS", "RELAYER_PRIVATE_KEY"].filter((v) => !process.env[v]);
@@ -14,6 +15,9 @@ const missingVars = ["VAULT_ADDRESS", "RELAYER_PRIVATE_KEY"].filter((v) => !proc
 // CHAIN_ID: 137 = Polygon mainnet, 80002 = Polygon Amoy (default)
 const chainId = parseInt(process.env.CHAIN_ID ?? "80002");
 const chain   = chainId === polygon.id ? polygon : polygonAmoy;
+const tradingBlocker = chainId === polygon.id
+  ? "Mainnet trading is disabled until the Deposit Wallet/pUSD bridge and CLOB execution-price settlement are tested"
+  : null;
 
 const baseConfig = {
   // polygon-rpc.com routes through 1rpc.io (same "tenant disabled" restrictions on eth_getLogs).
@@ -92,6 +96,8 @@ interface MarketState {
 
 /** activeMarkets: marketId (lowercase hex) → MarketState */
 const activeMarkets = new Map<string, MarketState>();
+const pausedMarkets = new Map<string, string>();
+const pausedBatches = new Map<string, Set<string>>();
 
 /** Reverse index: batchId.toString() → marketKey — find market state from any batch event */
 const batchToMarket = new Map<string, string>();
@@ -126,6 +132,7 @@ function createMarketState(marketId: `0x${string}`): MarketState {
 /** Ensure a market is tracked and has an open batch. Returns the MarketState. */
 async function ensureMarket(marketId: `0x${string}`): Promise<MarketState> {
   const key = marketId.toLowerCase();
+  if (pausedMarkets.has(key)) throw new Error(`Market paused: ${pausedMarkets.get(key)}`);
 
   if (!activeMarkets.has(key)) {
     const state = createMarketState(marketId);
@@ -267,6 +274,17 @@ const server = createServer((req, res) => {
     return;
   }
 
+  if (req.url?.startsWith("/admin/")) {
+    if (!process.env.ADMIN_TOKEN) {
+      send(503, { error: "Admin operations are disabled" });
+      return;
+    }
+    if (!isAdminAuthorized(req.headers.authorization, process.env.ADMIN_TOKEN)) {
+      send(401, { error: "Unauthorized" });
+      return;
+    }
+  }
+
   // GET /health
   if (req.method === "GET" && req.url === "/health") {
     const markets: Record<string, { batchId: string | null; settlingBatchId: string | null; status: string }> = {};
@@ -274,7 +292,8 @@ const server = createServer((req, res) => {
       markets[key] = {
         batchId:         state.currentBatchId?.toString() ?? null,
         settlingBatchId: state.settlingBatchId?.toString() ?? null,
-        status:          state.processingBatch ? "settling"
+        status:          pausedMarkets.has(key) ? "paused"
+                       : state.processingBatch ? "settling"
                        : state.closingBatch    ? "closing"
                        : state.openingBatch    ? "opening"
                        : "open",
@@ -282,9 +301,13 @@ const server = createServer((req, res) => {
     }
     send(missingVars.length === 0 ? 200 : 503, {
       ok:      missingVars.length === 0,
+      tradingEnabled: missingVars.length === 0 && !tradingBlocker,
+      tradingBlocker,
+      chainId,
       missing: missingVars,
       vault:   baseConfig.vaultAddress,
       markets,
+      pausedMarkets: Object.fromEntries(pausedMarkets),
     });
     return;
   }
@@ -301,6 +324,10 @@ const server = createServer((req, res) => {
   //   { marketId, batchId, trader, side, amount, limitPrice, salt }
   //   → trader already committed on-chain; relayer just stores order details
   if (req.method === "POST" && req.url === "/order") {
+    if (tradingBlocker) {
+      send(503, { error: tradingBlocker });
+      return;
+    }
     let body = "";
     req.on("data", (chunk) => (body += chunk));
     req.on("end", async () => {
@@ -310,6 +337,11 @@ const server = createServer((req, res) => {
 
         if (!marketId) {
           send(400, { error: "Missing required field: marketId (Polymarket condition ID)" });
+          return;
+        }
+        const pauseReason = pausedMarkets.get(String(marketId).toLowerCase());
+        if (pauseReason) {
+          send(503, { error: `Market paused: ${pauseReason}` });
           return;
         }
         if (batchId === undefined || side === undefined || !amount || !limitPrice || !salt) {
@@ -941,6 +973,10 @@ const server = createServer((req, res) => {
   // POST /warm — pre-open a batch for a market before the first order arrives.
   // Responds 202 immediately; batch opens in the background.
   if (req.method === "POST" && req.url === "/warm") {
+    if (tradingBlocker) {
+      send(503, { error: tradingBlocker });
+      return;
+    }
     let body = "";
     req.on("data", (chunk) => (body += chunk));
     req.on("end", () => {
@@ -948,6 +984,10 @@ const server = createServer((req, res) => {
         const { marketId } = JSON.parse(body);
         if (!marketId) { send(400, { error: "Missing marketId" }); return; }
         const key = (marketId as string).toLowerCase();
+        if (pausedMarkets.has(key)) {
+          send(503, { error: `Market paused: ${pausedMarkets.get(key)}` });
+          return;
+        }
         if (activeMarkets.has(key)) {
           // Already tracked — nothing to do
           send(200, { ok: true, alreadyOpen: true });
@@ -973,6 +1013,10 @@ const server = createServer((req, res) => {
       return;
     }
     const key = marketId.toLowerCase();
+    if (pausedMarkets.has(key)) {
+      send(409, { error: `Market paused: ${pausedMarkets.get(key)}` });
+      return;
+    }
     if (!activeMarkets.has(key)) {
       send(404, { error: `Market ${marketId} is not currently active` });
       return;
@@ -1005,6 +1049,7 @@ const server = createServer((req, res) => {
     const url     = new URL(req.url, "http://localhost");
     const batchId = url.searchParams.get("batchId");
     if (!batchId) { send(400, { error: "Missing query param: batchId" }); return; }
+    if (!/^\d+$/.test(batchId)) { send(400, { error: "Invalid batchId" }); return; }
     const batchIdBig = BigInt(batchId);
     (async () => {
       try {
@@ -1043,8 +1088,9 @@ const server = createServer((req, res) => {
         console.log(`[Relayer] /admin/recover-batch: manually recovering ${phaseLabel} batch ${batchId} (cleared permanently-failed flag)`);
         send(200, { ok: true, batchId, status: phaseLabel });
         state.processor.processBatch(batchIdBig)
-          .then(() => {
+          .then(async () => {
             state!.settleFailures.delete(batchId);
+            await clearPausedBatch(key, batchIdBig.toString());
             console.log(`[Relayer] /admin/recover-batch: batch ${batchId} settled ✓`);
           })
           .catch(async (err) => { await onSettleFail(state!, key, batchIdBig, err); })
@@ -1267,12 +1313,53 @@ async function initFailedBatchesStore(): Promise<void> {
     await _failRedis.connect();
     const members: string[] = await _failRedis.smembers("predacy:failed_batches");
     for (const m of members) permanentlyFailedBatches.add(m);
+    const paused: string[] = await _failRedis.smembers("predacy:paused_batches");
+    for (const entry of paused) {
+      const separator = entry.lastIndexOf(":");
+      if (separator < 0) continue;
+      const key = entry.slice(0, separator);
+      const batchId = entry.slice(separator + 1);
+      const batches = pausedBatches.get(key) ?? new Set<string>();
+      batches.add(batchId);
+      pausedBatches.set(key, batches);
+      pausedMarkets.set(key, `batch ${[...batches].join(", ")} needs operator recovery`);
+    }
     if (members.length > 0) {
       console.log(`[Relayer] Loaded ${members.length} permanently-failed batch(es) from Redis: ${members.join(", ")}`);
     }
   } catch (err) {
     console.warn("[Relayer] Could not load failed-batches from Redis (non-fatal):", (err as any)?.message);
     _failRedis = null;
+  }
+}
+
+async function pauseMarket(marketKey: string, batchId: bigint, reason: string): Promise<void> {
+  pausedMarkets.set(marketKey, reason);
+  const batches = pausedBatches.get(marketKey) ?? new Set<string>();
+  batches.add(batchId.toString());
+  pausedBatches.set(marketKey, batches);
+  if (_failRedis) await _failRedis.sadd("predacy:paused_batches", `${marketKey}:${batchId}`).catch((e: Error) =>
+    console.error("[Relayer] Could not persist market pause:", e.message));
+  console.error(`[Relayer] MARKET PAUSED ${marketKey}: ${reason}`);
+}
+
+async function clearPausedBatch(marketKey: string, batchId: string): Promise<void> {
+  const batches = pausedBatches.get(marketKey);
+  if (!batches?.has(batchId)) return;
+  if (_failRedis) {
+    try {
+      await _failRedis.srem("predacy:paused_batches", `${marketKey}:${batchId}`);
+    } catch (e) {
+      console.error("[Relayer] Could not clear persisted batch pause:", e);
+      return;
+    }
+  }
+  batches.delete(batchId);
+  if (batches.size === 0) {
+    pausedBatches.delete(marketKey);
+    pausedMarkets.delete(marketKey);
+  } else {
+    pausedMarkets.set(marketKey, `batch ${[...batches].join(", ")} needs operator recovery`);
   }
 }
 
@@ -1376,40 +1463,28 @@ async function onSettleFail(state: MarketState, marketKey: string, batchId: bigi
   state.settleFailures.set(key, n);
   console.error(`[Relayer] processBatch ${batchId} (market ${marketKey}) failed (attempt ${n}/3):`, msg);
 
+  // Once lockFunds succeeds, user assets have moved and this batch must not be abandoned.
+  let onChainStatus: number;
+  try {
+    const batchInfo = await publicClient.readContract({
+      address: baseConfig.vaultAddress,
+      abi: BATCH_VAULT_ABI,
+      functionName: "getBatch",
+      args: [batchId],
+    }) as { status: number };
+    onChainStatus = batchInfo.status;
+  } catch (statusErr) {
+    await pauseMarket(marketKey, batchId, `batch ${batchId} failed and status could not be read`);
+    console.error("[Relayer] Batch status check failed:", statusErr);
+    return;
+  }
+  if (onChainStatus === 2 /* LOCKED */) {
+    await pauseMarket(marketKey, batchId, `batch ${batchId} is LOCKED; recover CLOB fill and settlement`);
+    return;
+  }
+
   if (n >= 3 || isUnresolvable) {
-    // Before permanently failing, do a final on-chain status check.
-    // If lockFunds mined AFTER the receipt-check timeout, the batch will be LOCKED even
-    // though processBatch thinks it failed.  Rescue it by re-triggering processBatch
-    // (which will skip lockFunds and proceed to CLOB + settleBatch) instead of abandoning.
-    if (!isUnresolvable) {
-      try {
-        const batchInfo = await publicClient.readContract({
-          address: baseConfig.vaultAddress,
-          abi:     BATCH_VAULT_ABI,
-          functionName: "getBatch",
-          args:    [batchId],
-        }) as { status: number };
-        const LOCKED = 2;
-        if (batchInfo.status === LOCKED) {
-          console.warn(
-            `[Relayer] Batch ${batchId} is LOCKED on-chain (lockFunds mined after receipt timeout) — ` +
-            `rescuing: will skip lockFunds and proceed to settleBatch`,
-          );
-          state.settleFailures.delete(key);
-          if (!state.processingBatch) {
-            state.processingBatch = true;
-            state.settlingBatchId = batchId;
-            state.processor.processBatch(batchId)
-              .then(() => { state.settleFailures.delete(key); })
-              .catch(async (rescueErr) => { await onSettleFail(state, marketKey, batchId, rescueErr); })
-              .finally(() => { state.processingBatch = false; state.settlingBatchId = null; });
-          }
-          return;
-        }
-      } catch (checkErr: any) {
-        console.warn(`[Relayer] Final status check for batch ${batchId} failed (continuing to permanently fail):`, checkErr.message);
-      }
-    }
+    if (onChainStatus !== 1 /* SETTLING */) return;
 
     console.warn(`[Relayer] Batch ${batchId} giving up after ${n} attempt(s) — force-opening next batch`);
     await markPermanentlyFailed(batchId);
@@ -1792,12 +1867,6 @@ async function recoverSettlingBatches() {
     for (const log of unsettled) {
       const batchId = log.args.batchId as bigint;
       try {
-        // Skip batches that are known to be unresolvable
-        if (permanentlyFailedBatches.has(batchId.toString())) {
-          console.log(`[Relayer] Batch ${batchId} is permanently failed — skipping recovery`);
-          continue;
-        }
-
         const batchInfo = await publicClient.readContract({
           address:      baseConfig.vaultAddress,
           abi:          BATCH_VAULT_ABI,
@@ -1815,6 +1884,14 @@ async function recoverSettlingBatches() {
 
         const marketId = batchInfo.marketId;
         const key      = marketId.toLowerCase();
+        if (batchInfo.status === 2 /* LOCKED */ && activeMarkets.has(key)) {
+          await pauseMarket(key, batchId, `older batch ${batchId} is LOCKED; recover before accepting orders`);
+          continue;
+        }
+        if (permanentlyFailedBatches.has(batchId.toString()) && batchInfo.status !== 2) {
+          console.log(`[Relayer] Batch ${batchId} is permanently failed — skipping recovery`);
+          continue;
+        }
         if (activeMarkets.has(key)) continue; // already tracked
 
         const state = createMarketState(marketId);
@@ -1828,8 +1905,9 @@ async function recoverSettlingBatches() {
 
         // Trigger settlement immediately in background
         state.processor.processBatch(batchId)
-          .then(() => {
+          .then(async () => {
             state.settleFailures.delete(batchId.toString());
+            await clearPausedBatch(key, batchId.toString());
             console.log(`[Relayer] Recovery: settled batch ${batchId} (market ${marketId})`);
           })
           .catch(async (err) => { await onSettleFail(state, key, batchId, err); })

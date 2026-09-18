@@ -70,9 +70,15 @@ Predacy/
 | BatchVault v10 | `0x8fD2B227E98F401F55B4252d34905C96eEEAEA1a` |
 | HonkVerifier (batch) | `0xFd32E90a67247dF2878bEeD5599aaFc3430fC993` |
 | PublicInputAdapter | `0x8f6829E931E278d47Ec160847C1037864AfB1cC7` |
-| ClaimHonkVerifier | `0xA50409A331E3CA9Db7fDfB96028BAeFF3AF48bBd` |
+| ClaimHonkVerifier (active in BatchVault; fork-tested with a fresh proof) | `0xA50409A331E3CA9Db7fDfB96028BAeFF3AF48bBd` |
 | ProxyWalletFactory | `0x7608A95420c107503837dE35E25bf360bEe82f38` |
 | WrappedCTFFactory | `0x8Ff83784f6209D4455D83C9e28b515255dbEA955` |
+
+---
+
+Mainnet order intake is disabled in this checkout pending a tested bridge from
+the vault's USDC.e to Polymarket pUSD, plus Deposit Wallet/CTF Exchange V2
+order handling. See [the launch gate](docs/launch-readiness.md).
 
 ---
 

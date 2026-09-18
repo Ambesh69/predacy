@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import EventCard from "@/components/EventCard";
 import WalletButton from "@/components/WalletButton";
-import Logo from "@/components/Logo";
+import BrandMark from "@/components/BrandMark";
 import { MOCK_MARKETS, getEvents, type PolyEvent } from "@/lib/polymarket";
 import { getRelayerUrl } from "@/lib/relayerUrl";
 import {
@@ -48,6 +48,7 @@ export default function HomePage() {
         const res = await fetch(`${relayerUrl}/health`);
         if (!res.ok) return;
         const data = await res.json();
+        if (!data.tradingEnabled) return;
         // data.markets: { [marketId]: { batchId, status } }
         const ids = new Set<string>(Object.keys(data.markets ?? {}));
         setLiveMarketIds(ids);
@@ -156,20 +157,20 @@ export default function HomePage() {
       </div>
 
       {/* Header */}
-      <header className="border-b border-border px-4 md:px-6 py-[22px] flex items-end justify-between bg-surface/25 backdrop-blur-[2px]">
-        <div className="flex items-center gap-3">
-          <Logo size={38} />
+      <header className="border-b border-border px-4 md:px-6 py-[22px] flex flex-wrap items-end justify-between gap-4 bg-surface/25 backdrop-blur-[2px]">
+        <div className="flex items-center gap-2">
+          <BrandMark size={44} />
           <div>
-          <h1
-            className="text-[2.65rem] font-black tracking-tight leading-none text-text glow-blue"
-            style={{ fontFamily: "var(--font-display)" }}
-          >
-            PREDACY
-          </h1>
-          <p className="text-muted text-xs tracking-widest mt-1">
-            DARK POOL PREDICTION MARKETS ·{" "}
-            <span className="text-accent/70">SEALED-BID BATCH AUCTIONS</span>
-          </p>
+            <h1
+              className="text-[2rem] md:text-[2.65rem] font-black tracking-tight leading-none text-text glow-blue"
+              style={{ fontFamily: "var(--font-display)" }}
+            >
+              PREDACY
+            </h1>
+            <p className="text-muted text-xs tracking-widest mt-1">
+              DARK POOL PREDICTION MARKETS ·{" "}
+              <span className="text-accent/70">SEALED-BID BATCH AUCTIONS</span>
+            </p>
           </div>
         </div>
 

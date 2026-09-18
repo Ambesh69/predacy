@@ -6,9 +6,9 @@
  * deploying to a live network.
  *
  * Produces a deterministic single-order proof:
- *   - 1 buy order: trader=0xAA..AA, amount=1 USDC, limit_price=0.65, salt=0x01..01
+ *   - 1 YES buy order: amount=1 USDC, limit_price=0.65, salt=0x01..01
  *   - clearing_price = 0.65  →  buy fills, no sell side
- *   - total_buy_vol = 1_000_000, total_sell_vol = 0, net_buy_amount = 1_000_000
+ *   - filled_yes_buy_vol = 1_000_000; all other side volumes are zero
  *
  * Output: raw bytes (ABI-encoded `bytes proof, bytes32[] publicInputs`) written to
  * stdout so Forge's vm.ffi() can decode them with `abi.decode(result, (bytes, bytes32[]))`.
@@ -57,12 +57,12 @@ function hexToByteArray(hex: string, expectedLen: number): number[] {
 
 /**
  * Compute an order commitment matching BatchVault._makeCommitment() in Solidity:
- *   keccak256(abi.encode(marketId, isBuy, amount, limitPrice, salt))
+ *   keccak256(abi.encode(marketId, side, amount, limitPrice, salt))
  * No trader address — matches the privacy-preserving commitment scheme.
  */
 function computeCommitment(
   marketId: `0x${string}`,
-  isBuy: boolean,
+  side: number,
   amount: bigint,
   limitPrice: bigint,
   salt: `0x${string}`,
@@ -70,12 +70,12 @@ function computeCommitment(
   const encoded = encodeAbiParameters(
     [
       { type: "bytes32" }, // marketId
-      { type: "bool"    }, // isBuy
+      { type: "uint8"   }, // side
       { type: "uint256" }, // amount
       { type: "uint256" }, // limitPrice
       { type: "bytes32" }, // salt
     ],
-    [marketId, isBuy, amount, limitPrice, salt],
+    [marketId, side, amount, limitPrice, salt],
   );
   return keccak256(encoded);
 }
@@ -135,7 +135,7 @@ async function main(): Promise<void> {
   // Commitment for the one real order (matches compute_commitment() in Noir circuit)
   // No trader address — privacy-preserving commitment scheme.
   const commitment = computeCommitment(
-    marketId, true, amount, limitPrice, salt,
+    marketId, 0, amount, limitPrice, salt,
   );
 
   // Commitment root with 1 real order
@@ -150,14 +150,14 @@ async function main(): Promise<void> {
 
   // Build circuit order arrays (1 real + 7 padding, MAX_ORDERS=8)
   const realOrder = {
-    is_buy:      true,
+    side:        0,
     amount:      amount.toString(),
     limit_price: limitPrice.toString(),
     salt:        hexToByteArray(salt, 32),
     is_padding:  false,
   };
   const paddingOrder = {
-    is_buy:      false,
+    side:        0,
     amount:      "0",
     limit_price: "0",
     salt:        Array(32).fill(0) as number[],
@@ -176,9 +176,10 @@ async function main(): Promise<void> {
     // Public inputs (must match BatchVault.settleBatch() expectations)
     commitment_root: hexToByteArray(commitmentRoot, 32),
     clearing_price:  clearingPrice.toString(),
-    total_buy_vol:   amount.toString(),  // 1 buy filled at clearing_price
-    total_sell_vol:  "0",               // no sell orders
-    net_buy_amount:  amount.toString(), // net = buy_vol - min(buy_vol, sell_vol) = 1M - 0
+    filled_yes_buy_vol:  amount.toString(),
+    filled_no_buy_vol:   "0",
+    filled_yes_sell_qty: "0",
+    filled_no_sell_qty:  "0",
     order_count:     "1",
     // Private inputs
     market_id:   hexToByteArray(marketId, 32),
@@ -226,7 +227,7 @@ async function main(): Promise<void> {
 
   process.stderr.write(
     `[generateTestProof] Done. Proof: ${proofData.proof.length} bytes, ` +
-    `Public inputs: ${publicInputsHex.length} (expected 53 = 37 circuit + 16 pairing)\n`,
+    `Public inputs: ${publicInputsHex.length}\n`,
   );
 
   // ── Encode for vm.ffi ──────────────────────────────────────────────────────

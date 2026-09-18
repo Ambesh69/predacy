@@ -20,6 +20,7 @@ interface OrderFormProps {
   market: Market;
   marketId: `0x${string}`;
   batchOpen: boolean;
+  tradingDisabledReason?: string;
   onSubmit: (params: {
     commitment: `0x${string}`;
     amount: bigint;
@@ -73,6 +74,7 @@ export default function OrderForm({
   market,
   marketId,
   batchOpen,
+  tradingDisabledReason,
   onSubmit,
   walletAddress,
   isConnected,
@@ -260,7 +262,7 @@ export default function OrderForm({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isConnected || !batchOpen) return;
+    if (!isConnected || !batchOpen || tradingDisabledReason) return;
     setIsSubmitting(true);
     setError(null);
     try {
@@ -585,7 +587,12 @@ export default function OrderForm({
 
           {/* Submit */}
           <div className="px-3 pb-3">
-            {!isConnected ? (
+            {tradingDisabledReason ? (
+              <button type="button" disabled
+                className="w-full py-3 border border-border text-muted text-xs tracking-widest uppercase cursor-not-allowed">
+                {tradingDisabledReason}
+              </button>
+            ) : !isConnected ? (
               <button type="button" onClick={onConnect}
                 className="w-full py-3 border border-border-bright text-text text-xs tracking-widest uppercase hover:border-text/30 transition-colors">
                 Connect Wallet
@@ -805,7 +812,12 @@ export default function OrderForm({
 
           {/* Submit — always visible, no scroll */}
           <div className="px-3 pb-3">
-            {!isConnected ? (
+            {tradingDisabledReason ? (
+              <button type="button" disabled
+                className="w-full py-3 border border-border text-muted text-xs tracking-widest uppercase cursor-not-allowed">
+                {tradingDisabledReason}
+              </button>
+            ) : !isConnected ? (
               <button type="button" onClick={onConnect}
                 className="w-full py-3 border border-border-bright text-text text-xs tracking-widest uppercase hover:border-text/30 transition-colors">
                 Connect Wallet

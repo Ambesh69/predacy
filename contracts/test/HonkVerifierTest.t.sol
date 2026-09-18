@@ -109,12 +109,12 @@ contract HonkVerifierTest is Test {
     // ─── Real ZK proof test (requires --ffi) ─────────────────────────────────
 
     /**
-     * @notice FULL ZK PIPELINE TEST — generates a real UltraHonk proof for an empty
-     *         batch and verifies it on-chain with the split HonkVerifier.
+     * @notice FULL ZK PIPELINE TEST — generates a real UltraHonk proof for a
+     *         single-order batch and verifies it on-chain with HonkVerifier.
      *
      * Calls relayer/scripts/generateTestProof.ts via vm.ffi. The script:
      *   1. Loads circuits/batch_clearing/target/batch_clearing.json
-     *   2. Executes the circuit with a trivial empty-batch witness (0 orders)
+     *   2. Executes the circuit with a single YES buy order
      *   3. Generates an UltraHonk proof with `bb` (evm target)
      *   4. ABI-encodes (bytes proof, bytes32[] publicInputs) and writes to stdout
      *
@@ -122,11 +122,13 @@ contract HonkVerifierTest is Test {
      *
      * Run with: forge test --match-test test_realProof --ffi -vv
      */
-    function test_realProof_emptyBatch() public {
+    function test_realProof_singleOrder() public {
         // Script path is relative to contracts/ (where forge test runs)
-        string[] memory args = new string[](2);
-        args[0] = "../relayer/node_modules/.bin/tsx";
-        args[1] = "../relayer/scripts/generateTestProof.ts";
+        string[] memory args = new string[](4);
+        args[0] = "node";
+        args[1] = "--import";
+        args[2] = "../relayer/node_modules/tsx/dist/loader.mjs";
+        args[3] = "../relayer/scripts/generateTestProof.ts";
 
         emit log_string("[HonkVerifierTest] Calling generateTestProof.ts via vm.ffi...");
         emit log_string("  This may take 1-5 minutes depending on hardware.");
@@ -144,9 +146,9 @@ contract HonkVerifierTest is Test {
 
         assertGt(proof.length, 0, "Proof should not be empty");
         // HonkVerifier.verify() expects publicInputs.length == vk.publicInputsSize - PAIRING_POINTS_SIZE
-        // = 53 - 16 = 37.  The 16 pairing points are embedded in the first 512 bytes of the proof itself
+        // = 54 - 16 = 38.  The 16 pairing points are embedded in the first 512 bytes of the proof itself
         // and extracted by loadProof(); they are NOT passed separately in the publicInputs array.
-        assertEq(publicInputs.length, 37, "Expected 37 circuit public inputs (pairing points are in proof bytes)");
+        assertEq(publicInputs.length, 38, "Expected 38 circuit public inputs (pairing points are in proof bytes)");
 
         // ── THE KEY ASSERTION ─────────────────────────────────────────────────
         // If this passes, the entire ZK pipeline is working end-to-end:
