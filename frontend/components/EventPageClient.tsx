@@ -36,6 +36,7 @@ import {
 } from "@/lib/chain";
 import { publicClient } from "@/lib/publicClient";
 import { usePostHog } from "posthog-js/react";
+import { getPrivateContracts } from "@/lib/privateContracts";
 
 // USDC.e on Polygon mainnet uses EIP712Domain with `salt` (bytes32 chainId) instead
 // of `chainId` (uint256). Testnet MockUSDC uses the standard chainId domain.
@@ -478,6 +479,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
   const wallet        = wallets[0];
   const walletAddress = wallet?.address as `0x${string}` | undefined;
   const isConnected   = authenticated && !!walletAddress;
+  const privateDeployment = IS_MAINNET ? getPrivateContracts() : null;
 
   // ── Stuck USDC background scan ───────────────────────────────────────────────
   // On mount (and every 60s while connected), look for buy orders that were saved
@@ -1198,7 +1200,46 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     if (!selectedMarket) return;
     setChainError(null);
     if (IS_MAINNET) {
-      throw new Error("Trading is temporarily unavailable while the Polymarket settlement integration is upgraded.");
+      if (!privateDeployment) throw new Error("Private trading is not configured yet.");
+      if (params.side !== YES_BUY && params.side !== NO_BUY) {
+        throw new Error("Private v12 currently supports BUY YES and BUY NO only.");
+      }
+      if (!wallet || !walletAddress) throw new Error("Connect a wallet before trading.");
+      const tokenIndex = params.side === YES_BUY ? 0 : 1;
+      const tokenId = selectedMarket.clobTokenIds?.[tokenIndex] ?? selectedMarket.tokens?.[tokenIndex]?.token_id;
+      if (!tokenId || !/^\d+$/.test(tokenId)) throw new Error("This market has no tradeable outcome token.");
+      const depositWallet = process.env.NEXT_PUBLIC_V12_DEPOSIT_WALLET?.trim();
+      if (!depositWallet || !/^0x[0-9a-fA-F]{40}$/.test(depositWallet)) {
+        throw new Error("Private Deposit Wallet is not configured.");
+      }
+      const tick = Number(selectedMarket.orderPriceMinTickSize ?? 0.01);
+      const provider = await wallet.getEthereumProvider();
+      const message = `Predacy private vault v1\nWallet: ${walletAddress.toLowerCase()}\nChain: ${ACTIVE_CHAIN.id}\nPool: ${privateDeployment.pool.toLowerCase()}`;
+      const vaultSignature = await provider.request({
+        method: "personal_sign", params: [message, walletAddress],
+      }) as `0x${string}`;
+      const contracts = getContracts(ACTIVE_CHAIN.id);
+      try {
+        const { executePrivateBuy } = await import("@/lib/privateTradeFlow");
+        await executePrivateBuy({
+          provider,
+          wallet: walletAddress,
+          vaultSignature,
+          usdc: contracts.usdc,
+          depositWallet: depositWallet as `0x${string}`,
+          marketId: selectedMarket.conditionId as `0x${string}`,
+          positionTokenId: BigInt(tokenId),
+          priceTick: BigInt(Math.round(tick * 1_000_000)),
+          amount: params.amount,
+          limitPrice: params.limitPrice,
+          side: params.side === YES_BUY ? "YES" : "NO",
+          onStep: (step) => setSubmitStep(step === "depositing" ? "approving" : "signing"),
+        });
+        setOrderSealed(true);
+      } finally {
+        setSubmitStep(null);
+      }
+      return;
     }
     await assertTradingReady();
     posthog?.capture("order_submitted", {
@@ -1974,8 +2015,9 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                       <OrderForm
                         market={selectedMarket}
                         marketId={selectedMarket.conditionId as `0x${string}`}
-                        batchOpen={batch.status === BatchStatus.OPEN}
-                        tradingDisabledReason={IS_MAINNET ? "Trading temporarily unavailable" : undefined}
+                        batchOpen={privateDeployment ? true : batch.status === BatchStatus.OPEN}
+                        tradingDisabledReason={IS_MAINNET && !privateDeployment ? "Private trading temporarily unavailable" : undefined}
+                        buyOnly={!!privateDeployment}
                         onSubmit={async (p) => {
                           setOrderSealed(false);
                           setSubmitStep(null);

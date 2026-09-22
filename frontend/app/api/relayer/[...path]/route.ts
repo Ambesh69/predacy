@@ -8,6 +8,7 @@
  * Supports: GET, POST (the only methods the frontend needs).
  */
 import { NextRequest, NextResponse } from "next/server";
+import { createHmac } from "node:crypto";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60; // Vercel Pro: allow up to 60 s for this serverless function
@@ -41,6 +42,21 @@ async function proxyRequest(
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
     };
+
+    if (path === "v12/private-order") {
+      const secret = process.env.RELAYER_PROXY_SECRET?.trim();
+      const country = req.headers.get("x-vercel-ip-country")?.toUpperCase() ?? "";
+      const region = req.headers.get("x-vercel-ip-country-region")?.toUpperCase() ?? "";
+      if (!secret || secret.length < 32 || !/^[A-Z]{2}$/.test(country) || !/^[A-Z0-9-]{0,8}$/.test(region)) {
+        return NextResponse.json({ error: "Geographic eligibility could not be verified" }, { status: 403 });
+      }
+      const timestamp = Date.now().toString();
+      headers["X-Predacy-Country"] = country;
+      headers["X-Predacy-Region"] = region;
+      headers["X-Predacy-Geo-Timestamp"] = timestamp;
+      headers["X-Predacy-Geo-Signature"] = createHmac("sha256", secret)
+        .update(`${country}:${region}:${timestamp}`).digest("hex");
+    }
 
     // Forward X-Signature if present (used by some relayer endpoints)
     const sig = req.headers.get("x-signature");

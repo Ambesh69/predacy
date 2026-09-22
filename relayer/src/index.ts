@@ -1,7 +1,10 @@
 import "dotenv/config";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { createPublicClient, http, fallback, parseAbiItem, recoverMessageAddress, encodeFunctionData } from "viem";
+import {
+  createPublicClient, http, fallback, parseAbi, parseAbiItem, recoverMessageAddress, encodeFunctionData,
+  getAddress,
+} from "viem";
 import { polygon, polygonAmoy } from "viem/chains";
 import { privateKeyToAccount } from "viem/accounts";
 import { createWalletClient } from "viem";
@@ -9,6 +12,9 @@ import { BatchProcessor, BATCH_VAULT_ABI, type RelayerConfig, type RequeueResult
 import { ZKClaimProver } from "./zkClaimProver.js";
 import { ProxyWalletManager } from "./proxyWalletManager.js";
 import { isAdminAuthorized } from "./adminAuth.js";
+import { parseV12QueuedBuyOrder, PostgresV12OrderQueue } from "./v12OrderQueue.js";
+import { v12OrderCommitment } from "./v12BuyBatchProver.js";
+import { assertV12GeoEligible } from "./v12GeoEligibility.js";
 
 // ── Environment ───────────────────────────────────────────────────────────────
 const missingVars = ["VAULT_ADDRESS", "RELAYER_PRIVATE_KEY"].filter((v) => !process.env[v]);
@@ -253,6 +259,16 @@ interface V11RecoveryJob {
   createdAt: number;
 }
 const v11RecoveryJobs = new Map<string, V11RecoveryJob>();
+const v12ExecutionJobs = new Map<string, V11RecoveryJob>();
+let v12OrderQueue: Promise<PostgresV12OrderQueue> | null = null;
+
+function privateOrderQueue(): Promise<PostgresV12OrderQueue> {
+  const databaseUrl = process.env.V12_DATABASE_URL?.trim();
+  const key = process.env.V12_JOURNAL_KEY?.trim();
+  if (!databaseUrl || !key) throw new Error("V12_DATABASE_URL and V12_JOURNAL_KEY are required");
+  v12OrderQueue ??= PostgresV12OrderQueue.connect(databaseUrl, key);
+  return v12OrderQueue;
+}
 
 function runV11RecoveryCommand(script: "reconcile:v11" | "run:v11", batchId: string, manifest: unknown) {
   return new Promise<void>((resolve, reject) => {
@@ -272,11 +288,31 @@ function runV11RecoveryCommand(script: "reconcile:v11" | "run:v11", batchId: str
     )));
   });
 }
+
+function runV12Execution(batchId: string) {
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn("npm", ["run", "run:v12", "--", "--execute", batchId], {
+      cwd: process.cwd(), env: process.env, stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    const append = (chunk: Buffer) => { output = (output + chunk.toString("utf8")).slice(-4_000); };
+    child.stdout.on("data", append);
+    child.stderr.on("data", append);
+    child.on("error", reject);
+    child.on("exit", (code) => code === 0 ? resolve() : reject(new Error(
+      output.match(/V12 execution halted: ([^.]+(?:\.[^.]+)*)\./)?.[1] ??
+      output.trim().split("\n").at(-1) ?? `run:v12 exited with code ${code}`,
+    )));
+  });
+}
 // Evict jobs older than 30 min to prevent unbounded memory growth
 setInterval(() => {
   const cutoff = Date.now() - 30 * 60 * 1000;
   for (const [id, job] of claimJobs) {
     if (job.createdAt < cutoff) claimJobs.delete(id);
+  }
+  for (const [id, job] of v12ExecutionJobs) {
+    if (job.createdAt < cutoff) v12ExecutionJobs.delete(id);
   }
 }, 15 * 60 * 1000).unref();
 
@@ -635,6 +671,99 @@ const server = createServer((req, res) => {
         }
       } catch (e: any) {
         send(400, { error: e.message });
+      }
+    });
+    return;
+  }
+
+  // POST /v12/private-order
+  // The browser has already generated the order proof and locked its commitment on-chain.
+  // This endpoint stores only the execution witness, encrypted at rest, and waits for exactly
+  // two compatible orders before starting the resumable aggregate runner.
+  if (req.method === "POST" && req.url === "/v12/private-order") {
+    if (chainId !== polygon.id) { send(503, { error: "V12 private orders require Polygon mainnet" }); return; }
+    try {
+      assertV12GeoEligible(req.headers, process.env.RELAYER_PROXY_SECRET ?? "");
+    } catch (error) {
+      send(403, { error: error instanceof Error ? error.message : "Geographic eligibility failed" });
+      return;
+    }
+    let body = "";
+    req.on("data", (chunk) => { body += chunk; if (body.length > 64_000) req.destroy(); });
+    req.on("end", async () => {
+      try {
+        const data = JSON.parse(body) as Record<string, unknown>;
+        const order = parseV12QueuedBuyOrder(data);
+        const pool = getAddress(process.env.V12_POOL_ADDRESS ?? "");
+        const expectedWallet = getAddress(process.env.V12_DEPOSIT_WALLET ?? "");
+        if (getAddress(order.depositWallet) !== expectedWallet) throw new Error("V12 Deposit Wallet mismatch");
+        const commitment = v12OrderCommitment(order.order, order.positionAsset);
+        if (typeof data.orderCommitment !== "string" || data.orderCommitment.toLowerCase() !== commitment.toLowerCase()) {
+          throw new Error("V12 order commitment does not match its private execution witness");
+        }
+        const poolAbi = parseAbi([
+          "function paused() view returns (bool)",
+          "function collateralAssetId() view returns (bytes32)",
+          "function positionAssetId(uint256) view returns (bytes32)",
+          "function lockedOrderAsset(bytes32) view returns (bytes32)",
+          "function settledOrders(bytes32) view returns (bool)",
+        ]);
+        const [paused, collateralAsset, positionAsset, lockedAsset, settled] = await Promise.all([
+          publicClient.readContract({ address: pool, abi: poolAbi, functionName: "paused" }),
+          publicClient.readContract({ address: pool, abi: poolAbi, functionName: "collateralAssetId" }),
+          publicClient.readContract({ address: pool, abi: poolAbi, functionName: "positionAssetId", args: [order.positionTokenId] }),
+          publicClient.readContract({ address: pool, abi: poolAbi, functionName: "lockedOrderAsset", args: [commitment] }),
+          publicClient.readContract({ address: pool, abi: poolAbi, functionName: "settledOrders", args: [commitment] }),
+        ]);
+        if (paused || settled || collateralAsset.toLowerCase() !== order.collateralAsset.toLowerCase() ||
+            positionAsset.toLowerCase() !== order.positionAsset.toLowerCase() ||
+            lockedAsset.toLowerCase() !== order.positionAsset.toLowerCase()) {
+          throw new Error("V12 order is not an active lock for the configured pool and outcome");
+        }
+        const queue = await privateOrderQueue();
+        const queued = await queue.enqueue(order);
+        const batch = await queue.assemble(queued.groupKey);
+        if (!batch) { send(202, { state: "queued", orderCommitment: commitment }); return; }
+        const jobId = batch.batchId.toLowerCase();
+        if (!v12ExecutionJobs.has(jobId)) {
+          v12ExecutionJobs.set(jobId, { status: "pending", step: "execute", createdAt: Date.now() });
+          void runV12Execution(batch.batchId).then(
+            () => v12ExecutionJobs.set(jobId, { status: "done", step: "complete", createdAt: Date.now() }),
+            (error) => v12ExecutionJobs.set(jobId, { status: "error", step: "execute",
+              error: error instanceof Error ? error.message : "V12 execution failed", createdAt: Date.now() }),
+          );
+        }
+        send(202, { state: "batched", orderCommitment: commitment, batchId: batch.batchId, jobId });
+      } catch (error) {
+        send(400, { error: error instanceof Error ? error.message : "Invalid v12 private order" });
+      }
+    });
+    return;
+  }
+
+  if (req.method === "GET" && req.url?.startsWith("/v12/status/")) {
+    const jobId = req.url.slice("/v12/status/".length).toLowerCase();
+    const job = v12ExecutionJobs.get(jobId);
+    send(job ? 200 : 404, job ?? { error: "V12 execution job not found" });
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/v12/private-receipt") {
+    let body = "";
+    req.on("data", (chunk) => { body += chunk; if (body.length > 4_096) req.destroy(); });
+    req.on("end", async () => {
+      try {
+        const data = JSON.parse(body) as { orderCommitment?: string; receiptToken?: string };
+        if (!data.orderCommitment || !data.receiptToken) throw new Error("Missing v12 receipt credentials");
+        const receipt = await (await privateOrderQueue()).getReceipt(
+          data.orderCommitment as `0x${string}`, data.receiptToken as `0x${string}`,
+        );
+        send(200, receipt ? {
+          state: "settled", spent: receipt.spent.toString(), shares: receipt.shares.toString(),
+          refund: receipt.refund.toString(),
+        } : { state: "pending" });
+      } catch (error) {
+        send(400, { error: error instanceof Error ? error.message : "Invalid v12 receipt request" });
       }
     });
     return;
@@ -1330,6 +1459,9 @@ server.listen(PORT, () => {
   console.log(`[Relayer]   GET  /health                               — liveness check`);
   console.log(`[Relayer]   POST /warm                                 — pre-open a batch for a market (fire-and-forget)`);
   console.log(`[Relayer]   POST /order                                — submit off-chain order details (include marketId)`);
+  console.log(`[Relayer]   POST /v12/private-order                    — queue a proof-locked private buy`);
+  console.log(`[Relayer]   GET  /v12/status/:batchId                  — private batch execution status`);
+  console.log(`[Relayer]   POST /v12/private-receipt                  — authenticated private allocation receipt`);
   console.log(`[Relayer]   GET  /order-status/:commitment             — requeue/failure status for a commitment (frontend polling)`);
   console.log(`[Relayer]   GET  /history/:walletAddress              — cross-device order history (indexed by real wallet)`);
   console.log(`[Relayer]   POST /claim-proof                          — generate ZK claim proof and submit claimWithProof()`);

@@ -9,6 +9,7 @@ import BatchTimer from "@/components/BatchTimer";
 import CommitmentFeed from "@/components/CommitmentFeed";
 import OrderForm from "@/components/OrderForm";
 import PositionsPanel from "@/components/PositionsPanel";
+import PrivatePositionsPanel from "@/components/PrivatePositionsPanel";
 import PriceChart from "@/components/PriceChart";
 import WalletButton from "@/components/WalletButton";
 import BrandMark from "@/components/BrandMark";
@@ -33,6 +34,8 @@ import {
 } from "@/lib/chain";
 import { publicClient } from "@/lib/publicClient";
 import { clsx } from "clsx";
+import { getPrivateContracts } from "@/lib/privateContracts";
+import type { PrivateOrderRecord } from "@/lib/privateNotes";
 
 // ── Viem public client (read-only, no wallet needed) ─────────────────────────
 
@@ -133,6 +136,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   const [railgunBalance, setRailgunBalance] = useState<bigint>(0n);
   const [faucetLoading, setFaucetLoading] = useState(false);
   const [chainError, setChainError]   = useState<string | null>(null);
+  const [privateStatus, setPrivateStatus] = useState<string | null>(null);
   const [activeTab, setActiveTab]     = useState<"order" | "positions">("order");
   const [position, setPosition]       = useState<{
     filledAmount: bigint;
@@ -149,6 +153,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   const wallet        = wallets[0];
   const walletAddress = wallet?.address as `0x${string}` | undefined;
   const isConnected   = authenticated && !!walletAddress;
+  const privateDeployment = IS_MAINNET ? getPrivateContracts() : null;
 
   // Track the best available provider's chain via EIP-6963 / window.ethereum events.
   const [rawChainId, setRawChainId]   = useState<string | null>(null);
@@ -170,6 +175,36 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   }, [isConnected]);
 
   const onWrongChain = isConnected && rawChainId !== null && rawChainId.toLowerCase() !== ACTIVE_CHAIN_ID_HEX;
+
+  const unlockPrivateVault = async (): Promise<`0x${string}`> => {
+    if (!wallet || !walletAddress || !privateDeployment) throw new Error("Connect the private trading wallet first");
+    const provider = await wallet.getEthereumProvider();
+    const message = `Predacy private vault v1\nWallet: ${walletAddress.toLowerCase()}\nChain: ${ACTIVE_CHAIN.id}\nPool: ${privateDeployment.pool.toLowerCase()}`;
+    return provider.request({ method: "personal_sign", params: [message, walletAddress] }) as Promise<`0x${string}`>;
+  };
+
+  const withdrawPrivateOutput = async (order: PrivateOrderRecord, output: "refund" | "position") => {
+    if (!wallet || !walletAddress) throw new Error("Connect the private trading wallet first");
+    const { withdrawPrivateOrderOutput } = await import("@/lib/privateTradeFlow");
+    await withdrawPrivateOrderOutput({
+      provider: await wallet.getEthereumProvider(),
+      wallet: walletAddress,
+      vaultSignature: await unlockPrivateVault(),
+      order,
+      output,
+    });
+  };
+
+  const cancelPrivateQueuedOrder = async (order: PrivateOrderRecord) => {
+    if (!wallet || !walletAddress) throw new Error("Connect the private trading wallet first");
+    const { cancelPrivateOrder } = await import("@/lib/privateTradeFlow");
+    await cancelPrivateOrder({
+      provider: await wallet.getEthereumProvider(),
+      wallet: walletAddress,
+      vaultSignature: await unlockPrivateVault(),
+      order,
+    });
+  };
 
   // ── Pre-warm: open a batch for this market before the user submits an order ──
   useEffect(() => {
@@ -213,6 +248,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   // disconnect→reconnect cycle) so the banner clears in either case.
   useEffect(() => {
     setChainError(null);
+    setPrivateStatus(null);
   }, [walletAddress, authenticated]);
 
   // ── Fetch on-chain commitment feed via getLogs ───────────────────────────────
@@ -539,7 +575,52 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
   }) => {
     setChainError(null);
     if (IS_MAINNET) {
-      throw new Error("Trading is temporarily unavailable while the Polymarket settlement integration is upgraded.");
+      if (!privateDeployment) {
+        throw new Error("Private trading is not configured yet.");
+      }
+      if (params.side !== YES_BUY && params.side !== 2) {
+        throw new Error("Private v12 currently supports BUY YES and BUY NO only.");
+      }
+      if (!walletAddress || !wallet || !market || !/^0x[0-9a-fA-F]{64}$/.test(id)) {
+        throw new Error("Connect a wallet and reload this market before trading.");
+      }
+      const tokenIndex = params.side === YES_BUY ? 0 : 1;
+      const tokenId = market.clobTokenIds?.[tokenIndex] ?? market.tokens?.[tokenIndex]?.token_id;
+      if (!tokenId || !/^\d+$/.test(tokenId)) throw new Error("This market has no tradeable Polymarket outcome token.");
+      const depositWallet = process.env.NEXT_PUBLIC_V12_DEPOSIT_WALLET?.trim();
+      if (!depositWallet || !/^0x[0-9a-fA-F]{40}$/.test(depositWallet)) {
+        throw new Error("Private Deposit Wallet is not configured.");
+      }
+      const tick = Number(market.orderPriceMinTickSize ?? 0.01);
+      if (!Number.isFinite(tick) || tick <= 0) throw new Error("This market has an invalid price tick.");
+      const provider = await wallet.getEthereumProvider();
+      const vaultSignature = await unlockPrivateVault();
+      const contracts = getContracts(ACTIVE_CHAIN.id);
+      let result: { queueState: "queued" | "batched" };
+      try {
+        const { executePrivateBuy } = await import("@/lib/privateTradeFlow");
+        result = await executePrivateBuy({
+          provider,
+          wallet: walletAddress,
+          vaultSignature,
+          usdc: contracts.usdc,
+          depositWallet: depositWallet as `0x${string}`,
+          marketId: id as `0x${string}`,
+          positionTokenId: BigInt(tokenId),
+          priceTick: BigInt(Math.round(tick * 1_000_000)),
+          amount: params.amount,
+          limitPrice: params.limitPrice,
+          side: params.side === YES_BUY ? "YES" : "NO",
+          onStep: (step) => setSubmitStep(step === "depositing" ? "approving" : "signing"),
+        });
+      } finally {
+        setSubmitStep(null);
+      }
+      setActiveTab("positions");
+      setPrivateStatus(result.queueState === "queued"
+        ? "Private order locked and waiting for a compatible second order."
+        : "Private order batched. Settlement is running.");
+      return;
     }
     await assertTradingReady();
     const contracts = getContracts(ACTIVE_CHAIN.id);
@@ -1091,6 +1172,12 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
           <button onClick={() => setChainError(null)} className="text-danger/60 hover:text-danger text-xs">✕</button>
         </div>
       )}
+      {privateStatus && (
+        <div className="border-b border-accent/30 bg-accent/5 px-4 md:px-6 py-2 flex items-center justify-between gap-4">
+          <p className="text-accent text-xs">{privateStatus}</p>
+          <button onClick={() => setPrivateStatus(null)} className="text-accent/60 hover:text-accent text-xs">Close</button>
+        </div>
+      )}
 
       {/* (Market mismatch banner removed — each market now has its own batch slot) */}
 
@@ -1254,17 +1341,27 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
           {activeTab === "positions" ? (
             /* My Positions panel — multi-batch history + claim */
             isConnected && walletAddress ? (
-              <PositionsPanel
-                walletAddress={walletAddress}
-                currentBatchId={batch.batchId}
-                currentBatchStatus={batch.status}
-                currentBatchClearingPrice={batch.clearingPrice}
-                currentBatchCommitments={commitments
-                  .filter((c) => c.trader === walletAddress)
-                  .map((c) => ({ hash: c.hash, amount: c.amount }))}
-                onClaim={handleClaimPosition}
-                onMarketIdsFound={setHistoricalMarketIds}
-              />
+              privateDeployment ? (
+                <PrivatePositionsPanel
+                  wallet={walletAddress}
+                  marketId={id}
+                  unlock={unlockPrivateVault}
+                  withdraw={withdrawPrivateOutput}
+                  cancel={cancelPrivateQueuedOrder}
+                />
+              ) : (
+                <PositionsPanel
+                  walletAddress={walletAddress}
+                  currentBatchId={batch.batchId}
+                  currentBatchStatus={batch.status}
+                  currentBatchClearingPrice={batch.clearingPrice}
+                  currentBatchCommitments={commitments
+                    .filter((c) => c.trader === walletAddress)
+                    .map((c) => ({ hash: c.hash, amount: c.amount }))}
+                  onClaim={handleClaimPosition}
+                  onMarketIdsFound={setHistoricalMarketIds}
+                />
+              )
             ) : (
               <div className="flex-1 flex flex-col items-center justify-center gap-3 p-6">
                 <p className="text-muted text-xs text-center">Connect your wallet to view positions</p>
@@ -1453,9 +1550,10 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
               )}
               <OrderForm
                 market={market}
-                marketId={batch.batchMarketId}
-                batchOpen={batch.status === BatchStatus.OPEN}
-                tradingDisabledReason={IS_MAINNET ? "Trading temporarily unavailable" : undefined}
+                marketId={(privateDeployment ? id : batch.batchMarketId) as `0x${string}`}
+                batchOpen={privateDeployment ? true : batch.status === BatchStatus.OPEN}
+                tradingDisabledReason={IS_MAINNET && !privateDeployment ? "Private trading temporarily unavailable" : undefined}
+                buyOnly={!!privateDeployment}
                 onSubmit={handleOrderSubmit}
                 walletAddress={walletAddress}
                 isConnected={isConnected}

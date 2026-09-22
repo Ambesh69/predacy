@@ -21,6 +21,18 @@ contracts/broadcast/
 contracts/v11-verifier/out/
 contracts/v11-verifier/cache/
 contracts/v11-verifier/broadcast/
+contracts/shielded-withdraw-verifier/out/
+contracts/shielded-withdraw-verifier/cache/
+contracts/shielded-withdraw-verifier/broadcast/
+contracts/shielded-transfer-verifier/out/
+contracts/shielded-transfer-verifier/cache/
+contracts/shielded-transfer-verifier/broadcast/
+contracts/shielded-order-verifier/out/
+contracts/shielded-order-verifier/cache/
+contracts/shielded-order-verifier/broadcast/
+contracts/shielded-buy-batch-verifier/out/
+contracts/shielded-buy-batch-verifier/cache/
+contracts/shielded-buy-batch-verifier/broadcast/
 
 # Noir — ignore generated artifacts but keep compiled circuit JSON for Railway
 circuits/**/Prover.toml

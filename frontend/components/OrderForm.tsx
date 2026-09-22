@@ -21,6 +21,7 @@ interface OrderFormProps {
   marketId: `0x${string}`;
   batchOpen: boolean;
   tradingDisabledReason?: string;
+  buyOnly?: boolean;
   onSubmit: (params: {
     commitment: `0x${string}`;
     amount: bigint;
@@ -75,6 +76,7 @@ export default function OrderForm({
   marketId,
   batchOpen,
   tradingDisabledReason,
+  buyOnly = false,
   onSubmit,
   walletAddress,
   isConnected,
@@ -388,17 +390,19 @@ export default function OrderForm({
         >
           Buy
         </button>
-        <button
-          type="button"
-          onClick={() => setMode("sell")}
-          className={clsx(
-            "px-4 py-2.5 text-[11px]",
-            "tracking-widest uppercase font-medium border-b-2 border-l border-border transition-colors",
-            mode === "sell" ? "border-danger text-danger" : "border-transparent text-muted hover:text-text"
-          )}
-        >
-          Sell
-        </button>
+        {!buyOnly && (
+          <button
+            type="button"
+            onClick={() => setMode("sell")}
+            className={clsx(
+              "px-4 py-2.5 text-[11px]",
+              "tracking-widest uppercase font-medium border-b-2 border-l border-border transition-colors",
+              mode === "sell" ? "border-danger text-danger" : "border-transparent text-muted hover:text-text"
+            )}
+          >
+            Sell
+          </button>
+        )}
         {/* Market | Limit — right side of same bar */}
         <div className="ml-auto flex items-stretch border-l border-border">
           <button

@@ -12,7 +12,8 @@
     "prepare:v11": "tsx scripts/v11PreparePilot.ts",
     "pilot:wallet:v11": "tsx scripts/v11PilotWalletServer.ts",
     "reconcile:v11": "tsx scripts/v11ReconcileRejected.ts",
-    "run:v11": "tsx scripts/v11RunSingleOrder.ts"
+    "run:v11": "tsx scripts/v11RunSingleOrder.ts",
+    "run:v12": "tsx scripts/v12RunBuyBatch.ts"
   },
   "engines": {
     "node": ">=24"
