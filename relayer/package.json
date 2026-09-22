@@ -14,6 +14,7 @@
     "reconcile:v11": "tsx scripts/v11ReconcileRejected.ts",
     "run:v11": "tsx scripts/v11RunSingleOrder.ts",
     "run:v12": "tsx scripts/v12RunBuyBatch.ts",
+    "preflight:deploy:v12": "tsx scripts/v12DeploymentPreflight.ts",
     "preflight:v12": "tsx scripts/v12Preflight.ts",
     "rehearse:recovery:v12": "tsx scripts/v12RecoveryRehearsal.ts"
   },

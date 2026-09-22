@@ -158,8 +158,22 @@ state, and the Polymarket Deposit Wallet identity.
    before enabling production trading. An internal test pass is not independent
    review.
 
-All deployment scripts fail before `startBroadcast` when Polygon's current base
-fee exceeds `V12_MAX_GAS_PRICE_WEI` (5 gwei by default). Do not override this cap
-without a new explicit POL budget. A failed September 2026 attempt sent only
-Foundry's preparatory CREATE2 transaction; no v12 verifier, pool, or adapter was
-deployed.
+Before broadcasting, run `npm run preflight:deploy:v12` from `relayer` with
+`PRIVATE_KEY` (or the configured v12/legacy relayer key), `RPC_URL`, and an
+explicitly authorized `V12_DEPLOYMENT_BUDGET_POL`. The preflight detects the deployed transcript library
+and verifier addresses, prices the measured remaining gas with a 10% margin, and
+fails unless both the budget and deployer balance cover it.
+
+All deployment scripts also fail before `startBroadcast` when either Polygon's
+base fee or the effective transaction gas price exceeds
+`V12_MAX_GAS_PRICE_WEI` (5 gwei by default). Pass the same value to Forge with
+`--gas-price`, and set `FOUNDRY_PROFILE=mainnet` for every verifier broadcast so
+the existing transcript library is reused. Never override the cap without a new
+explicit POL budget.
+
+The September 2026 attempt successfully deployed the withdrawal circuit's
+reusable `ZKTranscriptLib` at `0x9a2abcf4ca811335cff4ed1b1d0d4d4034889350`.
+All four verifier projects use its byte-for-byte identical library source and
+the `mainnet` Foundry profile links them to this shared address. The withdrawal
+verifier transaction itself was not broadcast. The remaining measured deployment
+is 25,458,834 gas before the safety margin.
