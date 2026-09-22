@@ -2,10 +2,12 @@
 
 Private sealed-bid batch auction layer on top of [Polymarket](https://polymarket.com).
 
-**Launch status:** Mainnet intake is closed. V13 is implemented and tested but
-not deployed. It replaces v12's publicly linkable per-market order commitments
-with generic order notes, secret-derived nullifiers, and private refund/position
-allocations. See [the v13 architecture and launch gate](docs/private-v13.md).
+**Launch status:** Mainnet intake is closed. V13 is deployed on Polygon in a
+paused state and its Railway chain/database preflight passes. It replaces v12's
+publicly linkable per-market order commitments with generic order notes,
+secret-derived nullifiers, and private refund/position allocations. An
+independent security review and live recovery pilot are still required before
+intake opens. See [the v13 architecture and launch gate](docs/private-v13.md).
 
 V13 retains Polymarket for aggregate execution. Individual order market, side,
 size, limit, fill, and wallet linkage are hidden from public batch settlement.

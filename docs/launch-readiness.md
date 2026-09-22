@@ -1,9 +1,9 @@
 # Mainnet launch gate
 
-Status: **closed for new mainnet orders**. V13 is implemented and locally
-verified, but no v13 contract is deployed. Production still points at the
-paused legacy deployment and no v13 recovery pilot or independent review has
-completed.
+Status: **closed for new mainnet orders**. V13 is deployed paused on Polygon
+and configured in Railway. The production release at commit `5c0823b` passed
+the combined v12 recovery and v13 chain/database pre-deploy gate. No v13 live
+recovery pilot or independent review has completed.
 
 ## Privacy decision
 

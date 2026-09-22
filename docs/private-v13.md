@@ -41,8 +41,27 @@ The implementation is split across:
 
 All four Noir circuits compile and have positive and negative tests. All four
 generated Honk verifier runtimes compile below Polygon's 24,576-byte EIP-170
-limit. The frontend and relayer production builds pass. No v13 contract has been
-deployed and the v13 intake gate defaults disabled.
+limit. The frontend and relayer production builds pass. V13 is deployed paused
+and its intake gate defaults disabled.
+
+## Polygon deployment
+
+The deployment completed at blocks `94272870` through `94272950`. Actual gas
+spend was `6.994017334609227 POL`, below the authorized `10.2 POL` ceiling.
+
+| Component | Address | Transaction |
+|---|---|---|
+| Order verifier | `0x871A551420e197AB1E892B5D66aE78812CB1e983` | `0xfa00ed1a67b1e396d28ad5b422e2c5f26ffb5d9ee6f188219278f8d0a6634555` |
+| Route verifier | `0xFC3bdDd42A2EB878E27ABDB34e7b2b6E59c989da` | `0xe9301afb1b7d1be5b7e4d295bea14be63be403e8736727718f3c7c48ab468265` |
+| Settlement verifier | `0xC69555017793eA0AEA855dabd6c965964D7Ce49B` | `0x21abbaa15d5a936ec27500b7228ff0c2f606062096e6fb2e3b1e9e11ae46f113` |
+| Cancellation verifier | `0xDeaddC734D0A027A2575eBd6dB98b0Ed17f1236C` | `0x0bdb22313d67854e949de32fc6e7963ad1f79ae7629bacd2161dfbc1adf62f14` |
+| Polymarket adapter | `0x67ac865146f2EF2d7f0c9C08e75ED6E641a2390a` | `0x26d84e2ddb3e56fa5fd870c7c2ae1a578b6527a192642b2140298f948112ea38` |
+| ShieldedPoolV2 | `0x66AA268ab8183AdE8081879D030f54Ab6D2b0A1b` | `0xb1dfc10f4304a71a26a489136ce14eeedf91e114da8bd868f0a128b889bc1c45` |
+| Adapter binding | Pool above | `0xfaf65fcedd0f464c13b0cb34c122eb1f8d889f7e79a3c3f34c87b1cc681ee4c3` |
+
+Railway production commit `5c0823b` passed `predeploy:production`, including
+the v13 bytecode/role/pause checks, signer separation, PostgreSQL connectivity,
+and unresolved-journal check. All three v13 launch variables remain `false`.
 
 ## Privacy boundary
 
