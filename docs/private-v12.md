@@ -123,10 +123,10 @@ generated verifier symbols collide when multiple generated verifiers share one
 Solidity compilation unit.
 
 The contracts are intentionally deployed paused by the v12 deployment script.
-Passing tests are not an authorization to enable public trading: deployment,
-an independent security review, and a capped recovery exercise still remain. Private
-order intake now requires a current HMAC-signed Vercel location assertion and
-rejects Polymarket's blocked countries and regions.
+The owner enabled production intake and unpaused the pool on September 23, 2026
+before an independent security review or live recovery exercise was complete.
+Private order intake requires a current HMAC-signed Vercel location assertion
+and rejects Polymarket's blocked countries and regions.
 
 Operational checks:
 
@@ -191,6 +191,7 @@ The paused v12 contracts were deployed on September 23, 2026:
 - Adapter: `0xb13c590614097d2833D4A1Bd404D4Ed10397D764`
 - Pool: `0xfD533100FE8a38Fe7b3cBb49d441AF296bd24B35`
 
-The pool deployed paused and production private intake remains disabled. Railway
-requires both the PostgreSQL recovery rehearsal and `preflight:v12` to pass before
-starting a release.
+The pool deployed paused and was unpaused in transaction
+`0xbac5c9f770859117286154258771d40cce9ef7a1b3483c05adf6debee294c214`.
+Production private intake is enabled. Railway requires both the PostgreSQL
+recovery rehearsal and `preflight:v12` to pass before starting a release.

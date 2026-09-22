@@ -1,8 +1,9 @@
 # Mainnet launch gate
 
-Status: **closed for new mainnet orders**. V12 is deployed on Polygon mainnet,
-but the pool remains paused and private intake remains disabled. Do not open the
-gate until the live recovery exercise and independent review are complete.
+Status: **v12 mainnet intake enabled September 23, 2026**. The owner explicitly
+opened the production gate and unpaused the pool before a live recovery exercise
+or independent security review was complete. Treat this as an elevated-risk
+launch and do not remove the recovery controls or privacy disclosures below.
 
 ## Privacy decision
 
