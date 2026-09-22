@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import { OrderSide, OrderType, type SignedOrder } from "@polymarket/client";
+import { OrderSide, OrderType, WalletType, type SignedOrder } from "@polymarket/client";
 import { prepareV11Order } from "./v11OrderPreparation.js";
-import { submitV11OrderOnce } from "./v11OrderSubmission.js";
+import { submitFundedV11OrderOnce, submitV11OrderOnce } from "./v11OrderSubmission.js";
+import type { DepositWalletClient } from "./depositWalletClient.js";
 import type { V11OrderIntent, V11OrderJournal } from "./v11OrderJournal.js";
 
 const maker = "0x00000000000000000000000000000000000000aa" as const;
@@ -125,9 +126,10 @@ describe("v11 signed CLOB order", () => {
     const journal = new MemoryJournal();
     await journal.prepare("3", "0", signedBuy);
     const postOrder = vi.fn(async () => ({ ok: true, orderId: "order-1", status: "delayed" }));
+    const assertFunding = vi.fn(async () => {});
     const results = await Promise.allSettled([
-      submitV11OrderOnce(journal, { postOrder }, "3", "0"),
-      submitV11OrderOnce(journal, { postOrder }, "3", "0"),
+      submitV11OrderOnce(journal, { postOrder }, "3", "0", assertFunding),
+      submitV11OrderOnce(journal, { postOrder }, "3", "0", assertFunding),
     ]);
     expect(postOrder).toHaveBeenCalledOnce();
     expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
@@ -140,10 +142,10 @@ describe("v11 signed CLOB order", () => {
     const journal = new MemoryJournal();
     await journal.prepare("4", "0", signedBuy);
     const postOrder = vi.fn(async () => { throw new Error("timeout"); });
-    await expect(submitV11OrderOnce(journal, { postOrder }, "4", "0"))
+    await expect(submitV11OrderOnce(journal, { postOrder }, "4", "0", async () => {}))
       .rejects.toThrow(/outcome is uncertain/);
     expect(journal.intent?.state).toBe("uncertain");
-    await expect(submitV11OrderOnce(journal, { postOrder }, "4", "0"))
+    await expect(submitV11OrderOnce(journal, { postOrder }, "4", "0", async () => {}))
       .rejects.toThrow(/duplicate post/);
     expect(postOrder).toHaveBeenCalledOnce();
   });
@@ -152,9 +154,35 @@ describe("v11 signed CLOB order", () => {
     const journal = new MemoryJournal();
     await journal.prepare("5", "0", signedBuy);
     const postOrder = vi.fn(async () => ({ ok: false, code: "INSUFFICIENT_BALANCE" }));
-    await expect(submitV11OrderOnce(journal, { postOrder }, "5", "0"))
+    await expect(submitV11OrderOnce(journal, { postOrder }, "5", "0", async () => {}))
       .rejects.toThrow(/INSUFFICIENT_BALANCE/);
     expect(journal.intent?.state).toBe("rejected");
     expect(postOrder).toHaveBeenCalledOnce();
+  });
+
+  it("does not submit or consume the journal when funding is unconfirmed", async () => {
+    const journal = new MemoryJournal();
+    await journal.prepare("6", "0", signedBuy);
+    const postOrder = vi.fn();
+    await expect(submitV11OrderOnce(journal, { postOrder }, "6", "0", async () => {
+      throw new Error("Deposit Wallet balance is stale");
+    })).rejects.toThrow(/balance is stale/);
+    expect(journal.intent?.state).toBe("prepared");
+    expect(postOrder).not.toHaveBeenCalled();
+  });
+
+  it("rejects a mismatched SDK account before any funding or CLOB call", async () => {
+    const journal = new MemoryJournal();
+    await journal.prepare("7", "0", signedBuy);
+    const client = { account: {
+      wallet: "0x00000000000000000000000000000000000000bb",
+      walletType: WalletType.DEPOSIT_WALLET,
+    } } as unknown as DepositWalletClient;
+    await expect(submitFundedV11OrderOnce(journal, client, "7", "0", {
+      rpcUrl: "https://polygon.invalid", tokenAddress: maker, exchange: maker,
+      asset: "COLLATERAL", startingBalance: 0n, incomingAmount: 400_000n,
+      orderAmount: 400_000n,
+    })).rejects.toThrow(/does not belong/);
+    expect(journal.intent?.state).toBe("prepared");
   });
 });

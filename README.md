@@ -8,9 +8,10 @@ matches settle publicly on Polygon, so hiding market, side, size, and fills
 requires a different execution architecture or a narrower privacy promise.
 See [the launch gate](docs/launch-readiness.md).
 
-The selected direction is a new private execution architecture. The first
-research circuit is [private_match_v1](circuits/private_match_v1/README.md);
-it is not a live venue, vault, or funded trading path.
+The selected engineering direction is to restore user-funded Deposit Wallet
+execution and exact-fill settlement, then decide whether the narrower privacy
+boundary is acceptable. The [private_match_v1](circuits/private_match_v1/README.md)
+research circuit is not a live venue, vault, or funded trading path.
 
 The original design uses order commitments, batch clearing, and zero-knowledge
 claims to reduce identity linkage. These mechanisms do not hide Polymarket's
@@ -158,7 +159,7 @@ npm run dev
 
 ---
 
-## Privacy model
+## Legacy privacy model (not a launch guarantee)
 
 | On-chain action | Trader visible? |
 |---|---|
@@ -167,6 +168,11 @@ npm run dev
 | Claim tx | No — relayer submits |
 | `PositionClaimed` event | No — recipient address only |
 | USDC transfer to ephemeral | No (mainnet) — Railgun private transfer |
+
+The table describes the intended wallet-link protection only. The v10
+`lockFunds` calldata reveals every order's market, side, amount, limit, and
+salt; a direct transfer to an ephemeral wallet is linkable. Polymarket fills
+are public. Do not describe this flow as hiding all trade details.
 
 ---
 

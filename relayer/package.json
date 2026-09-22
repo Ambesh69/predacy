@@ -7,7 +7,9 @@
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
-    "test": "vitest run"
+    "test": "vitest run",
+    "preflight:v11": "tsx scripts/v11Preflight.ts",
+    "run:v11": "tsx scripts/v11RunSingleOrder.ts"
   },
   "engines": {
     "node": ">=24"

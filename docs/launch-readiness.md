@@ -25,13 +25,40 @@ either a revised, explicitly narrower privacy promise (customer-to-trade
 unlinkability with public aggregate trades) and a new private accounting design,
 or a venue/settlement architecture that does not publish the trades on Polygon.
 
-The product decision is now the second path: replace Polymarket execution to
-keep trade details private. `circuits/private_match_v1` is a local Noir proof
-prototype for one confidential buy/sell match. It is **not** connected to
-funded notes or a private execution network. The active Polygon app and the
-experimental v11 Deposit Wallet flow remain disabled. Aztec testnet is a
-candidate evaluation environment; no private-market contracts have been
-deployed there, and no mainnet opening is authorized by this decision alone.
+The selected engineering direction is to restore user-funded Polymarket
+execution through a Deposit Wallet and exact-fill settlement, then decide
+whether its narrower privacy boundary is acceptable for launch. This is not
+permission to describe the result as fully private or to open production
+trading. `circuits/private_match_v1` remains an isolated research prototype;
+it is not a funded trading path. The active Polygon app and experimental v11
+flow remain disabled.
+
+The v11 one-order runner now has PostgreSQL write-ahead journals for route,
+signed FAK submission, returned assets, immutable settlement snapshot, and
+finalize. It requires terminal CLOB order/trade evidence, 20-confirmation
+Polygon receipts, exact isolated Deposit Wallet balances, and a durable pilot
+budget capped at **$10 total exposure**. Local failure/restart tests and
+Polygon fork tests of real pUSD conversion pass. The fork tests simulate CLOB
+fills and use mock CTF/verifier; they do not establish a live execution path.
+The paused v11 vault is deployed at
+`0x6b09CEe82e5aE41122Eab614Cb68f078B6BBC2c6` (transaction
+`0x6d833e8a18f62f4855bfe8b41fd25781508d0b4303f7b17cbc037b49b81b5db2`).
+Its allocation verifier is deployed at
+`0x9fdDEa6cA511BE164A3bF863059D241A0db74667` (transaction
+`0xbf600e7bfc69acd1aaa3b13de9fc6cd82276b569fb7ca8a11532d8455a290a6a`).
+On-chain reads confirm the configured relayer, guardian, Deposit Wallet,
+verifier, bridge assets, and `tradingPaused == true`. No live pilot has run. A fresh v11 signer has a
+deployed Deposit Wallet and an authenticated CLOB collateral-balance read;
+that zero-balance read does not prove an order fill. The production PostgreSQL
+journals and $10 budget tables exist, but application-level restart recovery
+has not been tested against them. The frontend remains on the disabled v10 path.
+The read-only `npm run preflight:v11` passes configuration, Polygon RPC, and
+vault identity. Its local Railway-variable run cannot resolve Railway's private
+PostgreSQL host; a separate in-network read confirms all four v11 tables and an
+unused pilot budget. The
+runner now rejects an on-chain `ROUTED` batch with only a prepared local route
+intent, and verifies its CLOB market token pair, tick, fee envelope, and V2
+exchange before routing; these checks do not substitute for a live pilot.
 
 The current vault also requires exact settlement at its batch clearing price:
 it sends `gap * clearingPrice` to buy the missing shares and later demands
@@ -89,6 +116,9 @@ References:
   frontend proxy; use the relayer host directly for operator requests.
 - Verify the relayer hot wallet's native gas balance, collateral balance,
   approvals, and CLOB account identity before taking a user order.
+- Rotate the CLOB API key, secret, and passphrase previously embedded in
+  historical diagnostic scripts. Removing them from the current source tree
+  does not remove them from Git history.
 - Confirm the frontend and relayer point to the same vault and chain. The
   checked-in local `.env` files use Amoy and do not establish production state.
 - Check `/health`: `tradingEnabled` must be true and `pausedMarkets` empty.

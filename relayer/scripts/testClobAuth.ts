@@ -8,11 +8,13 @@ import axios from "axios";
 
 const CLOB = "https://clob.polymarket.com";
 
-const apiKey        = process.env.POLYMARKET_API_KEY        || "8deaf5f4-d1bb-31fa-fb61-50dffabc8017";
-const apiSecret     = process.env.POLYMARKET_API_SECRET     || "4JjxgThu9m1Wc0Iexd_Hbr_9jUDtgwVXj1OpUM154Fg=";
-const apiPassphrase = process.env.POLYMARKET_API_PASSPHRASE || "bc22e8157fb7a689d9e2ba80a667063c0a9a1844a927702b081ca0fe28b9fd5f";
+const apiKey        = process.env.POLYMARKET_API_KEY        || "";
+const apiSecret     = process.env.POLYMARKET_API_SECRET     || "";
+const apiPassphrase = process.env.POLYMARKET_API_PASSPHRASE || "";
 
-console.log(`Testing API key: ${apiKey}`);
+if (!apiKey || !apiSecret || !apiPassphrase) {
+  throw new Error("Set CLOB API credentials before running this diagnostic");
+}
 
 function authHeaders(method: string, path: string, body = "") {
   const ts      = Math.floor(Date.now() / 1000).toString();

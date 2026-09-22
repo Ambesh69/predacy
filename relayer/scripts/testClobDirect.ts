@@ -15,9 +15,12 @@ const CLOB_API = "https://clob.polymarket.com";
 const CTF_EXCHANGE = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E";
 
 const PK       = (process.env.RELAYER_PRIVATE_KEY ?? "") as `0x${string}`;
-const API_KEY  = process.env.POLYMARKET_API_KEY        || "8deaf5f4-d1bb-31fa-fb61-50dffabc8017";
-const API_SEC  = process.env.POLYMARKET_API_SECRET     || "4JjxgThu9m1Wc0Iexd_Hbr_9jUDtgwVXj1OpUM154Fg=";
-const API_PASS = process.env.POLYMARKET_API_PASSPHRASE || "bc22e8157fb7a689d9e2ba80a667063c0a9a1844a927702b081ca0fe28b9fd5f";
+const API_KEY  = process.env.POLYMARKET_API_KEY        || "";
+const API_SEC  = process.env.POLYMARKET_API_SECRET     || "";
+const API_PASS = process.env.POLYMARKET_API_PASSPHRASE || "";
+if (!PK || !API_KEY || !API_SEC || !API_PASS || process.argv[2] !== "--live") {
+  throw new Error("Set CLOB credentials and RELAYER_PRIVATE_KEY, then pass --live to post an order");
+}
 
 const TOKEN_ID = "41583919731714354912849507182398941127545694257513505398713274521520484370640";
 

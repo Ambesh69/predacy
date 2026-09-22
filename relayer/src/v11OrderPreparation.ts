@@ -1,17 +1,9 @@
 import { OrderSide, OrderType, type SignedOrder } from "@polymarket/client";
+import type { DepositWalletClient } from "./depositWalletClient.js";
 import type { V11OrderJournal } from "./v11OrderJournal.js";
 
 export interface V11MarketOrderSigner {
-  createMarketOrder(request: {
-    tokenId: string;
-    side: OrderSide.BUY | OrderSide.SELL;
-    amount?: string;
-    maxSpend?: string;
-    maxPrice?: string;
-    shares?: string;
-    minPrice?: string;
-    orderType: OrderType.FAK;
-  }): Promise<SignedOrder>;
+  createMarketOrder: DepositWalletClient["createMarketOrder"];
 }
 
 export interface V11LegRequest {

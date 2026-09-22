@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { collectV11TradeEvidence, verifyV11TradeReceipts, type V11TradeReader } from "./v11OrderReconciliation.js";
+import { collectV11TradeEvidence, verifyV11TerminalOrder, verifyV11TradeReceipts, type V11TradeReader } from "./v11OrderReconciliation.js";
 
 const market = `0x${"11".repeat(32)}`;
 const orderId = "order-123";
@@ -68,5 +68,43 @@ describe("v11 trade reconciliation", () => {
     await expect(verifyV11TradeReceipts(chain, {
       tradeIds: [], transactionHashes: [], pendingTradeIds: [], failedTradeIds: [],
     })).rejects.toThrow(/not fully confirmed/);
+  });
+});
+
+describe("v11 FAK terminality", () => {
+  const maker = "0x00000000000000000000000000000000000000aa" as const;
+  const expected = { orderId, marketId: market, tokenId: 123n, maker, side: "BUY" as const };
+  const order = {
+    id: orderId, conditionId: market, tokenId: "123", makerAddress: maker,
+    side: "BUY", orderType: "FAK", status: "CANCELED", sizeMatched: "0.5", associateTrades: ["trade-1"],
+  };
+  const evidence = {
+    tradeIds: ["trade-1"], transactionHashes: [txHash], pendingTradeIds: [], failedTradeIds: [],
+  };
+  const receipts = {
+    getBlockNumber: async () => 120n,
+    getTransactionReceipt: async () => ({ status: "success" as const, blockNumber: 101n }),
+  };
+
+  it("accepts a terminal partial FAK only after receipt finality", async () => {
+    expect(await verifyV11TerminalOrder(order, expected, evidence, receipts)).toEqual({
+      filledShares: 500_000n, confirmedTradeCount: 1,
+    });
+  });
+
+  it("permits a confirmed zero-fill rejection with no trades", async () => {
+    expect(await verifyV11TerminalOrder({ ...order, status: "INVALID", sizeMatched: "0", associateTrades: [] },
+      expected, { tradeIds: [], transactionHashes: [], pendingTradeIds: [], failedTradeIds: [] }, receipts))
+      .toEqual({ filledShares: 0n, confirmedTradeCount: 0 });
+  });
+
+  it("stops on delayed, missing, or unconfirmed trades", async () => {
+    await expect(verifyV11TerminalOrder({ ...order, status: "LIVE" }, expected, evidence, receipts))
+      .rejects.toThrow(/still live/);
+    await expect(verifyV11TerminalOrder(order, expected, { ...evidence, tradeIds: [] }, receipts))
+      .rejects.toThrow(/disagree/);
+    await expect(verifyV11TerminalOrder(order, expected, evidence, {
+      ...receipts, getTransactionReceipt: async () => ({ status: "success" as const, blockNumber: 102n }),
+    })).rejects.toThrow(/not final/);
   });
 });

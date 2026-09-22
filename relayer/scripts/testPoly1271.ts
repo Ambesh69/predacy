@@ -6,7 +6,7 @@
  *   1. CONTROL: signatureType=0 (EOA), maker=relayer EOA  → should work if API key is valid
  *   2. KEY TEST: signatureType=3 (POLY_1271), maker=vault → tells us if vault-as-maker is viable
  *
- * Run:  cd relayer && npx tsx scripts/testPoly1271.ts
+ * Run:  cd relayer && npx tsx scripts/testPoly1271.ts --live
  *
  * Required env: RELAYER_PRIVATE_KEY
  */
@@ -31,9 +31,9 @@ const EXCHANGE     = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E" as const; // s
 const NEG_RISK_EX  = "0xC5d563A36AE78145C45a50134d48A1215220f80a" as const; // negRisk exchange
 
 const PK       = (process.env.RELAYER_PRIVATE_KEY ?? "") as `0x${string}`;
-const API_KEY  = process.env.POLYMARKET_API_KEY        || "d28ecdf1-2af2-59df-f630-eb002847491e";
-const API_SEC  = process.env.POLYMARKET_API_SECRET     || "WcznTJ9bllOuLexliC04d-Yf7DWPZXxw2FtcN1Y00sE=";
-const API_PASS = process.env.POLYMARKET_API_PASSPHRASE || "5fff22f57fc4b25c87701569d31095aab099ad299f159a3a75cdd57c44c6bb08";
+const API_KEY  = process.env.POLYMARKET_API_KEY        || "";
+const API_SEC  = process.env.POLYMARKET_API_SECRET     || "";
+const API_PASS = process.env.POLYMARKET_API_PASSPHRASE || "";
 
 // Mainnet BatchVault v8 (must have code deployed for POLY_1271 isValidSignature check)
 const VAULT  = (process.env.VAULT_ADDRESS ?? "0x44Ed1EA9b420d3B954b5779Eed6CED1deFd1cf21") as `0x${string}`;
@@ -50,7 +50,9 @@ const PRICE       = 0.80; // USDC per YES token
 const MAKER_AMOUNT = String(Math.round(SIZE * PRICE * 1e6));  // "8000000" (8 USDC)
 const TAKER_AMOUNT = String(Math.round(SIZE * 1e6));          // "10000000" (10 YES tokens)
 
-if (!PK || PK.length < 10) { console.error("Set RELAYER_PRIVATE_KEY"); process.exit(1); }
+if (!PK || !API_KEY || !API_SEC || !API_PASS || process.argv[2] !== "--live") {
+  throw new Error("Set CLOB credentials and RELAYER_PRIVATE_KEY, then pass --live to post an order");
+}
 
 const account = privateKeyToAccount(PK);
 const walletClient = createWalletClient({

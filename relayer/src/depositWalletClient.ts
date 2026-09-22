@@ -1,8 +1,10 @@
 import { createSecureClient, WalletType } from "@polymarket/client";
 import { builderApiKey } from "@polymarket/client/node";
 import { privateKey } from "@polymarket/client/viem";
+import { updateBalanceAllowance } from "@polymarket/client/actions";
 import { createPublicClient, getAddress, http, type Address, type Hex } from "viem";
 import { polygon } from "viem/chains";
+import { awaitDepositWalletFunding } from "./depositWalletFundingGate.js";
 
 export interface DepositWalletConfig {
   signerPrivateKey: Hex;
@@ -15,6 +17,60 @@ export interface DepositWalletConfig {
 }
 
 export type DepositWalletClient = Awaited<ReturnType<typeof createSecureClient>>;
+
+const erc20BalanceAbi = [{
+  name: "balanceOf", type: "function", stateMutability: "view",
+  inputs: [{ name: "account", type: "address" }],
+  outputs: [{ name: "balance", type: "uint256" }],
+}] as const;
+const ctfBalanceAbi = [{
+  name: "balanceOf", type: "function", stateMutability: "view",
+  inputs: [{ name: "account", type: "address" }, { name: "tokenId", type: "uint256" }],
+  outputs: [{ name: "balance", type: "uint256" }],
+}] as const;
+
+export interface RoutedFundingRequest {
+  rpcUrl: string;
+  tokenAddress: Address;
+  exchange: Address;
+  asset: "COLLATERAL" | "CONDITIONAL";
+  tokenId?: bigint;
+  startingBalance: bigint;
+  incomingAmount: bigint;
+  orderAmount: bigint;
+}
+
+/** Call only after the vault routing transaction has a successful receipt. */
+export async function awaitRoutedDepositWalletFunding(
+  client: DepositWalletClient,
+  request: RoutedFundingRequest,
+): Promise<void> {
+  if (client.account.walletType !== WalletType.DEPOSIT_WALLET) {
+    throw new Error("CLOB funding requires a Deposit Wallet");
+  }
+  if (request.asset === "CONDITIONAL" ? !request.tokenId || request.tokenId <= 0n : request.tokenId !== undefined) {
+    throw new Error("Invalid CLOB funding asset");
+  }
+  const reader = createPublicClient({ chain: polygon, transport: http(request.rpcUrl) });
+  if (await reader.getChainId() !== polygon.id) throw new Error("Deposit Wallet funding RPC is not Polygon mainnet");
+  await awaitDepositWalletFunding({
+    wallet: client.account.wallet,
+    exchange: request.exchange,
+    startingBalance: request.startingBalance,
+    incomingAmount: request.incomingAmount,
+    orderAmount: request.orderAmount,
+  }, {
+    readOnChainBalance: async () => request.asset === "COLLATERAL"
+      ? reader.readContract({ address: request.tokenAddress, abi: erc20BalanceAbi,
+          functionName: "balanceOf", args: [client.account.wallet] })
+      : reader.readContract({ address: request.tokenAddress, abi: ctfBalanceAbi,
+          functionName: "balanceOf", args: [client.account.wallet, request.tokenId!] }),
+    refreshClobBalance: () => updateBalanceAllowance(client, {
+      assetType: request.asset as Parameters<typeof updateBalanceAllowance>[1]["assetType"],
+      ...(request.asset === "CONDITIONAL" ? { assetId: request.tokenId!.toString() } : {}),
+    }),
+  });
+}
 
 export function assertDepositWalletIdentity(
   identity: { signer: string; wallet: string; walletType: WalletType },

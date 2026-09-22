@@ -1,4 +1,8 @@
 import type { SignedOrder } from "@polymarket/client/actions";
+import { postOrder } from "@polymarket/client/actions";
+import { WalletType } from "@polymarket/client";
+import { getAddress } from "viem";
+import { awaitRoutedDepositWalletFunding, type DepositWalletClient, type RoutedFundingRequest } from "./depositWalletClient.js";
 import type { V11OrderJournal } from "./v11OrderJournal.js";
 
 export interface ClobOrderPoster {
@@ -17,7 +21,11 @@ export async function submitV11OrderOnce(
   client: ClobOrderPoster,
   batchId: string,
   legId: string,
+  assertFunding: () => Promise<void>,
 ): Promise<string> {
+  // Run immediately before claiming the one-shot submission. A failed gate
+  // leaves the prepared order untouched and never sends a CLOB request.
+  await assertFunding();
   const intent = await journal.claimForSubmission(batchId, legId);
   if (!intent) throw new Error("V11 order was already submitted or needs reconciliation; refusing a duplicate post");
 
@@ -39,4 +47,25 @@ export async function submitV11OrderOnce(
   }
   await journal.recordAccepted(batchId, legId, response.orderId, response);
   return response.orderId;
+}
+
+/** The only v11 SDK post path: re-check maker identity and confirmed funding. */
+export async function submitFundedV11OrderOnce(
+  journal: V11OrderJournal,
+  client: DepositWalletClient,
+  batchId: string,
+  legId: string,
+  funding: RoutedFundingRequest,
+): Promise<string> {
+  const intent = await journal.get(batchId, legId);
+  if (!intent) throw new Error("No prepared v11 CLOB order for this leg");
+  const wallet = client.account.wallet;
+  if (client.account.walletType !== WalletType.DEPOSIT_WALLET ||
+      getAddress(intent.signedOrder.maker) !== getAddress(wallet) ||
+      getAddress(intent.signedOrder.signer) !== getAddress(wallet) ||
+      intent.signedOrder.signatureType !== 3) {
+    throw new Error("Journaled order does not belong to the configured Deposit Wallet");
+  }
+  return submitV11OrderOnce(journal, { postOrder: postOrder(client) }, batchId, legId,
+    () => awaitRoutedDepositWalletFunding(client, funding));
 }

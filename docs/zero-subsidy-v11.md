@@ -1,7 +1,7 @@
 # Zero-subsidy settlement v11
 
-Status: experimental vault, per-order proof, conversion bridge, durable-order
-journal module, and SDK execution primitives implemented on
+Status: experimental vault, per-order proof, conversion bridge, durable
+batch/order journals, and an isolated one-order SDK runner implemented on
 `codex/zero-subsidy-settlement`. None is wired to production trading. This
 document does not authorize mainnet trading. The deployed v10 vault cannot be
 upgraded in place.
@@ -46,18 +46,53 @@ finalization, and claim. The USDC.e/pUSD conversion primitive in
 `contracts/src/PolymarketCollateralBridge.sol` is tested on a Polygon fork and
 called by the experimental vault, but no production vault calls it.
 
-Current limitations: batches are serial and capped at four orders; claims are
-owner-authorized direct transfers, so settlement is not private. The allocation
+Current limitations: batches are serial and capped at four orders, but the
+runner supports exactly one order per batch and requires an empty, dedicated
+Deposit Wallet. Claims are owner-authorized direct transfers, so settlement is
+not private. The allocation
 struct's public `limitPrice` is required to be zero because only the hidden
-limit in the proof is authoritative. The PostgreSQL order journal, fee-aware
-FAK signing, read-only trade reconciliation, receipt gate, and Deposit Wallet
-withdrawal helpers are isolated modules. There is no orchestrated live CLOB
-runner, complete ambiguous-response recovery, returned-asset accounting
-workflow, frontend approval/proof integration, v11 deployment, or production
-PostgreSQL service. The official Deposit Wallet SDK primitives are not invoked
-from the production route. That SDK requires Node 24, now pinned in the relayer
+limit in the proof is authoritative. `v11SingleOrderRunner.ts` coordinates a
+closed escrow through one signed FAK order, terminal trade/receipt checks,
+immutable wallet-balance snapshot, returned assets, proof, and finalization.
+`v11PolygonDriver.ts` implements its Polygon/SDK calls. Every outbound action
+is write-ahead journaled; an ambiguous send stops for manual reconciliation.
+Before routing, the driver now compares the escrowed token pair, tick size,
+negative-risk exchange, and fee parameters against current CLOB market
+metadata. The Polygon V2 standard and negative-risk exchange addresses are
+`0xE111180000d2663C0091e4f400237545B87B996B` and
+`0xe2222d279d744050d28e00520010520000310F59`, respectively. The old
+`0x4bFb...` and `0xC5d...` addresses in legacy relayer code are not valid
+for this v11 path. A restarted runner also refuses to route a batch that is
+already `ROUTED` on-chain unless its route hash was recorded beforehand.
+An explicit `npm run run:v11 -- --execute <closed-batch-id>` operator entrypoint
+now composes the driver, PostgreSQL journals, and $10 pilot budget. It requires
+`V11_ORDER_JSON` with string-encoded `batchId`, `marketId`, `commitment`, `side`,
+`deposit`, `limitPrice`, `salt`, `tokenId`, `priceTick`, and `depositWallet`; the
+manifest must match the on-chain escrow. Do not put that secret manifest in
+the repository or a persistent deployment variable. The command is not run
+automatically and must not be invoked until the deployed vault, fresh signer,
+and recovery procedures are verified. Guarded deployment scripts now exist at
+`contracts/v11-verifier/script/DeployAllocationV11Verifier.s.sol` and
+`contracts/script/DeployVaultV11Mainnet.s.sol`. They require Polygon mainnet,
+deployed dependencies, separate relayer and guardian roles, and leave the new
+vault paused. Both contracts are deployed on Polygon mainnet: verifier
+`0x9fdDEa6cA511BE164A3bF863059D241A0db74667` and paused vault
+`0x6b09CEe82e5aE41122Eab614Cb68f078B6BBC2c6`. There is still no frontend
+approval/proof integration or live pilot.
+Production PostgreSQL contains the batch/order journals and $10 pilot-budget
+tables. A rollback-only batch-journal transition probe passed; a full runner
+restart against production PostgreSQL has not been exercised. The SDK requires Node 24, pinned in the relayer
 package and Nixpacks configuration; the actual Railway build must still be
 validated before migration.
+
+The Deposit Wallet funding gate requires the routed asset to
+appear on-chain, in the refreshed CLOB balance, and in the relevant exchange
+allowance before a journaled order can be submitted. A successful cache-update
+call or an empty response is not enough. Ambiguous CLOB posts and gasless
+returns are quarantined, not automatically retried. A fresh v11 signer is backed
+up in the operator's macOS login Keychain and stored in Railway. The SDK deployed
+its Deposit Wallet, and an authenticated CLOB collateral-balance read returned
+zero, as expected before funding. The one-order runner has not made a live CLOB fill.
 
 ## Required on-chain sequence
 
@@ -107,10 +142,21 @@ itself eliminate custody risk. This needs an explicit threat-model review and
 operator controls before taking public funds. A ledger stored only in a Redis
 cache is insufficient for exactly-once CLOB execution; use durable storage
 with backups and an auditable operator recovery procedure.
-The v11 journal module requires `V11_DATABASE_URL`; it has not been connected
-to production, and its live PostgreSQL integration test needs
+The v11 journal module requires `V11_DATABASE_URL`; the production schema is
+initialized, but its application-level restart test still needs
 `TEST_V11_DATABASE_URL`. Accepted or ambiguous CLOB submissions must be
 resolved before a new order is allowed to consume the same routed assets.
+Run `cd relayer && npm run preflight:v11` for a read-only, secret-free
+configuration, Polygon identity, and database reachability report. The
+production relayer has database, signer, Deposit Wallet, guardian, and relayer
+variables but is missing `V11_VAULT_ADDRESS`, `V11_ALLOCATION_VERIFIER`, and
+`V11_EXCHANGE_ADDRESS`. The preflight cannot verify the private Railway
+PostgreSQL host from a local machine; run it inside the service environment
+after the v11 deployment is configured.
+The authorized live pilot exposure is **$10 total**, not $10 per order.
+`v11PilotBudget.ts` enforces this durably before route; sell shares are valued
+at their maximum $1 payout. No live pilot may use the historically exposed
+CLOB credentials. Rotate them in the deployment environment first.
 
 Existing v10 batches and claims stay on v10. Do not point old proofs at v11,
 change v10 verifier addresses, or sweep its balances. New market orders may
@@ -146,4 +192,6 @@ cd ../relayer && npm run build && npm test
 
 The real proof tests require a native Barretenberg binary and its local cache;
 they may need execution outside a restricted sandbox. The Polygon conversion
-fork test runs separately with a Polygon RPC URL.
+fork test and `BatchVaultV11PolygonForkTest` run separately with a Polygon RPC
+URL. The latter exercises live USDC.e/pUSD conversion and vault accounting
+with simulated fills, CTF, and verifier; it is not a live CLOB integration test.

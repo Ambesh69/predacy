@@ -7,6 +7,9 @@ const PK       = (process.env.RELAYER_PRIVATE_KEY ?? "") as `0x${string}`;
 const API_KEY  = process.env.POLYMARKET_API_KEY || "";
 const API_SEC  = process.env.POLYMARKET_API_SECRET || "";
 const API_PASS = process.env.POLYMARKET_API_PASSPHRASE || "";
+if (!PK || !API_KEY || !API_SEC || !API_PASS || process.argv[2] !== "--live") {
+  throw new Error("Set CLOB credentials and RELAYER_PRIVATE_KEY, then pass --live to post an order");
+}
 const CTF_EXCHANGE = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E" as const;
 const TOKEN_ID = "41583919731714354912849507182398941127545694257513505398713274521520484370640";
 const ZERO   = "0x0000000000000000000000000000000000000000" as `0x${string}`;
