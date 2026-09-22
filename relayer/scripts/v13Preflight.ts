@@ -4,10 +4,12 @@ import { privateKeyToAccount } from "viem/accounts";
 import { polygon } from "viem/chains";
 import { PostgresV13BatchJournal, PostgresV13WitnessVault } from "../src/v13BatchJournal.js";
 import { resolveV13LaunchPolicy } from "../src/v13LaunchPolicy.js";
+import { loadV13Circuit } from "../src/v13Proofs.js";
 
 function required(name: string) { const value = process.env[name]?.trim(); if (!value) throw new Error(`${name} is required`); return value; }
 
 async function main() {
+  for (const kind of ["order", "route", "settlement", "cancel"] as const) loadV13Circuit(kind);
   const policy = resolveV13LaunchPolicy(polygon.id, process.env);
   if (process.env.V13_PRIVATE_TRADING_ENABLED === "true" && !policy.enabled) throw new Error(policy.blocker!);
   const rpcUrl = required("RPC_URL"); const databaseUrl = required("V13_DATABASE_URL");
@@ -25,6 +27,7 @@ async function main() {
     throw new Error("V13 relayer, Deposit Wallet signer, and guardian must be separate");
   }
   const client = createPublicClient({ chain: polygon, transport: http(rpcUrl) });
+  if (await client.getChainId() !== polygon.id) throw new Error("V13 RPC is not Polygon mainnet");
   const addresses = [poolAddress, adapterAddress, configured.withdraw, configured.transfer, configured.order,
     configured.route, configured.settlement, configured.cancel, configured.depositWallet];
   const code = await Promise.all(addresses.map((address) => client.getCode({ address })));
@@ -51,7 +54,8 @@ async function main() {
       client.readContract({ address: poolAddress, abi, functionName: "paused" }),
       client.readContract({ address: poolAddress, abi, functionName: "activeBuy" }),
     ]);
-  const actual = [withdraw, transfer, order, route, settlement, cancel, adapter, guardian, onchainRelayer].map(getAddress);
+  const actual = [withdraw, transfer, order, route, settlement, cancel, adapter, guardian, onchainRelayer]
+    .map((address) => getAddress(address));
   const expected = [configured.withdraw, configured.transfer, configured.order, configured.route,
     configured.settlement, configured.cancel, adapterAddress, configured.guardian, relayer];
   const labels = ["withdraw", "transfer", "order", "route", "settlement", "cancel", "adapter", "guardian", "relayer"];
@@ -59,16 +63,19 @@ async function main() {
   if (mismatch !== -1) {
     throw new Error(`V13 ${labels[mismatch]} mismatch: expected ${expected[mismatch]}, received ${actual[mismatch]}`);
   }
-  if (active[4]) throw new Error("A v13 batch is active");
+  if (policy.enabled && active[4]) throw new Error("A v13 batch is active; deploy with intake disabled for recovery");
   if (!policy.enabled && !paused) throw new Error("Disabled v13 intake requires the pool to remain paused");
   if (policy.enabled && paused) throw new Error("Enabled v13 intake points to a paused pool");
   const [journal, vault] = await Promise.all([
     PostgresV13BatchJournal.connect(databaseUrl), PostgresV13WitnessVault.connect(databaseUrl, key),
   ]);
+  let unresolvedActions = 0;
   try {
     const unresolved = await journal.listUnresolved();
-    if (unresolved.length) throw new Error(`${unresolved.length} unresolved v13 journal action(s)`);
+    unresolvedActions = unresolved.length;
+    if (policy.enabled && unresolved.length) throw new Error(`${unresolved.length} unresolved v13 journal action(s)`);
   } finally { await Promise.all([journal.close(), vault.close()]); }
-  console.log(JSON.stringify({ ok: true, policy, pool: poolAddress, adapter: adapterAddress, paused }));
+  console.log(JSON.stringify({ ok: true, policy, pool: poolAddress, adapter: adapterAddress, paused,
+    recoveryRequired: active[4] || unresolvedActions > 0, unresolvedActions }));
 }
 main().catch((error) => { console.error(error instanceof Error ? error.message : "V13 preflight failed"); process.exitCode = 1; });

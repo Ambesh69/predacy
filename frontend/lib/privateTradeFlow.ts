@@ -1,13 +1,13 @@
 import { encodeFunctionData, keccak256, type Address, type Hex } from "viem";
 import { ERC20_ABI } from "./contracts";
-import { getPrivateContracts, SHIELDED_POOL_ABI } from "./privateContracts";
-import { loadPrivateMerkleWitness } from "./privateMerkle";
+import { getPrivateContracts, isPrivateTradingEnabled, SHIELDED_POOL_ABI } from "./privateContracts";
+import { loadPrivateMerkleWitness, loadPrivateTree } from "./privateMerkle";
 import {
   loadPrivateNotes, loadPrivateOrders, savePrivateNotes, savePrivateOrders,
   type PrivateNoteRecord, type PrivateOrderRecord,
 } from "./privateNotes";
 import {
-  privateNoteCommitment, provePrivateBuyOrder, provePrivateOrderCancellation, provePrivateWithdrawal,
+  privateNoteCommitment, privateOrderCommitment, provePrivateBuyOrder, provePrivateOrderCancellation, provePrivateWithdrawal,
 } from "./privateProver";
 import { submitPrivateOrder } from "./privateRelayer";
 import { getPrivateAllocationReceipt } from "./privateRelayer";
@@ -45,7 +45,9 @@ export async function executePrivateBuy(args: {
 }): Promise<{ order: PrivateOrderRecord; queueState: "queued" | "batched" }> {
   const deployment = getPrivateContracts();
   if (!deployment) throw new Error("Private trading is not configured");
+  if (!isPrivateTradingEnabled()) throw new Error("Private trading is paused");
   if (args.amount <= 0n) throw new Error("Private order amount must be positive");
+  if (args.limitPrice <= 0n || args.limitPrice >= 1_000_000n) throw new Error("Invalid private order limit");
 
   const [paused, collateralAsset, positionAsset] = await Promise.all([
     publicClient.readContract({ address: deployment.pool, abi: SHIELDED_POOL_ABI, functionName: "paused" }),
@@ -65,6 +67,28 @@ export async function executePrivateBuy(args: {
   const orderSecret = randomWord();
   const receiptToken = randomWord();
 
+  const notes = await loadPrivateNotes(args.wallet, args.vaultSignature);
+  const note: PrivateNoteRecord = {
+    commitment: inputNote, assetId: collateralAsset, amount: args.amount.toString(), publicKey: notePublicKey,
+    secret: noteSecret, marketId: args.marketId, side: args.side, state: "pending", createdAt: Date.now(),
+  };
+  const order: PrivateOrderRecord = {
+    orderCommitment: privateOrderCommitment({ positionAsset, deposit: args.amount, limitPrice: args.limitPrice,
+      refundPublicKey, positionPublicKey, orderSecret }),
+    receiptToken, inputNote, deposit: args.amount.toString(), limitPrice: args.limitPrice.toString(),
+    marketId: args.marketId, positionTokenId: args.positionTokenId.toString(), collateralAsset, positionAsset,
+    orderSecret, orderLeafIndex: "0", refundSecret, refundPublicKey, positionSecret, positionPublicKey,
+    state: "funding", createdAt: Date.now(),
+  };
+  const persistOrder = async () => {
+    const saved = await loadPrivateOrders(args.wallet, args.vaultSignature);
+    await savePrivateOrders(args.wallet, args.vaultSignature,
+      [order, ...saved.filter((item) => item.orderCommitment !== order.orderCommitment)]);
+  };
+  // Recovery secrets must be durable before either deposit or lock can be broadcast.
+  await savePrivateNotes(args.wallet, args.vaultSignature, [note, ...notes]);
+  await persistOrder();
+
   args.onStep?.("depositing");
   await send(args.provider, args.wallet, args.usdc, encodeFunctionData({
     abi: ERC20_ABI, functionName: "approve", args: [deployment.pool, args.amount],
@@ -75,19 +99,20 @@ export async function executePrivateBuy(args: {
   const merkle = await loadPrivateMerkleWitness(
     publicClient, deployment.pool, deployment.deploymentBlock, inputNote,
   );
-  const notes = await loadPrivateNotes(args.wallet, args.vaultSignature);
-  const note: PrivateNoteRecord = {
-    commitment: inputNote, assetId: collateralAsset, amount: args.amount.toString(), publicKey: notePublicKey,
-    secret: noteSecret, leafIndex: merkle.index.toString(), marketId: args.marketId, side: args.side,
-    state: "spendable", createdAt: Date.now(),
-  };
+  note.leafIndex = merkle.index.toString();
+  note.state = "spendable";
+  order.state = "funded";
   await savePrivateNotes(args.wallet, args.vaultSignature, [note, ...notes]);
+  await persistOrder();
 
   args.onStep?.("proving");
   const authorization = await provePrivateBuyOrder({
     collateralAsset, positionAsset, deposit: args.amount, limitPrice: args.limitPrice,
     noteSecret, merkle, refundPublicKey, positionPublicKey, orderSecret,
   });
+  if (authorization.orderCommitment !== order.orderCommitment) throw new Error("Private order proof differs from saved recovery data");
+  order.state = "locking";
+  await persistOrder();
   args.onStep?.("locking");
   await send(args.provider, args.wallet, deployment.pool, encodeFunctionData({
     abi: SHIELDED_POOL_ABI, functionName: "lockOrder",
@@ -99,28 +124,9 @@ export async function executePrivateBuy(args: {
   note.state = "locked";
   await savePrivateNotes(args.wallet, args.vaultSignature, [note, ...notes]);
 
-  const order: PrivateOrderRecord = {
-    orderCommitment: authorization.orderCommitment,
-    receiptToken,
-    inputNote,
-    deposit: args.amount.toString(),
-    limitPrice: args.limitPrice.toString(),
-    marketId: args.marketId,
-    positionTokenId: args.positionTokenId.toString(),
-    collateralAsset,
-    positionAsset,
-    orderSecret,
-    orderLeafIndex: orderMerkle.index.toString(),
-    refundSecret,
-    refundPublicKey,
-    positionSecret,
-    positionPublicKey,
-    state: "locked",
-    createdAt: Date.now(),
-  };
-  await savePrivateOrders(args.wallet, args.vaultSignature, [
-    order, ...(await loadPrivateOrders(args.wallet, args.vaultSignature)),
-  ]);
+  order.orderLeafIndex = orderMerkle.index.toString();
+  order.state = "queued";
+  await persistOrder();
 
   args.onStep?.("queuing");
   const queued = await submitPrivateOrder({
@@ -142,9 +148,7 @@ export async function executePrivateBuy(args: {
     },
   });
   order.state = queued.state;
-  const saved = await loadPrivateOrders(args.wallet, args.vaultSignature);
-  await savePrivateOrders(args.wallet, args.vaultSignature,
-    saved.map((item) => item.orderCommitment === order.orderCommitment ? order : item));
+  await persistOrder();
   return { order, queueState: queued.state };
 }
 
@@ -156,8 +160,22 @@ export async function refreshPrivateAllocations(args: {
   if (!deployment) throw new Error("Private trading is not configured");
   const orders = await loadPrivateOrders(args.wallet, args.vaultSignature);
   const notes = await loadPrivateNotes(args.wallet, args.vaultSignature);
+  const leaves = await loadPrivateTree(publicClient, deployment.pool, deployment.deploymentBlock);
   let changed = false;
   for (const order of orders) {
+    if (["funding", "funded", "locking"].includes(order.state)) {
+      const note = notes.find((item) => item.commitment === order.inputNote);
+      const noteIndex = leaves.findIndex((leaf) => leaf.toLowerCase() === order.inputNote.toLowerCase());
+      const orderIndex = leaves.findIndex((leaf) => leaf.toLowerCase() === order.orderCommitment.toLowerCase());
+      if (note && noteIndex >= 0) {
+        note.state = orderIndex >= 0 ? "locked" : "spendable";
+        note.leafIndex = noteIndex.toString();
+        order.state = orderIndex >= 0 ? "locked" : "funded";
+        if (orderIndex >= 0) order.orderLeafIndex = orderIndex.toString();
+        changed = true;
+      }
+    }
+    if (["funding", "funded", "locking"].includes(order.state)) continue;
     if (order.state === "settled" || order.state === "cancelled" || order.state === "locked") continue;
     const receipt = await getPrivateAllocationReceipt(order.orderCommitment, order.receiptToken);
     if (receipt.state !== "settled" || receipt.spent === undefined || receipt.shares === undefined ||
@@ -218,14 +236,16 @@ export async function withdrawPrivateOrderOutput(args: {
   if (!deployment) throw new Error("Private trading is not configured");
   const orders = await loadPrivateOrders(args.wallet, args.vaultSignature);
   const current = orders.find((order) => order.orderCommitment === args.order.orderCommitment);
-  if (!current || current.state !== "settled") throw new Error("Private order is not settled");
-  const amount = BigInt(args.output === "refund" ? current.refund ?? "0" : current.shares ?? "0");
+  if (!current || !["settled", "cancelled", "funded", "locking"].includes(current.state)) throw new Error("Private order has no available output");
+  const unspentDeposit = current.state === "funded" || current.state === "locking";
+  if (args.output === "position" && current.state !== "settled") throw new Error("This order has no position output");
+  const amount = BigInt(unspentDeposit ? current.deposit : args.output === "refund" ? current.refund ?? "0" : current.shares ?? "0");
   if (amount <= 0n) throw new Error("This private output has no withdrawable balance");
   if ((args.output === "refund" && current.refundWithdrawn) ||
       (args.output === "position" && current.positionWithdrawn)) throw new Error("Private output already withdrawn");
   const asset = args.output === "refund" ? current.collateralAsset : current.positionAsset;
   const publicKey = args.output === "refund" ? current.refundPublicKey : current.positionPublicKey;
-  const commitment = privateNoteCommitment(asset, amount, publicKey);
+  const commitment = unspentDeposit ? current.inputNote : privateNoteCommitment(asset, amount, publicKey);
   const notes = await loadPrivateNotes(args.wallet, args.vaultSignature);
   const note = notes.find((item) => item.commitment.toLowerCase() === commitment.toLowerCase());
   if (!note || note.state !== "spendable") throw new Error("Private output note is missing or already spent");
@@ -235,6 +255,10 @@ export async function withdrawPrivateOrderOutput(args: {
   const withdrawal = await provePrivateWithdrawal({
     asset, amount, noteSecret: note.secret, merkle, recipient: args.wallet,
   });
+  if (await publicClient.readContract({ address: deployment.pool, abi: SHIELDED_POOL_ABI,
+    functionName: "spentNullifiers", args: [withdrawal.nullifier] })) {
+    throw new Error("This note is already locked or withdrawn. Refresh the private vault.");
+  }
   const data = args.output === "refund"
     ? encodeFunctionData({ abi: SHIELDED_POOL_ABI, functionName: "withdraw",
       args: [withdrawal.proof, withdrawal.root, withdrawal.nullifier, amount, args.wallet] })
@@ -245,6 +269,7 @@ export async function withdrawPrivateOrderOutput(args: {
   note.state = "spent";
   if (args.output === "refund") current.refundWithdrawn = true;
   else current.positionWithdrawn = true;
+  if (unspentDeposit) { current.state = "cancelled"; current.refund = current.deposit; }
   await Promise.all([
     savePrivateNotes(args.wallet, args.vaultSignature, notes),
     savePrivateOrders(args.wallet, args.vaultSignature, orders),
@@ -261,7 +286,7 @@ export async function cancelPrivateOrder(args: {
   if (!deployment) throw new Error("Private trading is not configured");
   const orders = await loadPrivateOrders(args.wallet, args.vaultSignature);
   const current = orders.find((order) => order.orderCommitment === args.order.orderCommitment);
-  if (!current || !["locked", "queued"].includes(current.state)) {
+  if (!current || !["locked", "queued", "batched"].includes(current.state)) {
     throw new Error("Only an unbatched private order can be cancelled");
   }
   const orderMerkle = await loadPrivateMerkleWitness(

@@ -9,8 +9,11 @@ recovery pilot or independent review has completed.
 
 V13 inserts generic private order notes and consumes them by proof-bound,
 secret-derived nullifiers. Public settlement does not enumerate the source
-commitments. This hides each constituent order's market, side, size, limit,
-fill, allocation, and wallet linkage from public batch settlement.
+commitments. This omits individual order witnesses from public batch settlement,
+but does not guarantee that trade details or wallet linkage cannot be inferred.
+The browser currently funds exact amounts from the trading wallet immediately
+before locking. Two-order batches permit subtraction attacks by a participant;
+funding, withdrawal, and timing correlations remain unresolved.
 
 The aggregate Polymarket hedge remains observable on Polygon, and the relayer
 sees decrypted order witnesses while matching and proving a batch. These are

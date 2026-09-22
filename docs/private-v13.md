@@ -1,7 +1,9 @@
 # Predacy Private V13
 
-V13 preserves Polymarket aggregate liquidity without publishing an
-individual order's market, side, size, limit, fill, or originating wallet.
+V13 preserves Polymarket aggregate liquidity and uses proofs instead of
+publishing individual order witnesses in batch settlement. This is not a
+guarantee that all trade details or wallet linkage remain private: funding,
+withdrawal, timing, and small-batch inference remain visible risks.
 Polymarket's aggregate hedge remains public by construction.
 
 ## Implemented protocol shape
@@ -9,17 +11,18 @@ Polymarket's aggregate hedge remains public by construction.
 1. A collateral note is spent into a generic private order-note commitment.
    Lock calldata and events contain no outcome token or market identifier.
 2. Order notes enter an append-only accumulator shared across markets and
-   epochs. The relayer cannot select two freshly locked notes and publicly link
-   them to one hedge.
+   epochs. Source commitments are omitted from routing proofs, although the
+   relayer knows which notes it selected and can disclose that association.
 3. A batch proof consumes order notes by unique nullifiers, proves accumulator
    membership, common aggregate market/outcome, hidden limits, and exact value
    conservation. The originating commitments are not public inputs.
 4. The contract exposes only aggregate position token, collateral, acquired
    shares, and batch nullifiers. It inserts private refund and position notes.
-5. Funding uses fixed denomination notes and is separated in time from order
-   authorization. Direct wallet deposits are described as public funding, not
-   sender anonymity.
-6. Withdrawals may target fresh recipients; public withdrawals disclose asset,
+5. The current browser deposits the exact order amount immediately before
+   authorizing the order, from the same wallet. Fixed-denomination prefunding,
+   time separation, and anonymous transaction submission are not implemented.
+6. The contract permits fresh withdrawal recipients, but the current browser
+   withdraws to the connected wallet. Public withdrawals disclose asset,
    amount, and recipient but not the source note.
 7. Every unrouted order has a proof-authorized refund independent of the
    relayer. Recovery cannot replay an ambiguous Polymarket fill.
@@ -65,10 +68,14 @@ and unresolved-journal check. All three v13 launch variables remain `false`.
 
 ## Privacy boundary
 
-V13 hides each constituent order's market, outcome token, amount, limit, fill,
-refund, resulting position note, and source commitment from public batch
-linkage. A generic order commitment and later secret-derived nullifier are
-public, but an observer cannot link them without the secret.
+V13 does not enumerate individual order witnesses or source commitments in
+public batch settlement. A generic order commitment and later secret-derived
+nullifier are public; their cryptographic relation is hidden without the
+secret. Public metadata can still reveal the association. In particular, two
+orders provide a very small anonymity set, and a participant who knows its own
+amounts can subtract them from aggregate totals to learn the other amounts.
+An observer can also correlate exact deposits, transaction senders, and timing.
+Do not describe this version as hiding every individual's trade details.
 
 This is on-chain observer privacy, not operator-oblivious execution. The relayer
 decrypts order witnesses in process memory to group orders and generate proofs.
@@ -92,6 +99,17 @@ Mainnet intake requires all three variables:
 pause/active state, signer separation, and unresolved PostgreSQL actions. The
 deployment script always creates the pool paused. Enabling these flags is not a
 substitute for the independent review and recovery pilot required above.
+
+`npm run preflight:proofs:v13` generates fresh proofs for all four deployed v13
+verifiers and uses read-only Polygon calls to check acceptance and tampered-input
+rejection. It spends no POL and executes no trade. The route circuit requires
+an explicitly initialized 2^21 CRS; the library default is too small.
+
+`npm run rehearse:recovery:v13` exercises six abrupt process exits, encrypted
+witness recovery, exactly-once action recording, and concurrent queue assembly
+against PostgreSQL in a temporary isolated schema. Chain actions and CLOB fills
+are simulated. This is database recovery evidence, not a live-fill pilot.
+Both checks run in the Railway pre-deploy gate.
 
 ## Deployment order
 

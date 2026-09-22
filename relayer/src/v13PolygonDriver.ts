@@ -149,7 +149,12 @@ export class V13PolygonDriver implements V13BuyDriver {
       functionName: "startBuyBatch", args: [proof.proof, proof.root, request.positionTokenId,
         proof.nullifiers, proof.fullRefunds, proof.totalDeposit, proof.binding] }));
   }
-  assertFunding(request: V13BuyRequest, totalDeposit: bigint) {
+  async assertFunding(request: V13BuyRequest, totalDeposit: bigint) {
+    const batchId = buildV13RouteInputs(request.witness).binding;
+    const order = await this.config.orderJournal.get(BigInt(batchId).toString(), "aggregate");
+    // A submitted order can already have spent collateral. Its terminal evidence,
+    // not the original pre-trade balance, controls recovery from this point.
+    if (order && order.state !== "prepared") return;
     return this.execution.assertFunding(this.legacyRequest(request), totalDeposit);
   }
   executeAggregateOrder(request: V13BuyRequest, id: Hex, total: bigint, limit: bigint): Promise<V13TerminalBuy> {

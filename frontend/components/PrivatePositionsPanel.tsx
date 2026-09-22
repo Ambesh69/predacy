@@ -145,9 +145,9 @@ export default function PrivatePositionsPanel({
             <div><p className="text-muted">Shares</p><p className="text-text">{amount(order.shares)}</p></div>
             <div><p className="text-muted">Refund</p><p className="text-text">${amount(order.refund)}</p></div>
           </div>
-          {order.state === "settled" && (
+          {["settled", "cancelled", "funded", "locking"].includes(order.state) && (
             <div className="flex gap-2 pt-1">
-              {BigInt(order.refund ?? "0") > 0n && !order.refundWithdrawn && (
+              {BigInt(["funded", "locking"].includes(order.state) ? order.deposit : order.refund ?? "0") > 0n && !order.refundWithdrawn && (
                 <button
                   type="button"
                   onClick={() => handleWithdraw(order, "refund")}
@@ -169,7 +169,7 @@ export default function PrivatePositionsPanel({
               )}
             </div>
           )}
-          {["locked", "queued"].includes(order.state) && (
+          {["locked", "queued", "batched"].includes(order.state) && (
             <button
               type="button"
               onClick={() => handleCancel(order)}

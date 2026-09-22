@@ -6,13 +6,15 @@ Private sealed-bid batch auction layer on top of [Polymarket](https://polymarket
 paused state and its Railway chain/database preflight passes. It replaces v12's
 publicly linkable per-market order commitments with generic order notes,
 secret-derived nullifiers, and private refund/position allocations. An
-independent security review and live recovery pilot are still required before
-intake opens. See [the v13 architecture and launch gate](docs/private-v13.md).
+independent security review, v13 live recovery pilot, and privacy/product
+validation are still required before intake opens. See
+[the v13 architecture and launch gate](docs/private-v13.md).
 
-V13 retains Polymarket for aggregate execution. Individual order market, side,
-size, limit, fill, and wallet linkage are hidden from public batch settlement.
-The aggregate Polymarket hedge remains public, and the relayer sees decrypted
-order witnesses while grouping and proving a batch.
+V13 retains Polymarket for aggregate execution. Proofs omit individual order
+witnesses and source commitments from public batch settlement. This does not
+guarantee anonymity: public funding, withdrawal amounts, timing, and two-order
+batches permit inference. The aggregate Polymarket hedge remains public, and
+the relayer sees decrypted order witnesses while grouping and proving a batch.
 
 ---
 
@@ -68,8 +70,8 @@ Predacy/
 
 ## Legacy deployed contracts (Polygon mainnet)
 
-These addresses belong to the retired v10 flow. V13 has not been deployed to
-mainnet and production must not be configured with these addresses.
+These addresses belong to the retired v10 flow. V13 is deployed separately;
+its production configuration must not use these legacy addresses.
 
 | Contract | Address |
 |---|---|

@@ -97,33 +97,45 @@ export class PostgresV13OrderQueue {
 
   async assemble(groupKey: Hex): Promise<{ batchId: Hex; request: V13BuyRequest } | null> {
     word(groupKey, "groupKey");
-    const ready = await this.pool.query<{ order_commitment: string; leaf_index: number; ciphertext: string }>(
-      `SELECT order_commitment,leaf_index,ciphertext FROM v13_private_order_queue
-       WHERE group_key=$1 AND state='pending' ORDER BY created_at,order_commitment LIMIT 2`, [groupKey]);
-    if (ready.rows.length !== 2) return null;
-    const queued = ready.rows.map((row) => openV13Witness<V13QueuedOrder>(row.order_commitment, row.ciphertext, this.key));
-    if (queued.some((item) => v13OrderGroupKey(item).toLowerCase() !== groupKey.toLowerCase())) {
-      throw new Error("Encrypted v13 queue grouping mismatch");
-    }
-    const leaves = ready.rows.map((row) => ({ index: row.leaf_index, commitment: word(row.order_commitment, "commitment") }));
-    const witnesses = await this.resolveWitnesses(leaves);
-    if (witnesses.length !== 2 || witnesses[0].root.toLowerCase() !== witnesses[1].root.toLowerCase()) {
-      throw new Error("V13 orders do not share the current pool root");
-    }
-    const first = queued[0]; const now = Date.now();
-    const request: V13BuyRequest = { marketId: first.marketId, positionTokenId: first.positionTokenId,
-      priceTick: first.priceTick, depositWallet: first.depositWallet,
-      executeAfterUnixMs: this.executionEpochMs === 0 ? now
-        : (Math.floor(now / this.executionEpochMs) + 1) * this.executionEpochMs,
-      witness: { collateralAsset: first.collateralAsset, positionAsset: first.positionAsset, orders: [
-        { ...queued[0].order, positionAsset: first.positionAsset, merkle: witnesses[0] },
-        { ...queued[1].order, positionAsset: first.positionAsset, merkle: witnesses[1] },
-      ] } };
-    const batchId = buildV13RouteInputs(request.witness).binding;
-    await this.vault.put(batchId, request);
-    const updated = await this.pool.query(`UPDATE v13_private_order_queue SET state='batched',batch_id=$1
-      WHERE state='pending' AND order_commitment IN ($2,$3)`, [batchId, leaves[0].commitment, leaves[1].commitment]);
-    return updated.rowCount === 2 ? { batchId, request } : null;
+    const connection = await this.pool.connect();
+    try {
+      await connection.query("BEGIN");
+      const ready = await connection.query<{ order_commitment: string; leaf_index: number; ciphertext: string }>(
+        `SELECT order_commitment,leaf_index,ciphertext FROM v13_private_order_queue
+         WHERE group_key=$1 AND state='pending' ORDER BY created_at,order_commitment LIMIT 2 FOR UPDATE`, [groupKey]);
+      if (ready.rows.length !== 2) {
+        await connection.query("ROLLBACK");
+        return null;
+      }
+      const queued = ready.rows.map((row) => openV13Witness<V13QueuedOrder>(row.order_commitment, row.ciphertext, this.key));
+      if (queued.some((item) => v13OrderGroupKey(item).toLowerCase() !== groupKey.toLowerCase())) {
+        throw new Error("Encrypted v13 queue grouping mismatch");
+      }
+      const leaves = ready.rows.map((row) => ({ index: row.leaf_index, commitment: word(row.order_commitment, "commitment") }));
+      const witnesses = await this.resolveWitnesses(leaves);
+      if (witnesses.length !== 2 || witnesses[0].root.toLowerCase() !== witnesses[1].root.toLowerCase()) {
+        throw new Error("V13 orders do not share the current pool root");
+      }
+      const first = queued[0]; const now = Date.now();
+      const request: V13BuyRequest = { marketId: first.marketId, positionTokenId: first.positionTokenId,
+        priceTick: first.priceTick, depositWallet: first.depositWallet,
+        executeAfterUnixMs: this.executionEpochMs === 0 ? now
+          : (Math.floor(now / this.executionEpochMs) + 1) * this.executionEpochMs,
+        witness: { collateralAsset: first.collateralAsset, positionAsset: first.positionAsset, orders: [
+          { ...queued[0].order, positionAsset: first.positionAsset, merkle: witnesses[0] },
+          { ...queued[1].order, positionAsset: first.positionAsset, merkle: witnesses[1] },
+        ] } };
+      const batchId = buildV13RouteInputs(request.witness).binding;
+      await this.vault.put(batchId, request, connection);
+      const updated = await connection.query(`UPDATE v13_private_order_queue SET state='batched',batch_id=$1
+        WHERE state='pending' AND order_commitment IN ($2,$3)`, [batchId, leaves[0].commitment, leaves[1].commitment]);
+      if (updated.rowCount !== 2) throw new Error("V13 batch must claim both orders atomically");
+      await connection.query("COMMIT");
+      return { batchId, request };
+    } catch (error) {
+      await connection.query("ROLLBACK");
+      throw error;
+    } finally { connection.release(); }
   }
 
   async pendingBatchIds(): Promise<Hex[]> {

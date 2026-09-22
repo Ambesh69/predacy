@@ -46,7 +46,8 @@ function plan(payload: Record<string, string>): V13TerminalBuy {
 }
 
 export async function runV13BuyBatch(request: V13BuyRequest, journal: V13BatchJournal,
-  driver: V13BuyDriver, routeProver: V13RouteProver, settlementProver: V13SettlementProver) {
+  driver: V13BuyDriver, routeProver: V13RouteProver, settlementProver: V13SettlementProver,
+  options: { allowNewRoute?: boolean } = {}) {
   if (request.positionTokenId <= 0n || request.priceTick <= 0n || request.witness.orders.length !== 2) {
     throw new Error("Invalid v13 buy batch request");
   }
@@ -58,7 +59,16 @@ export async function runV13BuyBatch(request: V13BuyRequest, journal: V13BatchJo
     if (!existingPlan) throw new Error("Settled v13 batch has no durable execution plan");
     const terminal = plan(existingPlan.payload);
     const spent = routeBuilt.totalDeposit - terminal.returnPusd;
-    return { batchId, terminal, fills: allocateV12BuyFill(request.witness.orders, spent, terminal.returnShares) };
+    const settlement = await journal.get(batchId, "settle");
+    if (!settlement || !["broadcast", "confirmed"].includes(settlement.state) || !settlement.txHash) {
+      throw new Error("Spent v13 nullifiers have no matching settlement transaction; reconcile manually");
+    }
+    const fills = allocateV12BuyFill(request.witness.orders, spent, terminal.returnShares) as [V13Fill, V13Fill];
+    const built = buildV13SettlementInputs(request.witness, fills);
+    await executeV13Action(journal, batchId, "settle", {
+      totalSpent: built.totalSpent.toString(), totalShares: built.totalShares.toString(),
+    }, driver.settle(request, { ...built, proof: "0x" }));
+    return { batchId, terminal, fills };
   }
   const routeIntent = await journal.get(batchId, "route");
   if (status === "ROUTED" && (!routeIntent || routeIntent.state === "prepared")) {
@@ -68,6 +78,7 @@ export async function runV13BuyBatch(request: V13BuyRequest, journal: V13BatchJo
     throw new Error("V13 route journal and on-chain state disagree");
   }
   if (status === "READY") {
+    if (options.allowNewRoute === false) throw new Error("V13 intake is disabled; only routed batches may recover");
     const proof = await routeProver(request.witness);
     if (proof.binding !== routeBuilt.binding || proof.root !== routeBuilt.root ||
         proof.totalDeposit !== routeBuilt.totalDeposit ||
@@ -79,6 +90,12 @@ export async function runV13BuyBatch(request: V13BuyRequest, journal: V13BatchJo
       binding: batchId, root: routeBuilt.root, totalDeposit: routeBuilt.totalDeposit.toString(),
       positionTokenId: request.positionTokenId.toString(),
     }, driver.route(request, proof));
+  } else {
+    // Reconfirm the recorded route before inspecting a possibly already-filled wallet.
+    await executeV13Action(journal, batchId, "route", {
+      binding: batchId, root: routeBuilt.root, totalDeposit: routeBuilt.totalDeposit.toString(),
+      positionTokenId: request.positionTokenId.toString(),
+    }, driver.route(request, { ...routeBuilt, proof: "0x" }));
   }
 
   let terminal: V13TerminalBuy;

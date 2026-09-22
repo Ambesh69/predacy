@@ -385,7 +385,7 @@ async function resumeV12Executions(): Promise<void> {
   if (pending.length) console.log(`[Relayer] Resumed ${pending.length} unfinished v12 batch(es) from PostgreSQL`);
 }
 async function resumeV13Executions(): Promise<void> {
-  if (!v13PrivateTradingEnabled || !process.env.V13_DATABASE_URL?.trim() || !process.env.V13_JOURNAL_KEY?.trim()) return;
+  if (!process.env.V13_DATABASE_URL?.trim() || !process.env.V13_JOURNAL_KEY?.trim()) return;
   const pending = await (await privateV13OrderQueue()).pendingBatchIds();
   for (const batchId of pending) launchV13Execution(batchId);
   if (pending.length) console.log(`[Relayer] Resumed ${pending.length} unfinished v13 batch(es) from PostgreSQL`);

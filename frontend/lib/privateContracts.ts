@@ -5,10 +5,14 @@ export interface PrivateContracts {
   deploymentBlock: bigint;
 }
 
+export function isPrivateTradingEnabled(): boolean {
+  return process.env.NEXT_PUBLIC_PRIVATE_TRADING_ENABLED === "true";
+}
+
 export function getPrivateContracts(): PrivateContracts | null {
   const pool = process.env.NEXT_PUBLIC_V13_POOL_ADDRESS?.trim();
   const block = process.env.NEXT_PUBLIC_V13_DEPLOYMENT_BLOCK?.trim();
-  if (process.env.NEXT_PUBLIC_PRIVATE_TRADING_ENABLED !== "true" || !pool || !isAddress(pool) || !block || !/^\d+$/.test(block)) {
+  if (!pool || !isAddress(pool) || !block || !/^\d+$/.test(block)) {
     return null;
   }
   return { pool: getAddress(pool), deploymentBlock: BigInt(block) };

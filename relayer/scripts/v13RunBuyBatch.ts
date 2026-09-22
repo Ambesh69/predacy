@@ -10,6 +10,7 @@ import { runV13BuyBatch, type V13BuyRequest } from "../src/v13BuyRunner.js";
 import { PostgresV13OrderQueue } from "../src/v13OrderQueue.js";
 import { V13PolygonDriver } from "../src/v13PolygonDriver.js";
 import { buildV13RouteInputs, proveV13Route, proveV13Settlement } from "../src/v13Proofs.js";
+import { resolveV13LaunchPolicy } from "../src/v13LaunchPolicy.js";
 
 const USDCE = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 const PUSD = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
@@ -56,7 +57,8 @@ async function main() {
       settlementVerifier: getAddress(required("V13_SETTLEMENT_VERIFIER")),
       guardian: getAddress(required("V13_GUARDIAN")), exchange: getAddress(required("V13_EXCHANGE_ADDRESS")),
       relayerKey, depositWalletSigner: signer, clob, orderJournal });
-    const result = await runV13BuyBatch(request, batchJournal, driver, proveV13Route, proveV13Settlement);
+    const result = await runV13BuyBatch(request, batchJournal, driver, proveV13Route, proveV13Settlement,
+      { allowNewRoute: resolveV13LaunchPolicy(137, process.env).enabled });
     await orderQueue.recordReceipts(result.batchId, request, result.fills);
     console.log(JSON.stringify({ batchId: result.batchId, state: "settled",
       aggregateShares: result.terminal.returnShares.toString() }));

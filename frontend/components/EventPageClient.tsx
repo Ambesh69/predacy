@@ -36,7 +36,7 @@ import {
 } from "@/lib/chain";
 import { publicClient } from "@/lib/publicClient";
 import { usePostHog } from "posthog-js/react";
-import { getPrivateContracts } from "@/lib/privateContracts";
+import { getPrivateContracts, isPrivateTradingEnabled } from "@/lib/privateContracts";
 
 // USDC.e on Polygon mainnet uses EIP712Domain with `salt` (bytes32 chainId) instead
 // of `chainId` (uint256). Testnet MockUSDC uses the standard chainId domain.
@@ -2016,7 +2016,7 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
                         market={selectedMarket}
                         marketId={selectedMarket.conditionId as `0x${string}`}
                         batchOpen={privateDeployment ? true : batch.status === BatchStatus.OPEN}
-                        tradingDisabledReason={IS_MAINNET && !privateDeployment ? "Private trading temporarily unavailable" : undefined}
+                        tradingDisabledReason={IS_MAINNET && (!privateDeployment || !isPrivateTradingEnabled()) ? "Private trading temporarily unavailable" : undefined}
                         buyOnly={!!privateDeployment}
                         onSubmit={async (p) => {
                           setOrderSealed(false);

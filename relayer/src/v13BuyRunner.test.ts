@@ -31,12 +31,20 @@ class Journal implements V13BatchJournal {
   intents = new Map<V13BatchAction, V13Intent>();
   async prepare(id: string, action: V13BatchAction, payload: Record<string, string>) {
     const prior = this.intents.get(action);
-    if (prior) return prior;
-    const value: V13Intent = { batchId: id, action, state: action === "plan" ? "confirmed" : "prepared",
+    if (prior) {
+      expect(prior.payload).toEqual(payload);
+      return prior;
+    }
+    const value: V13Intent = { batchId: id, action, state: "prepared",
       payload, txHash: action === "plan" ? null : null, error: null };
     this.intents.set(action, value); return value;
   }
-  async claim(_id: string, action: V13BatchAction) { const value = this.intents.get(action)!; value.state = "submitting"; return value; }
+  async claim(_id: string, action: V13BatchAction) {
+    const value = this.intents.get(action)!;
+    if (value.state !== "prepared") return null;
+    value.state = "submitting";
+    return value;
+  }
   async recordBroadcast(_id: string, action: V13BatchAction, hash: string) { const value = this.intents.get(action)!; value.state = "broadcast"; value.txHash = hash; }
   async recordConfirmed(_id: string, action: V13BatchAction) { this.intents.get(action)!.state = "confirmed"; }
   async recordUncertain(_id: string, action: V13BatchAction, error: string) { const value = this.intents.get(action)!; value.state = "uncertain"; value.error = error; }
@@ -44,8 +52,77 @@ class Journal implements V13BatchJournal {
   async listUnresolved() { return [...this.intents.values()].filter((value) => value.state === "uncertain"); }
 }
 const tx = () => ({ send: vi.fn(async () => word("a")), confirm: vi.fn(async () => undefined) });
+function stoppedDriver(status: "READY" | "SETTLED"): V13BuyDriver {
+  const unexpected = () => { throw new Error("Unexpected execution after recovery guard"); };
+  return { assertBatch: async () => status, route: unexpected, assertFunding: unexpected,
+    executeAggregateOrder: unexpected, withdrawPusd: unexpected, unwrapPusd: unexpected,
+    returnShares: unexpected, assertPoolReturns: unexpected, settle: unexpected };
+}
 
 describe("v13 resumable private buy", () => {
+  it.each(["route", "fill", "withdraw_pusd", "unwrap_pusd", "return_shares", "settle"])(
+    "recovers a restart after %s without repeating a trade or transfer", async (checkpoint) => {
+      const input = request();
+      const journal = new Journal();
+      let status: "READY" | "ROUTED" | "SETTLED" = "READY";
+      let interrupted = false;
+      const counts: Record<string, number> = {};
+      const interrupt = (action: string) => {
+        if (checkpoint === action && !interrupted) {
+          interrupted = true;
+          throw new Error("simulated process restart");
+        }
+      };
+      const action = (name: string) => ({
+        send: async () => {
+          counts[name] = (counts[name] ?? 0) + 1;
+          if (name === "route") status = "ROUTED";
+          if (name === "settle") status = "SETTLED";
+          return word("a");
+        },
+        confirm: async () => { interrupt(name); },
+      });
+      const driver: V13BuyDriver = {
+        assertBatch: async () => status,
+        route: () => action("route"), assertFunding: async () => {},
+        executeAggregateOrder: async () => {
+          counts.fill ??= 1; // Represents terminal evidence already stored by the CLOB order journal.
+          interrupt("fill");
+          return { returnPusd: 450_000n, returnShares: 1_000_000n, confirmedTradeCount: 1 };
+        },
+        withdrawPusd: () => action("withdraw_pusd"), unwrapPusd: () => action("unwrap_pusd"),
+        returnShares: () => action("return_shares"), assertPoolReturns: async () => {},
+        settle: () => action("settle"),
+      };
+      const route = async () => ({ ...buildV13RouteInputs(input.witness), proof: "0x" as Hex });
+      const settle = async (batch: V13BuyRequest["witness"], fills: [ { spent: bigint; shares: bigint }, { spent: bigint; shares: bigint } ]) =>
+        ({ ...buildV13SettlementInputs(batch, fills), proof: "0x" as Hex });
+      await expect(runV13BuyBatch(input, journal, driver, route, settle)).rejects.toThrow("restart");
+      const recovered = await runV13BuyBatch(input, journal, driver, route, settle, { allowNewRoute: false });
+      await runV13BuyBatch(input, journal, driver, route, settle, { allowNewRoute: false });
+      expect(recovered.fills.reduce((sum, fill) => sum + fill.spent, 0n)).toBe(550_000n);
+      expect(Object.values(counts)).toEqual([1, 1, 1, 1, 1, 1]);
+      expect(journal.intents.get("route")?.state).toBe("confirmed");
+      expect(journal.intents.get("settle")?.state).toBe("confirmed");
+    });
+
+  it("cannot start a new route while intake is disabled", async () => {
+    const driver = stoppedDriver("READY");
+    const prover = vi.fn();
+    await expect(runV13BuyBatch(request(), new Journal(), driver, prover, vi.fn(),
+      { allowNewRoute: false })).rejects.toThrow("only routed batches may recover");
+    expect(prover).not.toHaveBeenCalled();
+  });
+
+  it("does not mistake cancelled nullifiers for a settled batch", async () => {
+    const input = request(); const journal = new Journal();
+    await journal.prepare(buildV13RouteInputs(input.witness).binding, "plan",
+      { returnPusd: "450000", returnShares: "1000000", confirmedTradeCount: "1" });
+    const driver = stoppedDriver("SETTLED");
+    await expect(runV13BuyBatch(input, journal, driver, vi.fn(), vi.fn()))
+      .rejects.toThrow("no matching settlement transaction");
+  });
+
   it("routes, executes, returns assets and settles exactly once", async () => {
     const input = request(); const journal = new Journal();
     const route = buildV13RouteInputs(input.witness);

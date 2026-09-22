@@ -34,7 +34,7 @@ import {
 } from "@/lib/chain";
 import { publicClient } from "@/lib/publicClient";
 import { clsx } from "clsx";
-import { getPrivateContracts } from "@/lib/privateContracts";
+import { getPrivateContracts, isPrivateTradingEnabled } from "@/lib/privateContracts";
 import type { PrivateOrderRecord } from "@/lib/privateNotes";
 
 // ── Viem public client (read-only, no wallet needed) ─────────────────────────
@@ -1552,7 +1552,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
                 market={market}
                 marketId={(privateDeployment ? id : batch.batchMarketId) as `0x${string}`}
                 batchOpen={privateDeployment ? true : batch.status === BatchStatus.OPEN}
-                tradingDisabledReason={IS_MAINNET && !privateDeployment ? "Private trading temporarily unavailable" : undefined}
+                tradingDisabledReason={IS_MAINNET && (!privateDeployment || !isPrivateTradingEnabled()) ? "Private trading temporarily unavailable" : undefined}
                 buyOnly={!!privateDeployment}
                 onSubmit={handleOrderSubmit}
                 walletAddress={walletAddress}

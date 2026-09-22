@@ -95,7 +95,8 @@ export function privateNoteCommitment(asset: Hex, amount: bigint, publicKey: Hex
   ));
 }
 
-export function privateOrderCommitment(request: PrivateCancellationProofRequest): Hex {
+export function privateOrderCommitment(request: Pick<PrivateCancellationProofRequest,
+  "positionAsset" | "deposit" | "limitPrice" | "refundPublicKey" | "positionPublicKey" | "orderSecret">): Hex {
   return keccak256(encodeAbiParameters(
     [
       { type: "bytes32" }, { type: "bytes32" }, { type: "uint256" },
@@ -168,7 +169,7 @@ export async function provePrivateBuyOrder(request: PrivateOrderProofRequest): P
   const inputNote = privateNoteCommitment(request.collateralAsset, request.deposit, publicKey);
   const root = merkleRoot(inputNote, request.merkle);
   const nullifier = noteNullifier(inputNote, request.noteSecret);
-  const orderCommitment = privateOrderCommitment({ ...request, merkle: request.merkle });
+  const orderCommitment = privateOrderCommitment(request);
   const expected = [root, nullifier, request.collateralAsset, orderCommitment]
     .flatMap((value) => halves(value).map(fieldWord));
   const proof = await generateProof(orderCircuit, {

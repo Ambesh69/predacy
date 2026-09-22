@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 
 export type V13BatchAction =
   "route" | "plan" | "withdraw_pusd" | "unwrap_pusd" | "return_shares" | "settle" | "cancel";
@@ -152,13 +152,14 @@ export class PostgresV13WitnessVault {
       return new PostgresV13WitnessVault(pool, key);
     } catch (error) { await pool.end(); throw error; }
   }
-  async put(batchId: string, witness: unknown) {
+  async put(batchId: string, witness: unknown, transaction?: PoolClient) {
+    const connection = transaction ?? this.pool;
     const sealed = sealV13Witness(batchId, witness, this.key);
-    const inserted = await this.pool.query(`INSERT INTO v13_private_witnesses
+    const inserted = await connection.query(`INSERT INTO v13_private_witnesses
       (batch_id,ciphertext,witness_digest) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING`,
     [batchId, sealed.ciphertext, sealed.digest]);
     if (inserted.rowCount === 1) return;
-    const existing = await this.pool.query<{ witness_digest: string }>(
+    const existing = await connection.query<{ witness_digest: string }>(
       "SELECT witness_digest FROM v13_private_witnesses WHERE batch_id=$1", [batchId]);
     if (existing.rows[0]?.witness_digest !== sealed.digest) throw new Error("Different v13 witness already stored");
   }

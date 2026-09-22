@@ -280,14 +280,22 @@ export function buildV13CancelInputs(collateralAsset: Hex, order: V13PrivateOrde
   };
 }
 
-async function prove(circuitPath: string, noirInputs: Record<string, unknown>, expected: Hex[]) {
+export function loadV13Circuit(kind: "order" | "route" | "settlement" | "cancel") {
+  const circuit = require(`../circuits/shielded_${kind}_v13.json`);
+  if (!circuit.bytecode || !circuit.abi?.parameters?.length) throw new Error(`Invalid bundled v13 ${kind} circuit`);
+  return circuit as ConstructorParameters<(typeof import("@noir-lang/noir_js"))["Noir"]>[0];
+}
+
+async function prove(kind: "order" | "route" | "settlement" | "cancel", noirInputs: Record<string, unknown>, expected: Hex[]) {
   const { Noir } = await import("@noir-lang/noir_js");
   const { Barretenberg, BackendType, UltraHonkBackend } = await import("@aztec/bb.js");
-  const circuit = require(circuitPath) as ConstructorParameters<typeof Noir>[0];
+  const circuit = loadV13Circuit(kind);
   const api = await Barretenberg.new(process.env.BB_BACKEND === "wasm"
     ? { backend: BackendType.Wasm }
     : process.env.BB_PATH ? { bbPath: process.env.BB_PATH } : {});
   try {
+    // The route verifier uses a 2^21 circuit; bb.js defaults to a 2^20 CRS.
+    await api.initSRSChonk(kind === "route" ? 2 ** 21 : 2 ** 20);
     const { witness } = await new Noir(circuit).execute(noirInputs as never);
     const result = await new UltraHonkBackend(circuit.bytecode, api).generateProof(witness, { verifierTarget: "evm" });
     const publicInputs = result.publicInputs.map((value) =>
@@ -303,24 +311,24 @@ async function prove(circuitPath: string, noirInputs: Record<string, unknown>, e
 
 export async function proveV13Route(batch: V13BatchWitness) {
   const built = buildV13RouteInputs(batch);
-  return { ...(await prove("../../circuits/shielded_route_v13/target/shielded_route_v13.json",
+  return { ...(await prove("route",
     built.noirInputs, built.publicInputs)), ...built };
 }
 
 export async function proveV13OrderLock(witness: V13OrderLockWitness) {
   const built = buildV13OrderLockInputs(witness);
-  return { ...(await prove("../../circuits/shielded_order_v13/target/shielded_order_v13.json",
+  return { ...(await prove("order",
     built.noirInputs, built.publicInputs)), ...built };
 }
 
 export async function proveV13Settlement(batch: V13BatchWitness, fills: [V13Fill, V13Fill]) {
   const built = buildV13SettlementInputs(batch, fills);
-  return { ...(await prove("../../circuits/shielded_settlement_v13/target/shielded_settlement_v13.json",
+  return { ...(await prove("settlement",
     built.noirInputs, built.publicInputs)), ...built };
 }
 
 export async function proveV13Cancel(collateralAsset: Hex, order: V13PrivateOrder) {
   const built = buildV13CancelInputs(collateralAsset, order);
-  return { ...(await prove("../../circuits/shielded_cancel_v13/target/shielded_cancel_v13.json",
+  return { ...(await prove("cancel",
     built.noirInputs, built.publicInputs)), ...built };
 }

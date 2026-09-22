@@ -30,7 +30,7 @@ export interface PrivateOrderRecord {
   refundPublicKey: Hex;
   positionSecret: Hex;
   positionPublicKey: Hex;
-  state: "locked" | "queued" | "batched" | "settled" | "cancelled";
+  state: "funding" | "funded" | "locking" | "locked" | "queued" | "batched" | "settled" | "cancelled";
   spent?: string;
   shares?: string;
   refund?: string;
