@@ -248,7 +248,7 @@ interface ClaimJob {
 const claimJobs = new Map<string, ClaimJob>();
 interface V11RecoveryJob {
   status: "pending" | "done" | "error";
-  step: "reconcile" | "settle" | "complete";
+  step: "reconcile" | "execute" | "settle" | "complete";
   error?: string;
   createdAt: number;
 }
@@ -389,6 +389,48 @@ const server = createServer((req, res) => {
         })();
       } catch (error) {
         send(400, { error: error instanceof Error ? error.message : "Invalid recovery request" });
+      }
+    });
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/admin/v11-run") {
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk;
+      if (body.length > 64_000) req.destroy();
+    });
+    req.on("end", () => {
+      try {
+        const data = JSON.parse(body) as { batchId?: unknown; manifest?: Record<string, unknown> };
+        const batchId = data.batchId;
+        const manifest = data.manifest;
+        if (typeof batchId !== "string" || !/^\d+$/.test(batchId) ||
+            !manifest || manifest.batchId !== batchId ||
+            typeof manifest.deposit !== "string" || !/^\d+$/.test(manifest.deposit) ||
+            BigInt(manifest.deposit) > 10_000_000n) {
+          send(400, { error: "Invalid capped v11 execution manifest" });
+          return;
+        }
+        if ([...v11RecoveryJobs.values()].some((job) => job.status === "pending")) {
+          send(409, { error: "A v11 execution job is already running" });
+          return;
+        }
+        const jobId = `v11-run-${batchId}-${Date.now().toString(36)}`;
+        v11RecoveryJobs.set(jobId, { status: "pending", step: "execute", createdAt: Date.now() });
+        send(202, { ok: true, jobId });
+        void runV11RecoveryCommand("run:v11", batchId, manifest).then(
+          () => v11RecoveryJobs.set(jobId, {
+            status: "done", step: "complete", createdAt: Date.now(),
+          }),
+          (error) => v11RecoveryJobs.set(jobId, {
+            status: "error", step: "execute",
+            error: error instanceof Error ? error.message : "V11 execution failed",
+            createdAt: Date.now(),
+          }),
+        );
+      } catch (error) {
+        send(400, { error: error instanceof Error ? error.message : "Invalid execution request" });
       }
     });
     return;
