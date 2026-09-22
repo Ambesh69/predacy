@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { createPublicClient, http, fallback, parseAbiItem, recoverMessageAddress, encodeFunctionData } from "viem";
 import { polygon, polygonAmoy } from "viem/chains";
@@ -245,6 +246,32 @@ interface ClaimJob {
   createdAt: number;
 }
 const claimJobs = new Map<string, ClaimJob>();
+interface V11RecoveryJob {
+  status: "pending" | "done" | "error";
+  step: "reconcile" | "settle" | "complete";
+  error?: string;
+  createdAt: number;
+}
+const v11RecoveryJobs = new Map<string, V11RecoveryJob>();
+
+function runV11RecoveryCommand(script: "reconcile:v11" | "run:v11", batchId: string, manifest: unknown) {
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn("npm", ["run", script, "--", "--execute", batchId], {
+      cwd: process.cwd(),
+      env: { ...process.env, V11_ORDER_JSON: JSON.stringify(manifest) },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    const append = (chunk: Buffer) => { output = (output + chunk.toString("utf8")).slice(-4_000); };
+    child.stdout.on("data", append);
+    child.stderr.on("data", append);
+    child.on("error", reject);
+    child.on("exit", (code) => code === 0 ? resolve() : reject(new Error(
+      output.match(/V11 execution halted: ([^.]+(?:\.[^.]+)*)\./)?.[1] ??
+      output.trim().split("\n").at(-1) ?? `${script} exited with code ${code}`,
+    )));
+  });
+}
 // Evict jobs older than 30 min to prevent unbounded memory growth
 setInterval(() => {
   const cutoff = Date.now() - 30 * 60 * 1000;
@@ -308,6 +335,61 @@ const server = createServer((req, res) => {
       vault:   baseConfig.vaultAddress,
       markets,
       pausedMarkets: Object.fromEntries(pausedMarkets),
+    });
+    return;
+  }
+
+  if (req.method === "GET" && req.url?.startsWith("/admin/v11-recovery/status")) {
+    const jobId = new URL(req.url, "http://localhost").searchParams.get("jobId") ?? "";
+    const job = v11RecoveryJobs.get(jobId);
+    if (!job) send(404, { error: "Recovery job not found" });
+    else send(200, job);
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/admin/v11-recovery") {
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk;
+      if (body.length > 64_000) req.destroy();
+    });
+    req.on("end", () => {
+      try {
+        const data = JSON.parse(body) as { batchId?: unknown; manifest?: Record<string, unknown> };
+        const batchId = data.batchId;
+        const manifest = data.manifest;
+        if (typeof batchId !== "string" || !/^\d+$/.test(batchId) ||
+            !manifest || manifest.batchId !== batchId ||
+            typeof manifest.deposit !== "string" || !/^\d+$/.test(manifest.deposit) ||
+            BigInt(manifest.deposit) > 10_000_000n) {
+          send(400, { error: "Invalid capped v11 recovery manifest" });
+          return;
+        }
+        if ([...v11RecoveryJobs.values()].some((job) => job.status === "pending")) {
+          send(409, { error: "A v11 recovery job is already running" });
+          return;
+        }
+        const jobId = `v11-${batchId}-${Date.now().toString(36)}`;
+        v11RecoveryJobs.set(jobId, { status: "pending", step: "reconcile", createdAt: Date.now() });
+        send(202, { ok: true, jobId });
+        void (async () => {
+          try {
+            await runV11RecoveryCommand("reconcile:v11", batchId, manifest);
+            v11RecoveryJobs.set(jobId, { status: "pending", step: "settle", createdAt: Date.now() });
+            await runV11RecoveryCommand("run:v11", batchId, manifest);
+            v11RecoveryJobs.set(jobId, { status: "done", step: "complete", createdAt: Date.now() });
+          } catch (error) {
+            v11RecoveryJobs.set(jobId, {
+              status: "error",
+              step: v11RecoveryJobs.get(jobId)?.step ?? "reconcile",
+              error: error instanceof Error ? error.message : "V11 recovery failed",
+              createdAt: Date.now(),
+            });
+          }
+        })();
+      } catch (error) {
+        send(400, { error: error instanceof Error ? error.message : "Invalid recovery request" });
+      }
     });
     return;
   }
