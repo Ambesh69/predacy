@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { createPublicClient, getAddress, http, parseAbi } from "viem";
+import { createPublicClient, getAddress, http, isAddressEqual, parseAbi } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { polygon } from "viem/chains";
 import { PostgresV13BatchJournal, PostgresV13WitnessVault } from "../src/v13BatchJournal.js";
@@ -54,7 +54,11 @@ async function main() {
   const actual = [withdraw, transfer, order, route, settlement, cancel, adapter, guardian, onchainRelayer].map(getAddress);
   const expected = [configured.withdraw, configured.transfer, configured.order, configured.route,
     configured.settlement, configured.cancel, adapterAddress, configured.guardian, relayer];
-  if (actual.some((value, i) => value !== expected[i])) throw new Error("V13 contract wiring mismatch");
+  const labels = ["withdraw", "transfer", "order", "route", "settlement", "cancel", "adapter", "guardian", "relayer"];
+  const mismatch = actual.findIndex((value, i) => !isAddressEqual(value, expected[i]));
+  if (mismatch !== -1) {
+    throw new Error(`V13 ${labels[mismatch]} mismatch: expected ${expected[mismatch]}, received ${actual[mismatch]}`);
+  }
   if (active[4]) throw new Error("A v13 batch is active");
   if (!policy.enabled && !paused) throw new Error("Disabled v13 intake requires the pool to remain paused");
   if (policy.enabled && paused) throw new Error("Enabled v13 intake points to a paused pool");
