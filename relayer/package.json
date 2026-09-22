@@ -16,7 +16,8 @@
     "run:v12": "tsx scripts/v12RunBuyBatch.ts",
     "preflight:deploy:v12": "tsx scripts/v12DeploymentPreflight.ts",
     "preflight:v12": "tsx scripts/v12Preflight.ts",
-    "rehearse:recovery:v12": "tsx scripts/v12RecoveryRehearsal.ts"
+    "rehearse:recovery:v12": "tsx scripts/v12RecoveryRehearsal.ts",
+    "predeploy:v12": "npm run rehearse:recovery:v12 && npm run preflight:v12"
   },
   "engines": {
     "node": ">=24"
