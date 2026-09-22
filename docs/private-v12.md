@@ -157,3 +157,9 @@ state, and the Polymarket Deposit Wallet identity.
 4. Complete an independent circuit, contract, relayer, and key-management review
    before enabling production trading. An internal test pass is not independent
    review.
+
+All deployment scripts fail before `startBroadcast` when Polygon's current base
+fee exceeds `V12_MAX_GAS_PRICE_WEI` (5 gwei by default). Do not override this cap
+without a new explicit POL budget. A failed September 2026 attempt sent only
+Foundry's preparatory CREATE2 transaction; no v12 verifier, pool, or adapter was
+deployed.

@@ -7,6 +7,8 @@ import {HonkVerifier} from "../src/Verifier.sol";
 contract DeployVerifier is Script {
     function run() external returns (HonkVerifier verifier) {
         uint256 deployerKey = vm.envUint("PRIVATE_KEY");
+        uint256 maxGasPrice = vm.envOr("V12_MAX_GAS_PRICE_WEI", uint256(5 gwei));
+        require(block.basefee <= maxGasPrice, "v12: Polygon gas exceeds deployment cap");
         vm.startBroadcast(deployerKey);
         verifier = new HonkVerifier();
         vm.stopBroadcast();

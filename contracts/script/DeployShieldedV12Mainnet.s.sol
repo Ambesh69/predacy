@@ -18,6 +18,8 @@ contract DeployShieldedV12Mainnet is Script {
 
     function run() external returns (ShieldedPoolV1 pool, ShieldedPolymarketAdapter adapter) {
         require(block.chainid == 137, "v12: Polygon mainnet only");
+        uint256 maxGasPrice = vm.envOr("V12_MAX_GAS_PRICE_WEI", uint256(5 gwei));
+        require(block.basefee <= maxGasPrice, "v12: Polygon gas exceeds deployment cap");
         uint256 deployerKey = vm.envUint("PRIVATE_KEY");
         address relayer = vm.envAddress("V12_RELAYER");
         address guardian = vm.envAddress("V12_GUARDIAN");
