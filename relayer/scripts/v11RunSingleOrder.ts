@@ -105,7 +105,8 @@ async function main(): Promise<void> {
   } finally { await batchJournal.close(); }
 }
 
-main().catch(() => {
-  console.error("V11 execution halted. Inspect the durable journals and on-chain/CLOB state before retrying.");
+main().catch((error: unknown) => {
+  const detail = error instanceof Error ? error.message : "unknown error";
+  console.error(`V11 execution halted: ${detail}. Inspect the durable journals and on-chain/CLOB state before retrying.`);
   process.exitCode = 1;
 });

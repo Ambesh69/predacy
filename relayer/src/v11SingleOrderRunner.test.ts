@@ -76,6 +76,10 @@ class OrderJournal implements V11OrderJournal {
     this.intent!.state = "rejected";
     this.intent!.response = response;
   }
+  async recordReconciledRejection(_batchId: string, _legId: string, evidence: unknown) {
+    this.intent!.state = "rejected";
+    this.intent!.response = evidence;
+  }
   async recordUncertain(_batchId: string, _legId: string, error: string) {
     this.intent!.state = "uncertain";
     this.intent!.error = error;

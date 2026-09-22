@@ -9,6 +9,9 @@
     "build": "tsc",
     "test": "vitest run",
     "preflight:v11": "tsx scripts/v11Preflight.ts",
+    "prepare:v11": "tsx scripts/v11PreparePilot.ts",
+    "pilot:wallet:v11": "tsx scripts/v11PilotWalletServer.ts",
+    "reconcile:v11": "tsx scripts/v11ReconcileRejected.ts",
     "run:v11": "tsx scripts/v11RunSingleOrder.ts"
   },
   "engines": {

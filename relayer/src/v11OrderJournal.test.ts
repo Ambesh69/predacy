@@ -29,6 +29,14 @@ describe("v11 PostgreSQL journal SQL", () => {
       expect(await journal.claimForSubmission("1001", "buy-0")).toBeNull();
       await expect(journal.recordRejected("1001", "buy-0", { ok: false }))
         .rejects.toThrow(/transition/);
+
+      await journal.prepare("1002", "buy-0", signed);
+      await journal.claimForSubmission("1002", "buy-0");
+      await journal.recordUncertain("1002", "buy-0", "request outcome unknown");
+      await journal.recordReconciledRejection("1002", "buy-0", { openOrders: 0, trades: 0 });
+      expect((await journal.get("1002", "buy-0"))?.state).toBe("rejected");
+      await expect(journal.recordReconciledRejection("1002", "buy-0", {}))
+        .rejects.toThrow(/transition/);
     } finally {
       await journal.close();
     }

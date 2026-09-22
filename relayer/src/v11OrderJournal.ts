@@ -18,6 +18,7 @@ export interface V11OrderJournal {
   claimForSubmission(batchId: string, legId: string): Promise<V11OrderIntent | null>;
   recordAccepted(batchId: string, legId: string, orderId: string, response: unknown): Promise<void>;
   recordRejected(batchId: string, legId: string, response: unknown): Promise<void>;
+  recordReconciledRejection(batchId: string, legId: string, evidence: unknown): Promise<void>;
   recordUncertain(batchId: string, legId: string, error: string): Promise<void>;
   get(batchId: string, legId: string): Promise<V11OrderIntent | null>;
   listUnresolved(): Promise<V11OrderIntent[]>;
@@ -114,6 +115,10 @@ export class PostgresV11OrderJournal implements V11OrderJournal {
 
   async recordRejected(batchId: string, legId: string, response: unknown): Promise<void> {
     await this.transition(batchId, legId, "submitting", "rejected", null, response, null);
+  }
+
+  async recordReconciledRejection(batchId: string, legId: string, evidence: unknown): Promise<void> {
+    await this.transition(batchId, legId, "uncertain", "rejected", null, evidence, null);
   }
 
   async recordUncertain(batchId: string, legId: string, error: string): Promise<void> {

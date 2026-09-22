@@ -48,6 +48,11 @@ class MemoryJournal implements V11OrderJournal {
     this.intent.state = "rejected";
     this.intent.response = response;
   }
+  async recordReconciledRejection(_batchId: string, _legId: string, evidence: unknown): Promise<void> {
+    if (!this.intent || this.intent.state !== "uncertain") throw new Error("wrong state");
+    this.intent.state = "rejected";
+    this.intent.response = evidence;
+  }
   async recordUncertain(_batchId: string, _legId: string, error: string): Promise<void> {
     if (!this.intent || this.intent.state !== "submitting") throw new Error("wrong state");
     this.intent.state = "uncertain";
@@ -158,6 +163,20 @@ describe("v11 signed CLOB order", () => {
       .rejects.toThrow(/INSUFFICIENT_BALANCE/);
     expect(journal.intent?.state).toBe("rejected");
     expect(postOrder).toHaveBeenCalledOnce();
+  });
+
+  it("records an SDK request rejection as terminal instead of uncertain", async () => {
+    const journal = new MemoryJournal();
+    await journal.prepare("5", "1", signedBuy);
+    const rejected = Object.assign(new Error("no orders found to match with FAK order"), {
+      name: "RequestRejectedError",
+      status: 400,
+    });
+    const postOrder = vi.fn(async () => { throw rejected; });
+    await expect(submitV11OrderOnce(journal, { postOrder }, "5", "1", async () => {}))
+      .rejects.toThrow(/no orders found/);
+    expect(journal.intent?.state).toBe("rejected");
+    expect(journal.intent?.response).toMatchObject({ ok: false, status: 400 });
   });
 
   it("does not submit or consume the journal when funding is unconfirmed", async () => {

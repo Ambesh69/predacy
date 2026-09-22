@@ -15,6 +15,21 @@ export interface ClobOrderPoster {
   }>;
 }
 
+function explicitRequestRejection(error: unknown): {
+  ok: false; status: number; code?: string; message: string;
+} | null {
+  if (!(error instanceof Error) || error.name !== "RequestRejectedError") return null;
+  const status = (error as Error & { status?: unknown }).status;
+  const code = (error as Error & { code?: unknown }).code;
+  if (typeof status !== "number" || status < 400 || status >= 500 || status === 429) return null;
+  return {
+    ok: false,
+    status,
+    ...(typeof code === "string" && code ? { code } : {}),
+    message: error.message,
+  };
+}
+
 /** One network attempt only. A timeout or process crash requires reconciliation. */
 export async function submitV11OrderOnce(
   journal: V11OrderJournal,
@@ -33,6 +48,11 @@ export async function submitV11OrderOnce(
   try {
     response = await client.postOrder(intent.signedOrder);
   } catch (error) {
+    const rejected = explicitRequestRejection(error);
+    if (rejected) {
+      await journal.recordRejected(batchId, legId, rejected);
+      throw new Error(`CLOB rejected v11 order: ${rejected.code ?? rejected.message}`);
+    }
     await journal.recordUncertain(batchId, legId, String(error));
     throw new Error("CLOB submission outcome is uncertain; reconcile before any further action", { cause: error });
   }
