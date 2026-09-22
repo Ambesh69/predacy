@@ -21,6 +21,11 @@ export interface V12PrivateReceipt {
   refund: bigint;
 }
 
+export interface V12BatchQueueState {
+  orderCount: number;
+  receiptCount: number;
+}
+
 function decimal(value: unknown, label: string): bigint {
   if (typeof value !== "string" || !/^\d+$/.test(value)) throw new Error(`${label} must be a decimal string`);
   return BigInt(value);
@@ -97,9 +102,18 @@ export class PostgresV12OrderQueue {
     private readonly pool: Pool,
     private readonly witnessVault: PostgresV12WitnessVault,
     private readonly key: string,
+    private readonly executionEpochMs: number,
   ) {}
 
-  static async connect(databaseUrl: string, key: string): Promise<PostgresV12OrderQueue> {
+  static async connect(
+    databaseUrl: string,
+    key: string,
+    options: { executionEpochMs?: number } = {},
+  ): Promise<PostgresV12OrderQueue> {
+    const executionEpochMs = options.executionEpochMs ?? 60_000;
+    if (!Number.isSafeInteger(executionEpochMs) || executionEpochMs < 0 || executionEpochMs > 3_600_000) {
+      throw new Error("V12 execution epoch must be between 0 and 3600000 milliseconds");
+    }
     const pool = new Pool({ connectionString: databaseUrl, max: 2 });
     const witnessVault = await PostgresV12WitnessVault.connect(databaseUrl, key);
     try {
@@ -120,7 +134,7 @@ export class PostgresV12OrderQueue {
         CREATE INDEX IF NOT EXISTS v12_private_order_queue_ready
         ON v12_private_order_queue (group_key, state, created_at)
       `);
-      return new PostgresV12OrderQueue(pool, witnessVault, key);
+      return new PostgresV12OrderQueue(pool, witnessVault, key, executionEpochMs);
     } catch (error) {
       await Promise.all([pool.end(), witnessVault.close()]);
       throw error;
@@ -160,11 +174,16 @@ export class PostgresV12OrderQueue {
       throw new Error("Encrypted v12 queue grouping mismatch");
     }
     const first = queued[0];
+    const now = Date.now();
+    const executeAfterUnixMs = this.executionEpochMs === 0
+      ? now
+      : (Math.floor(now / this.executionEpochMs) + 1) * this.executionEpochMs;
     const request: V12BuyBatchRequest = {
       marketId: first.marketId,
       positionTokenId: first.positionTokenId,
       priceTick: first.priceTick,
       depositWallet: getAddress(first.depositWallet),
+      executeAfterUnixMs,
       witness: {
         collateralAsset: first.collateralAsset,
         positionAsset: first.positionAsset,
@@ -180,6 +199,31 @@ export class PostgresV12OrderQueue {
     `, [batchId, commitments[0], commitments[1]]);
     if (updated.rowCount !== 2) return null;
     return { batchId, request };
+  }
+
+  /** Batches without a complete private receipt set must be resumed after a restart. */
+  async pendingBatchIds(): Promise<Hex[]> {
+    const result = await this.pool.query<{ batch_id: string }>(`
+      SELECT batch_id FROM v12_private_order_queue
+      WHERE state = 'batched' AND receipt_ciphertext IS NULL AND batch_id IS NOT NULL
+      GROUP BY batch_id ORDER BY MIN(created_at)
+    `);
+    return result.rows.map((row) => {
+      assertWord(row.batch_id, "batchId");
+      return row.batch_id as Hex;
+    });
+  }
+
+  async batchState(batchId: Hex): Promise<V12BatchQueueState | null> {
+    assertWord(batchId, "batchId");
+    const result = await this.pool.query<{ order_count: string; receipt_count: string }>(`
+      SELECT COUNT(*)::text AS order_count,
+             COUNT(receipt_ciphertext)::text AS receipt_count
+      FROM v12_private_order_queue WHERE batch_id = $1
+    `, [batchId]);
+    const orderCount = Number(result.rows[0]?.order_count ?? "0");
+    if (orderCount === 0) return null;
+    return { orderCount, receiptCount: Number(result.rows[0].receipt_count) };
   }
 
   async recordReceipts(batchId: Hex, request: V12BuyBatchRequest, fills: Array<{ spent: bigint; shares: bigint }>): Promise<void> {

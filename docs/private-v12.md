@@ -105,24 +105,55 @@ decrypt individual order amounts and limits. Each browser generates a random
 receipt bearer secret; only its hash enters the encrypted queue, and the fill is
 returned through that authenticated receipt rather than a public order endpoint.
 
+Executable batches wait for the next fixed execution epoch (60 seconds by
+default), and every public aggregate contains exactly two compatible private
+orders. The epoch is sealed into the encrypted batch witness. This reduces direct
+lock-to-hedge timing correlation; it does not hide the aggregate hedge amount or
+make the relayer oblivious to its two constituent orders.
+
+V12 intake has an independent `V12_PRIVATE_TRADING_ENABLED` gate. Disabling it
+rejects new orders without disabling recovery. At startup the relayer scans the
+encrypted PostgreSQL queue for batched orders without complete receipts and
+resumes their one-shot runner. `/v12/status/:batchId` reconstructs completed or
+pending state from PostgreSQL after in-memory job state is lost.
+
 Each generated EVM verifier lives in an isolated Foundry project because Noir's
 generated verifier symbols collide when multiple generated verifiers share one
 Solidity compilation unit.
 
 The contracts are intentionally deployed paused by the v12 deployment script.
 Passing tests are not an authorization to enable public trading: deployment,
-live PostgreSQL restart recovery, an independent security review, and a capped
-recovery exercise still remain. Private
+an independent security review, and a capped recovery exercise still remain. Private
 order intake now requires a current HMAC-signed Vercel location assertion and
 rejects Polymarket's blocked countries and regions.
 
+Operational checks:
+
+```bash
+cd relayer
+npm run rehearse:recovery:v12
+npm run preflight:v12
+```
+
+The recovery rehearsal writes uniquely identified encrypted witness and action
+rows, closes both PostgreSQL clients, reconnects, proves the broadcast action is
+not claimable again, completes it, and removes the rehearsal rows. The preflight
+is read-only apart from creating missing database tables. It verifies chain,
+bytecode, every contract role/address, paused/active state, PostgreSQL recovery
+state, and the Polymarket Deposit Wallet identity.
+
 ## Remaining execution path
 
-1. Replace Keccak Merkle hashing with a reviewed SNARK-friendly implementation
-   and benchmark browser proving on target devices.
-2. Use fixed epochs, padded batches, and rotated pooled
-   execution wallets to reduce timing correlation.
-3. Exercise PostgreSQL restart recovery and a deliberately capped live batch;
-   the real Polygon USDC.e/pUSD rejection and partial-fill fork paths pass.
+1. Decide whether to migrate the Keccak tree to a separately reviewed,
+   Noir/EVM-compatible Poseidon2 implementation. The current implementation is
+   interoperable and proven end to end, but Keccak makes browser proofs heavier.
+2. Register and fund a pool of isolated Polymarket Deposit Wallets before adding
+   wallet rotation. Fixed epochs and fixed two-order batches are implemented;
+   zero-subsidy amount padding requires equal-denomination order splitting rather
+   than operator-funded cover orders.
+3. Deploy the verifiers, pool, and adapter paused; run the live PostgreSQL
+   rehearsal and read-only preflight; then perform a deliberately capped recovery
+   batch before considering the intake gate.
 4. Complete an independent circuit, contract, relayer, and key-management review
-   before enabling production trading.
+   before enabling production trading. An internal test pass is not independent
+   review.

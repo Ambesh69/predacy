@@ -11,6 +11,8 @@ export interface V12BuyBatchRequest {
   positionTokenId: bigint;
   priceTick: bigint;
   depositWallet: Address;
+  /** Fixed execution boundary selected when the private batch is assembled. */
+  executeAfterUnixMs?: number;
   witness: Omit<V12BuyBatchWitness, "fills">;
 }
 

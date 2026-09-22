@@ -261,12 +261,16 @@ interface V11RecoveryJob {
 const v11RecoveryJobs = new Map<string, V11RecoveryJob>();
 const v12ExecutionJobs = new Map<string, V11RecoveryJob>();
 let v12OrderQueue: Promise<PostgresV12OrderQueue> | null = null;
+const v12PrivateTradingEnabled = process.env.V12_PRIVATE_TRADING_ENABLED === "true";
+const v12ExecutionEpochMs = Number(process.env.V12_EXECUTION_EPOCH_MS ?? "60000");
 
 function privateOrderQueue(): Promise<PostgresV12OrderQueue> {
   const databaseUrl = process.env.V12_DATABASE_URL?.trim();
   const key = process.env.V12_JOURNAL_KEY?.trim();
   if (!databaseUrl || !key) throw new Error("V12_DATABASE_URL and V12_JOURNAL_KEY are required");
-  v12OrderQueue ??= PostgresV12OrderQueue.connect(databaseUrl, key);
+  v12OrderQueue ??= PostgresV12OrderQueue.connect(databaseUrl, key, {
+    executionEpochMs: v12ExecutionEpochMs,
+  });
   return v12OrderQueue;
 }
 
@@ -304,6 +308,25 @@ function runV12Execution(batchId: string) {
       output.trim().split("\n").at(-1) ?? `run:v12 exited with code ${code}`,
     )));
   });
+}
+
+function launchV12Execution(batchId: string): void {
+  const jobId = batchId.toLowerCase();
+  const existing = v12ExecutionJobs.get(jobId);
+  if (existing?.status === "pending" || existing?.status === "done") return;
+  v12ExecutionJobs.set(jobId, { status: "pending", step: "execute", createdAt: Date.now() });
+  void runV12Execution(batchId).then(
+    () => v12ExecutionJobs.set(jobId, { status: "done", step: "complete", createdAt: Date.now() }),
+    (error) => v12ExecutionJobs.set(jobId, { status: "error", step: "execute",
+      error: error instanceof Error ? error.message : "V12 execution failed", createdAt: Date.now() }),
+  );
+}
+
+async function resumeV12Executions(): Promise<void> {
+  if (!process.env.V12_DATABASE_URL?.trim() || !process.env.V12_JOURNAL_KEY?.trim()) return;
+  const pending = await (await privateOrderQueue()).pendingBatchIds();
+  for (const batchId of pending) launchV12Execution(batchId);
+  if (pending.length) console.log(`[Relayer] Resumed ${pending.length} unfinished v12 batch(es) from PostgreSQL`);
 }
 // Evict jobs older than 30 min to prevent unbounded memory growth
 setInterval(() => {
@@ -681,6 +704,10 @@ const server = createServer((req, res) => {
   // This endpoint stores only the execution witness, encrypted at rest, and waits for exactly
   // two compatible orders before starting the resumable aggregate runner.
   if (req.method === "POST" && req.url === "/v12/private-order") {
+    if (!v12PrivateTradingEnabled) {
+      send(503, { error: "V12 private order intake is disabled" });
+      return;
+    }
     if (chainId !== polygon.id) { send(503, { error: "V12 private orders require Polygon mainnet" }); return; }
     try {
       assertV12GeoEligible(req.headers, process.env.RELAYER_PROXY_SECRET ?? "");
@@ -725,14 +752,7 @@ const server = createServer((req, res) => {
         const batch = await queue.assemble(queued.groupKey);
         if (!batch) { send(202, { state: "queued", orderCommitment: commitment }); return; }
         const jobId = batch.batchId.toLowerCase();
-        if (!v12ExecutionJobs.has(jobId)) {
-          v12ExecutionJobs.set(jobId, { status: "pending", step: "execute", createdAt: Date.now() });
-          void runV12Execution(batch.batchId).then(
-            () => v12ExecutionJobs.set(jobId, { status: "done", step: "complete", createdAt: Date.now() }),
-            (error) => v12ExecutionJobs.set(jobId, { status: "error", step: "execute",
-              error: error instanceof Error ? error.message : "V12 execution failed", createdAt: Date.now() }),
-          );
-        }
+        launchV12Execution(batch.batchId);
         send(202, { state: "batched", orderCommitment: commitment, batchId: batch.batchId, jobId });
       } catch (error) {
         send(400, { error: error instanceof Error ? error.message : "Invalid v12 private order" });
@@ -744,7 +764,14 @@ const server = createServer((req, res) => {
   if (req.method === "GET" && req.url?.startsWith("/v12/status/")) {
     const jobId = req.url.slice("/v12/status/".length).toLowerCase();
     const job = v12ExecutionJobs.get(jobId);
-    send(job ? 200 : 404, job ?? { error: "V12 execution job not found" });
+    if (job) { send(200, job); return; }
+    if (!/^0x[0-9a-f]{64}$/.test(jobId)) { send(400, { error: "Invalid v12 batch ID" }); return; }
+    void privateOrderQueue().then((queue) => queue.batchState(jobId as `0x${string}`)).then((state) => {
+      if (!state) { send(404, { error: "V12 execution job not found" }); return; }
+      send(200, state.receiptCount === state.orderCount
+        ? { status: "done", step: "complete", durable: true }
+        : { status: "pending", step: "execute", durable: true });
+    }).catch((error) => send(503, { error: error instanceof Error ? error.message : "V12 status unavailable" }));
     return;
   }
 
@@ -1466,6 +1493,10 @@ server.listen(PORT, () => {
   console.log(`[Relayer]   GET  /history/:walletAddress              — cross-device order history (indexed by real wallet)`);
   console.log(`[Relayer]   POST /claim-proof                          — generate ZK claim proof and submit claimWithProof()`);
   console.log(`[Relayer]   POST /admin/force-advance?marketId=0x...   — skip stuck SETTLING batch`);
+  console.log(`[Relayer] V12 intake: ${v12PrivateTradingEnabled ? "enabled" : "disabled"}; execution epoch: ${v12ExecutionEpochMs}ms`);
+  void resumeV12Executions().catch((error) => {
+    console.error("[Relayer] V12 startup recovery failed:", error instanceof Error ? error.message : error);
+  });
 });
 
 // ── Startup log ───────────────────────────────────────────────────────────────

@@ -39,7 +39,7 @@ describe("v12 encrypted order queue", () => {
   });
 
   it("waits for two compatible orders, persists one batch, and separates outcomes", async () => {
-    const queue = await PostgresV12OrderQueue.connect("memory://v12-order-queue", key);
+    const queue = await PostgresV12OrderQueue.connect("memory://v12-order-queue", key, { executionEpochMs: 60_000 });
     try {
       const first = await queue.enqueue(order("3", "4"));
       expect(await queue.assemble(first.groupKey)).toBeNull();
@@ -47,8 +47,11 @@ describe("v12 encrypted order queue", () => {
       expect(second.groupKey).toBe(first.groupKey);
       const batch = await queue.assemble(first.groupKey);
       expect(batch?.request.witness.orders).toHaveLength(2);
+      expect(batch?.request.executeAfterUnixMs).toBeGreaterThan(Date.now());
       expect(batch?.request.witness.orders[0].inputNote).toBe(hex("3"));
       expect(await queue.assemble(first.groupKey)).toBeNull();
+      expect(await queue.pendingBatchIds()).toEqual([batch!.batchId]);
+      expect(await queue.batchState(batch!.batchId)).toEqual({ orderCount: 2, receiptCount: 0 });
 
       const third = order("9", "a");
       third.positionTokenId = 456n;
@@ -68,6 +71,7 @@ describe("v12 encrypted order queue", () => {
       expect(await queue.getReceipt(thirdQueued.commitment, hex("e"))).toEqual({
         spent: 500_000n, shares: 900_000n, refund: 100_000n,
       });
+      expect(await queue.batchState(otherBatch!.batchId)).toEqual({ orderCount: 2, receiptCount: 2 });
     } finally {
       await queue.close();
     }

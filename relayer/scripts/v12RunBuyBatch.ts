@@ -58,6 +58,13 @@ async function main(): Promise<void> {
     if (getAddress(request.depositWallet) !== depositWallet) {
       throw new Error("Encrypted v12 witness targets a different Deposit Wallet");
     }
+    if (request.executeAfterUnixMs !== undefined) {
+      if (!Number.isSafeInteger(request.executeAfterUnixMs) || request.executeAfterUnixMs < 0) {
+        throw new Error("Encrypted v12 witness has an invalid execution epoch");
+      }
+      const delay = request.executeAfterUnixMs - Date.now();
+      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+    }
     const driver = new V12PolygonDriver({
       rpcUrl,
       pool: getAddress(required("V12_POOL_ADDRESS")),
