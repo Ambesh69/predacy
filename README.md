@@ -2,46 +2,39 @@
 
 Private sealed-bid batch auction layer on top of [Polymarket](https://polymarket.com).
 
-**Launch status:** Mainnet intake is closed. A post-deployment review found that
-v12 publishes each locked order's outcome asset and later links its commitment
-to the public Polymarket aggregate. The pool was paused while empty. V12 hides
-amounts and limits, but it does not meet Predacy's individual trade-detail
-privacy requirement. See [the launch gate](docs/launch-readiness.md).
+**Launch status:** Mainnet intake is closed. V13 is implemented and tested but
+not deployed. It replaces v12's publicly linkable per-market order commitments
+with generic order notes, secret-derived nullifiers, and private refund/position
+allocations. See [the v13 architecture and launch gate](docs/private-v13.md).
 
-The legacy design used ephemeral wallets and commitments to reduce identity
-linkage. V12 replaces its public per-order escrow and allocation data with
-proof-authorized private notes, while retaining Polymarket for pooled execution.
+V13 retains Polymarket for aggregate execution. Individual order market, side,
+size, limit, fill, and wallet linkage are hidden from public batch settlement.
+The aggregate Polymarket hedge remains public, and the relayer sees decrypted
+order witnesses while grouping and proving a batch.
 
 ---
 
-## How it works
+## V13 flow
 
 ```
-Alice                  Ephemeral wallet           BatchVault (Polygon)
-  │                          │                           │
-  ├─ fund ephemeral ─────────►                           │
-  │  (via Railgun, private)  │                           │
-  │                          ├─ commitOrderFor() ───────►│  sealed commitment stored
-  │                          │                           │
-  │              ...batch window closes...               │
-  │                                                      │
-  │                    Relayer                           │
-  │                      │                               │
-  │                      ├─ lockFunds() ────────────────►│  USDC pulled, tokens split
-  │                      ├─ sell excess on CLOB          │
-  │                      ├─ buy gap on CLOB              │
-  │                      ├─ settleBatch(proof) ─────────►│  ZK batch proof verified
-  │                      │                               │  Merkle root stored
-  │                      │                               │
-  │◄─ claimWithProof() ──┤                               │  relayer claims on Alice's behalf
-  │  (ZK claim proof)    │                               │  Alice's address never on-chain
+Trader                    ShieldedPoolV2                 Relayer / Polymarket
+  │                              │                                │
+  ├─ deposit private note ──────►│                                │
+  ├─ lock generic order proof ─►│                                │
+  ├─ send encrypted witness ────────────────────────────────────►│
+  │                              │◄─ route two-order ZK proof ───┤
+  │                              ├─ aggregate collateral ───────►│
+  │                              │          CLOB fill             │
+  │                              │◄─ returned assets + proof ────┤
+  │◄─ private refund/position notes                              │
 ```
 
 Key properties:
-- **Sealed bids** — orders are commitment hashes; amounts and prices stay hidden until settlement
-- **Batch uniform-price clearing** — no frontrunning; all matched orders clear at the same price
-- **ZK privacy** — claim proofs use Noir/UltraHonk; the relayer submits the claim tx so the trader's wallet never appears in any on-chain calldata
-- **Railgun integration** — funding the ephemeral wallet via Railgun breaks the on-chain link between the trader and their deposit
+- **Generic order notes** — commitments reveal no market or outcome token.
+- **Unlinkable routing** — routed nullifiers do not reveal their source commitments.
+- **Private allocation** — refunds and positions are inserted as shielded notes.
+- **Zero subsidy** — per-batch surplus preservation prevents one batch from consuming another user's assets.
+- **Recoverable execution** — PostgreSQL journals every irreversible action and serializes mainnet batches across workers.
 
 ---
 
@@ -66,12 +59,15 @@ Predacy/
 | Relayer | Node.js + TypeScript + [viem](https://viem.sh), deployed on Railway |
 | Frontend | Next.js 15, wagmi/viem, Tailwind v3 |
 | Chain | Polygon mainnet |
-| Privacy | [Railgun](https://railgun.org) (private USDC transfer to ephemeral wallet) |
+| Privacy | Noir/UltraHonk shielded notes (individual details hidden on-chain; witnesses visible to the relayer) |
 | Order book | Polymarket CLOB API (gap fills between phases) |
 
 ---
 
-## Deployed contracts (Polygon mainnet)
+## Legacy deployed contracts (Polygon mainnet)
+
+These addresses belong to the retired v10 flow. V13 has not been deployed to
+mainnet and production must not be configured with these addresses.
 
 | Contract | Address |
 |---|---|
@@ -84,13 +80,16 @@ Predacy/
 
 ---
 
-Mainnet order intake is disabled in this checkout pending a tested bridge from
-the vault's USDC.e to Polymarket pUSD, plus Deposit Wallet/CTF Exchange V2
-order handling. See [the launch gate](docs/launch-readiness.md).
+V13 mainnet order intake is disabled. Deployments start paused and the relayer
+and frontend gates default closed. See [the v13 runbook](docs/private-v13.md)
+and [the launch gate](docs/launch-readiness.md).
 
 ---
 
-## Settlement architecture (two-phase, zero relayer capital)
+## Legacy v10 settlement architecture
+
+This section documents the old two-phase flow for historical context. It is not
+the v13 production path.
 
 **Phase 1 — `lockFunds()`**
 - Pulls USDC from each buyer's ephemeral wallet via EIP-3009 deferred transfer

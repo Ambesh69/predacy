@@ -1,25 +1,23 @@
 # Mainnet launch gate
 
-Status: **closed for new mainnet orders**. V12 was briefly enabled on September
-23, 2026, but no notes or batches were created. Review then confirmed that
-`lockBuyOrder` publishes each order's outcome asset and `startBuyBatch` links
-the two order commitments to the public aggregate hedge. Intake was disabled
-and the empty pool was paused.
+Status: **closed for new mainnet orders**. V13 is implemented and locally
+verified, but no v13 contract is deployed. Production still points at the
+paused legacy deployment and no v13 recovery pilot or independent review has
+completed.
 
 ## Privacy decision
 
-V12 hides balances, order amounts and limits, allocations, and note ownership.
-It does not hide each locked order's outcome asset, and exact batch membership
-is public. Its omnibus Deposit Wallet prevents the public Polymarket hedge from
-being attributed to a funding wallet, but the aggregate market, direction,
-amount, and fill remain observable on Polygon. A replacement must
-insert a generic private order note and consume it by proof-bound nullifier;
-the public batch must not enumerate the originating order commitments.
+V13 inserts generic private order notes and consumes them by proof-bound,
+secret-derived nullifiers. Public settlement does not enumerate the source
+commitments. This hides each constituent order's market, side, size, limit,
+fill, allocation, and wallet linkage from public batch settlement.
 
-Production v12 configuration, deployed addresses, privacy guarantees, and the
-remaining gate are documented in [private-v12.md](private-v12.md). The sections
-below preserve the earlier v10/v11 findings because those contracts and claims
-may still need recovery; they are not the production launch architecture.
+The aggregate Polymarket hedge remains observable on Polygon, and the relayer
+sees decrypted order witnesses while matching and proving a batch. These are
+hard boundaries of the present design, not details to omit from product claims.
+See [private-v13.md](private-v13.md) for the production architecture. The
+sections below preserve earlier v10-v12 findings because those contracts and
+claims may still need recovery.
 
 ## Historical v10/v11 findings
 
@@ -144,5 +142,7 @@ Use small funds and record transaction hashes and user-visible results for:
   `LOCKED` batch without duplicating a CLOB order.
 - Verify a second wallet can see its order and claim across devices.
 
-No public launch until all items pass on the deployed release, with a monitored
-pilot cap and an operator available to handle paused markets.
+No public launch until all items pass on the deployed release, the independent
+circuit/contract/relayer/key-management review is complete, and an operator is
+available to handle paused batches. Removing a pilot cap later is a separate
+production decision; it is not part of contract deployment.

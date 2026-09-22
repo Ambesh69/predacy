@@ -76,6 +76,15 @@ substitute for the independent review and recovery pilot required above.
 
 ## Deployment order
 
+The measured five-script deployment uses `32,892,461` gas. At a 280 gwei
+`maxFeePerGas` and a 10% reserve, the required ceiling is
+`10.130877988 POL`. Recompute this immediately before deployment; the measured
+gas is encoded and unit-tested in `relayer/src/v13DeploymentBudget.ts`, but the
+network fee is not stable. Never start unless the deployer can fund the entire
+sequence, including the reserve. Run `npm run preflight:deploy:v13` with an
+explicit `V13_DEPLOYMENT_BUDGET_POL` and `V13_MAX_GAS_PRICE_WEI` immediately
+before any broadcast.
+
 1. Deploy the order, route, settlement, and cancellation verifiers with each
    verifier project's `mainnet` Foundry profile. That profile links the existing
    shared transcript library whose executable bytecode was checked against the
