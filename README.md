@@ -2,21 +2,16 @@
 
 Private sealed-bid batch auction layer on top of [Polymarket](https://polymarket.com).
 
-**Launch status:** Mainnet trading is disabled. The current and experimental
-vaults do not provide full on-chain trade-detail privacy. Polymarket CLOB
-matches settle publicly on Polygon, so hiding market, side, size, and fills
-requires a different execution architecture or a narrower privacy promise.
-See [the launch gate](docs/launch-readiness.md).
+**Launch status:** The v12 contracts are deployed on Polygon mainnet, paused,
+and production intake remains disabled pending a live recovery exercise and an
+independent security review. V12 shields individual balances, orders,
+allocations, and claims inside a note pool. Polymarket still publishes the
+pool's aggregate hedge on Polygon; Predacy must not describe that aggregate as
+private. See [the launch gate](docs/launch-readiness.md).
 
-The selected engineering direction is to restore user-funded Deposit Wallet
-execution and exact-fill settlement, then decide whether the narrower privacy
-boundary is acceptable. The [private_match_v1](circuits/private_match_v1/README.md)
-research circuit is not a live venue, vault, or funded trading path.
-
-The original design uses order commitments, batch clearing, and zero-knowledge
-claims to reduce identity linkage. These mechanisms do not hide Polymarket's
-public exchange trades, and the experimental v11 vault exposes per-order
-escrow and allocation data. The privacy design is not launch-ready.
+The legacy design used ephemeral wallets and commitments to reduce identity
+linkage. V12 replaces its public per-order escrow and allocation data with
+proof-authorized private notes, while retaining Polymarket for pooled execution.
 
 ---
 

@@ -1,37 +1,23 @@
 # Mainnet launch gate
 
-Status: **closed for new mainnet orders**. The current vault uses Polygon USDC.e
-and the relayer signs for the former CTF exchanges. Polymarket now documents
-pUSD collateral and CTF Exchange V2. Do not remove the relayer's mainnet order
-guard until the migration and the checks below are complete.
+Status: **closed for new mainnet orders**. V12 is deployed on Polygon mainnet,
+but the pool remains paused and private intake remains disabled. Do not open the
+gate until the live recovery exercise and independent review are complete.
 
 ## Privacy decision
 
-The product requirement is to hide market, side, size, and fill details on-chain,
-not merely the link to a customer's main wallet. That requirement is incompatible
-with direct Polymarket CLOB execution: matched orders settle through public
-Polygon exchange contracts that transfer outcome tokens and pUSD. An omnibus
-Deposit Wallet and confidential customer accounting could obscure which user
-caused an aggregate trade, but the aggregate market, direction, and amount
-would still be observable. The current v11 prototype also publishes each
-escrow's market, side, deposit, owner, and final allocation; it is not a private
-vault. Do not deploy it as the privacy solution or describe Railgun-funded
-ephemeral accounts as hiding the exchange trades.
+V12 hides each user's order, balance, allocation, and claim in a shielded note
+pool. Its omnibus Deposit Wallet prevents the public Polymarket hedge from being
+attributed to one customer, but the aggregate market, direction, amount, and
+fill remain observable on Polygon. Do not describe those aggregate trades as
+private or claim that the relayer cannot inspect submitted order plaintext.
 
-The production PostgreSQL service is provisioned and a `V11_DATABASE_URL`
-reference is configured on the relayer without redeploying it. This does not
-change the privacy boundary or enable v11 execution. A public launch requires
-either a revised, explicitly narrower privacy promise (customer-to-trade
-unlinkability with public aggregate trades) and a new private accounting design,
-or a venue/settlement architecture that does not publish the trades on Polygon.
+Production v12 configuration, deployed addresses, privacy guarantees, and the
+remaining gate are documented in [private-v12.md](private-v12.md). The sections
+below preserve the earlier v10/v11 findings because those contracts and claims
+may still need recovery; they are not the production launch architecture.
 
-The selected engineering direction is to restore user-funded Polymarket
-execution through a Deposit Wallet and exact-fill settlement, then decide
-whether its narrower privacy boundary is acceptable for launch. This is not
-permission to describe the result as fully private or to open production
-trading. `circuits/private_match_v1` remains an isolated research prototype;
-it is not a funded trading path. The active Polygon app and experimental v11
-flow remain disabled.
+## Historical v10/v11 findings
 
 The v11 one-order runner now has PostgreSQL write-ahead journals for route,
 signed FAK submission, returned assets, immutable settlement snapshot, and

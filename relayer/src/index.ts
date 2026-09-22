@@ -22,8 +22,8 @@ const missingVars = ["VAULT_ADDRESS", "RELAYER_PRIVATE_KEY"].filter((v) => !proc
 // CHAIN_ID: 137 = Polygon mainnet, 80002 = Polygon Amoy (default)
 const chainId = parseInt(process.env.CHAIN_ID ?? "80002");
 const chain   = chainId === polygon.id ? polygon : polygonAmoy;
-const tradingBlocker = chainId === polygon.id
-  ? "Mainnet trading is disabled: full trade-detail privacy cannot be provided by Polymarket's public on-chain settlement; v11 execution is also incomplete"
+const legacyTradingBlocker = chainId === polygon.id
+  ? "Legacy mainnet intake is permanently disabled; use the independently gated v12 private path"
   : null;
 
 const baseConfig = {
@@ -263,6 +263,9 @@ const v12ExecutionJobs = new Map<string, V11RecoveryJob>();
 let v12OrderQueue: Promise<PostgresV12OrderQueue> | null = null;
 const v12PrivateTradingEnabled = process.env.V12_PRIVATE_TRADING_ENABLED === "true";
 const v12ExecutionEpochMs = Number(process.env.V12_EXECUTION_EPOCH_MS ?? "60000");
+const privateTradingBlocker = chainId === polygon.id && !v12PrivateTradingEnabled
+  ? "V12 private intake is disabled pending the live recovery exercise and independent security review; aggregate Polymarket hedges remain public"
+  : null;
 
 function privateOrderQueue(): Promise<PostgresV12OrderQueue> {
   const databaseUrl = process.env.V12_DATABASE_URL?.trim();
@@ -387,8 +390,9 @@ const server = createServer((req, res) => {
     }
     send(missingVars.length === 0 ? 200 : 503, {
       ok:      missingVars.length === 0,
-      tradingEnabled: missingVars.length === 0 && !tradingBlocker,
-      tradingBlocker,
+      tradingEnabled: missingVars.length === 0 && !privateTradingBlocker,
+      tradingBlocker: privateTradingBlocker,
+      legacyTradingEnabled: missingVars.length === 0 && !legacyTradingBlocker,
       chainId,
       missing: missingVars,
       vault:   baseConfig.vaultAddress,
@@ -507,8 +511,8 @@ const server = createServer((req, res) => {
   //   { marketId, batchId, trader, side, amount, limitPrice, salt }
   //   → trader already committed on-chain; relayer just stores order details
   if (req.method === "POST" && req.url === "/order") {
-    if (tradingBlocker) {
-      send(503, { error: tradingBlocker });
+    if (legacyTradingBlocker) {
+      send(503, { error: legacyTradingBlocker });
       return;
     }
     let body = "";
@@ -1253,8 +1257,8 @@ const server = createServer((req, res) => {
   // POST /warm — pre-open a batch for a market before the first order arrives.
   // Responds 202 immediately; batch opens in the background.
   if (req.method === "POST" && req.url === "/warm") {
-    if (tradingBlocker) {
-      send(503, { error: tradingBlocker });
+    if (legacyTradingBlocker) {
+      send(503, { error: legacyTradingBlocker });
       return;
     }
     let body = "";
