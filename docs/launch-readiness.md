@@ -52,10 +52,10 @@ deployed Deposit Wallet and an authenticated CLOB collateral-balance read;
 that zero-balance read does not prove an order fill. The production PostgreSQL
 journals and $10 budget tables exist, but application-level restart recovery
 has not been tested against them. The frontend remains on the disabled v10 path.
-The read-only `npm run preflight:v11` passes configuration, Polygon RPC, and
-vault identity. Its local Railway-variable run cannot resolve Railway's private
-PostgreSQL host; a separate in-network read confirms all four v11 tables and an
-unused pilot budget. The
+Production commit `a2fecea` is deployed on Railway. The read-only
+`npm run preflight:v11` passes configuration, Polygon RPC, vault identity, and
+PostgreSQL from inside that container. All four v11 tables exist and the pilot
+budget is unused. The
 runner now rejects an on-chain `ROUTED` batch with only a prepared local route
 intent, and verifies its CLOB market token pair, tick, fee envelope, and V2
 exchange before routing; these checks do not substitute for a live pilot.

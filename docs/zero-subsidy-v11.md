@@ -79,9 +79,11 @@ vault paused. Both contracts are deployed on Polygon mainnet: verifier
 `0x9fdDEa6cA511BE164A3bF863059D241A0db74667` and paused vault
 `0x6b09CEe82e5aE41122Eab614Cb68f078B6BBC2c6`. There is still no frontend
 approval/proof integration or live pilot.
-Production PostgreSQL contains the batch/order journals and $10 pilot-budget
-tables. A rollback-only batch-journal transition probe passed; a full runner
-restart against production PostgreSQL has not been exercised. The SDK requires Node 24, pinned in the relayer
+Production commit `a2fecea` is deployed on Railway, where the v11 preflight
+passes configuration, Polygon vault identity, and PostgreSQL. Production
+PostgreSQL contains the batch/order journals and $10 pilot-budget tables. A
+rollback-only batch-journal transition probe passed; a full runner restart
+against production PostgreSQL has not been exercised. The SDK requires Node 24, pinned in the relayer
 package and Nixpacks configuration; the actual Railway build must still be
 validated before migration.
 
