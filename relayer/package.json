@@ -20,7 +20,8 @@
     "preflight:deploy:v12": "tsx scripts/v12DeploymentPreflight.ts",
     "preflight:v12": "tsx scripts/v12Preflight.ts",
     "rehearse:recovery:v12": "tsx scripts/v12RecoveryRehearsal.ts",
-    "predeploy:v12": "npm run rehearse:recovery:v12 && npm run preflight:v12"
+    "predeploy:v12": "npm run rehearse:recovery:v12 && npm run preflight:v12",
+    "predeploy:production": "npm run predeploy:v12 && npm run preflight:v13"
   },
   "engines": {
     "node": ">=24"
