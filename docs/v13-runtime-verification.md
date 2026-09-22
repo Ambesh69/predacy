@@ -80,6 +80,28 @@ The nine [privacy-mechanism model](research/private-market/README.md) checks are
 offline leakage/capacity experiments, not cryptographic proofs or a private
 sell/redemption implementation. They do not satisfy a launch gate.
 
+Railway deployment `c2b15043-c0e3-44f3-870d-6777d990773f`, commit `8e9c989`,
+completed successfully. Its logs confirm both concurrent-queue scenarios,
+cancelled-queue recovery, six process restarts with zero duplicate actions,
+all four fresh deployed-verifier proofs, and rejection of altered inputs.
+The pool remained paused with zero unresolved actions. Vercel's corresponding
+deployment is ready; production health reports all trading gates disabled.
+
+### Dependency advisory follow-up
+
+The deployment build also reported existing test-toolchain advisories. The
+relayer's Vitest requirement was updated to `^4.1.11`; its lockfile now uses
+Vitest `4.1.11`, tsx `4.23.15` (within the existing allowed range), and esbuild
+`0.28.2`. All 183 tests still pass with five opt-in skips, the relayer builds,
+and a synthetic v13 route fixture runs through the updated tsx toolchain.
+The relayer's full npm advisory scan reports zero known vulnerabilities at
+the time of this check. This is not a protocol audit or proof of no bugs.
+
+The relevant upstream notices describe development-server/UI attack surfaces,
+not evidence of a Predacy wallet compromise:
+[Vitest UI advisory](https://github.com/vitest-dev/vitest/security/advisories/GHSA-5xrq-8626-4rwp),
+[mock-server advisory](https://github.com/vitest-dev/vitest/security/advisories/GHSA-82fw-gwwq-j7x9).
+
 ### Earlier runtime fixes
 
 - Bundled v13 circuit artifacts inside Railway's deploy root.
