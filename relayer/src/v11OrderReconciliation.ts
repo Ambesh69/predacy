@@ -116,13 +116,13 @@ export async function collectV11TradeEvidence(
   const failedTradeIds: string[] = [];
   for (const trade of matched.values()) {
     tradeIds.push(trade.id);
-    if (trade.status === "CONFIRMED") {
+    if (trade.status === "CONFIRMED" || trade.status === "TRADE_STATUS_CONFIRMED") {
       if (!/^0x[0-9a-fA-F]{64}$/.test(trade.transactionHash)) {
         pendingTradeIds.push(trade.id);
       } else {
         transactionHashes.push(trade.transactionHash);
       }
-    } else if (trade.status === "FAILED") {
+    } else if (trade.status === "FAILED" || trade.status === "TRADE_STATUS_FAILED") {
       failedTradeIds.push(trade.id);
     } else {
       pendingTradeIds.push(trade.id);

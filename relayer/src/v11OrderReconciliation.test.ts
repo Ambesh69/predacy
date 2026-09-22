@@ -42,6 +42,19 @@ describe("v11 trade reconciliation", () => {
     expect(result.failedTradeIds).toEqual(["failed"]);
   });
 
+  it("accepts the current prefixed Polymarket trade status values", async () => {
+    const result = await collectV11TradeEvidence(reader([[
+      { id: "confirmed", takerOrderId: orderId, makerOrders: [],
+        status: "TRADE_STATUS_CONFIRMED", transactionHash: txHash },
+      { id: "failed", takerOrderId: orderId, makerOrders: [],
+        status: "TRADE_STATUS_FAILED", transactionHash: "" },
+    ]]), market, orderId);
+    expect(result).toEqual({
+      tradeIds: ["confirmed", "failed"], transactionHashes: [txHash],
+      pendingTradeIds: [], failedTradeIds: ["failed"],
+    });
+  });
+
   it("stops rather than silently skipping old pages", async () => {
     await expect(collectV11TradeEvidence(reader([
       [], [], [],
