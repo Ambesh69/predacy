@@ -43,7 +43,7 @@ async function proxyRequest(
       "Content-Type": "application/json",
     };
 
-    if (path === "v12/private-order") {
+    if (path === "v13/private-order") {
       const secret = process.env.RELAYER_PROXY_SECRET?.trim();
       const country = req.headers.get("x-vercel-ip-country")?.toUpperCase() ?? "";
       const region = req.headers.get("x-vercel-ip-country-region")?.toUpperCase() ?? "";

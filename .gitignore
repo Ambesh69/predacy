@@ -33,6 +33,10 @@ contracts/shielded-order-verifier/broadcast/
 contracts/shielded-buy-batch-verifier/out/
 contracts/shielded-buy-batch-verifier/cache/
 contracts/shielded-buy-batch-verifier/broadcast/
+contracts/v13-verifiers/*/out/
+contracts/v13-verifiers/*/cache/
+contracts/v13-verifiers/*/broadcast/
+contracts/v13-verifiers/*/vk/
 
 # Noir — ignore generated artifacts but keep compiled circuit JSON for Railway
 circuits/**/Prover.toml

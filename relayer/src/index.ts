@@ -16,6 +16,10 @@ import { parseV12QueuedBuyOrder, PostgresV12OrderQueue } from "./v12OrderQueue.j
 import { v12OrderCommitment } from "./v12BuyBatchProver.js";
 import { assertV12GeoEligible } from "./v12GeoEligibility.js";
 import { resolveV12LaunchPolicy } from "./v12LaunchPolicy.js";
+import { parseV13QueuedOrder, PostgresV13OrderQueue } from "./v13OrderQueue.js";
+import { v13OrderCommitment } from "./v13Proofs.js";
+import { V13MerkleTree } from "./v13MerkleTree.js";
+import { resolveV13LaunchPolicy } from "./v13LaunchPolicy.js";
 
 // ── Environment ───────────────────────────────────────────────────────────────
 const missingVars = ["VAULT_ADDRESS", "RELAYER_PRIVATE_KEY"].filter((v) => !process.env[v]);
@@ -261,12 +265,20 @@ interface V11RecoveryJob {
 }
 const v11RecoveryJobs = new Map<string, V11RecoveryJob>();
 const v12ExecutionJobs = new Map<string, V11RecoveryJob>();
+const v13ExecutionJobs = new Map<string, V11RecoveryJob>();
 let v12OrderQueue: Promise<PostgresV12OrderQueue> | null = null;
+let v13OrderQueue: Promise<PostgresV13OrderQueue> | null = null;
 const v12LaunchPolicy = resolveV12LaunchPolicy(chainId, process.env);
 const v12PrivateTradingEnabled = v12LaunchPolicy.enabled;
 const v12ExecutionEpochMs = Number(process.env.V12_EXECUTION_EPOCH_MS ?? "60000");
 const privateTradingBlocker = chainId === polygon.id && !v12PrivateTradingEnabled
   ? v12LaunchPolicy.blocker
+  : null;
+const v13LaunchPolicy = resolveV13LaunchPolicy(chainId, process.env);
+const v13PrivateTradingEnabled = v13LaunchPolicy.enabled;
+const v13ExecutionEpochMs = Number(process.env.V13_EXECUTION_EPOCH_MS ?? "60000");
+const v13TradingBlocker = chainId === polygon.id && !v13PrivateTradingEnabled
+  ? v13LaunchPolicy.blocker
   : null;
 
 function privateOrderQueue(): Promise<PostgresV12OrderQueue> {
@@ -277,6 +289,26 @@ function privateOrderQueue(): Promise<PostgresV12OrderQueue> {
     executionEpochMs: v12ExecutionEpochMs,
   });
   return v12OrderQueue;
+}
+
+async function resolveV13Witnesses(leaves: Array<{ index: number; commitment: `0x${string}` }>) {
+  const pool = getAddress(process.env.V13_POOL_ADDRESS ?? "");
+  const deploymentBlock = BigInt(process.env.V13_DEPLOYMENT_BLOCK ?? "");
+  const logs = await publicClient.getLogs({ address: pool,
+    event: parseAbiItem("event NoteInserted(uint256 indexed leafIndex, bytes32 indexed commitment)"),
+    fromBlock: deploymentBlock, toBlock: "latest" });
+  const tree = new V13MerkleTree();
+  for (const log of logs) tree.append(Number(log.args.leafIndex), log.args.commitment!);
+  return leaves.map((leaf) => tree.witness(leaf.index, leaf.commitment));
+}
+
+function privateV13OrderQueue(): Promise<PostgresV13OrderQueue> {
+  const databaseUrl = process.env.V13_DATABASE_URL?.trim();
+  const key = process.env.V13_JOURNAL_KEY?.trim();
+  if (!databaseUrl || !key) throw new Error("V13_DATABASE_URL and V13_JOURNAL_KEY are required");
+  v13OrderQueue ??= PostgresV13OrderQueue.connect(databaseUrl, key, resolveV13Witnesses,
+    { executionEpochMs: v13ExecutionEpochMs });
+  return v13OrderQueue;
 }
 
 function runV11RecoveryCommand(script: "reconcile:v11" | "run:v11", batchId: string, manifest: unknown) {
@@ -327,11 +359,36 @@ function launchV12Execution(batchId: string): void {
   );
 }
 
+function launchV13Execution(batchId: string): void {
+  const jobId = batchId.toLowerCase();
+  const existing = v13ExecutionJobs.get(jobId);
+  if (existing?.status === "pending" || existing?.status === "done") return;
+  v13ExecutionJobs.set(jobId, { status: "pending", step: "execute", createdAt: Date.now() });
+  const child = spawn("npm", ["run", "run:v13", "--", "--execute", batchId], {
+    cwd: process.cwd(), env: process.env, stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  const append = (chunk: Buffer) => { output = (output + chunk.toString("utf8")).slice(-4_000); };
+  child.stdout.on("data", append); child.stderr.on("data", append);
+  child.on("error", (error) => v13ExecutionJobs.set(jobId, { status: "error", step: "execute",
+    error: error.message, createdAt: Date.now() }));
+  child.on("exit", (code) => v13ExecutionJobs.set(jobId, code === 0
+    ? { status: "done", step: "complete", createdAt: Date.now() }
+    : { status: "error", step: "execute", error: output.trim().split("\n").at(-1) ?? `run:v13 exited ${code}`,
+      createdAt: Date.now() }));
+}
+
 async function resumeV12Executions(): Promise<void> {
   if (!process.env.V12_DATABASE_URL?.trim() || !process.env.V12_JOURNAL_KEY?.trim()) return;
   const pending = await (await privateOrderQueue()).pendingBatchIds();
   for (const batchId of pending) launchV12Execution(batchId);
   if (pending.length) console.log(`[Relayer] Resumed ${pending.length} unfinished v12 batch(es) from PostgreSQL`);
+}
+async function resumeV13Executions(): Promise<void> {
+  if (!v13PrivateTradingEnabled || !process.env.V13_DATABASE_URL?.trim() || !process.env.V13_JOURNAL_KEY?.trim()) return;
+  const pending = await (await privateV13OrderQueue()).pendingBatchIds();
+  for (const batchId of pending) launchV13Execution(batchId);
+  if (pending.length) console.log(`[Relayer] Resumed ${pending.length} unfinished v13 batch(es) from PostgreSQL`);
 }
 // Evict jobs older than 30 min to prevent unbounded memory growth
 setInterval(() => {
@@ -342,6 +399,7 @@ setInterval(() => {
   for (const [id, job] of v12ExecutionJobs) {
     if (job.createdAt < cutoff) v12ExecutionJobs.delete(id);
   }
+  for (const [id, job] of v13ExecutionJobs) if (job.createdAt < cutoff) v13ExecutionJobs.delete(id);
 }, 15 * 60 * 1000).unref();
 
 // ── HTTP server ────────────────────────────────────────────────────────────────
@@ -394,6 +452,8 @@ const server = createServer((req, res) => {
       ok:      missingVars.length === 0,
       tradingEnabled: missingVars.length === 0 && !privateTradingBlocker,
       tradingBlocker: privateTradingBlocker,
+      v13TradingEnabled: missingVars.length === 0 && !v13TradingBlocker,
+      v13TradingBlocker,
       legacyTradingEnabled: missingVars.length === 0 && !legacyTradingBlocker,
       chainId,
       missing: missingVars,
@@ -701,6 +761,74 @@ const server = createServer((req, res) => {
       } catch (e: any) {
         send(400, { error: e.message });
       }
+    });
+    return;
+  }
+
+  // V13 intake is independently gated and defaults closed until every verifier and pool is deployed.
+  if (req.method === "POST" && req.url === "/v13/private-order") {
+    if (!v13PrivateTradingEnabled) { send(503, { error: "V13 private order intake is disabled" }); return; }
+    if (chainId !== polygon.id) { send(503, { error: "V13 private orders require Polygon mainnet" }); return; }
+    try { assertV12GeoEligible(req.headers, process.env.RELAYER_PROXY_SECRET ?? ""); }
+    catch (error) { send(403, { error: error instanceof Error ? error.message : "Geographic eligibility failed" }); return; }
+    let body = "";
+    req.on("data", (chunk) => { body += chunk; if (body.length > 64_000) req.destroy(); });
+    req.on("end", async () => {
+      try {
+        const data = JSON.parse(body) as Record<string, unknown>;
+        const order = parseV13QueuedOrder(data);
+        const expectedWallet = getAddress(process.env.V13_DEPOSIT_WALLET ?? "");
+        if (getAddress(order.depositWallet) !== expectedWallet) throw new Error("V13 Deposit Wallet mismatch");
+        const commitment = v13OrderCommitment({ ...order.order, positionAsset: order.positionAsset });
+        if (typeof data.orderCommitment !== "string" || data.orderCommitment.toLowerCase() !== commitment.toLowerCase()) {
+          throw new Error("V13 order commitment does not match its private witness");
+        }
+        const pool = getAddress(process.env.V13_POOL_ADDRESS ?? "");
+        const abi = parseAbi(["function paused() view returns (bool)",
+          "function collateralAssetId() view returns (bytes32)",
+          "function positionAssetId(uint256) view returns (bytes32)"]);
+        const [paused, collateralAsset, positionAsset] = await Promise.all([
+          publicClient.readContract({ address: pool, abi, functionName: "paused" }),
+          publicClient.readContract({ address: pool, abi, functionName: "collateralAssetId" }),
+          publicClient.readContract({ address: pool, abi, functionName: "positionAssetId", args: [order.positionTokenId] }),
+        ]);
+        if (paused || collateralAsset.toLowerCase() !== order.collateralAsset.toLowerCase() ||
+            positionAsset.toLowerCase() !== order.positionAsset.toLowerCase()) {
+          throw new Error("V13 order does not match the configured active pool and outcome");
+        }
+        const queue = await privateV13OrderQueue();
+        const queued = await queue.enqueue(order);
+        const batch = await queue.assemble(queued.groupKey);
+        if (!batch) { send(202, { state: "queued", orderCommitment: commitment }); return; }
+        launchV13Execution(batch.batchId);
+        send(202, { state: "batched", orderCommitment: commitment, batchId: batch.batchId,
+          jobId: batch.batchId.toLowerCase() });
+      } catch (error) {
+        send(400, { error: error instanceof Error ? error.message : "Invalid v13 private order" });
+      }
+    });
+    return;
+  }
+
+  if (req.method === "GET" && req.url?.startsWith("/v13/status/")) {
+    const id = req.url.slice("/v13/status/".length).toLowerCase();
+    const job = v13ExecutionJobs.get(id);
+    if (!job) send(404, { error: "V13 execution job not found" }); else send(200, job);
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/v13/private-receipt") {
+    let body = "";
+    req.on("data", (chunk) => { body += chunk; if (body.length > 4_096) req.destroy(); });
+    req.on("end", async () => {
+      try {
+        const data = JSON.parse(body) as { orderCommitment?: string; receiptToken?: string };
+        if (!data.orderCommitment || !data.receiptToken) throw new Error("Missing v13 receipt credentials");
+        const receipt = await (await privateV13OrderQueue()).getReceipt(
+          data.orderCommitment as `0x${string}`, data.receiptToken as `0x${string}`);
+        send(200, receipt ? { state: "settled", spent: receipt.spent.toString(),
+          shares: receipt.shares.toString(), refund: receipt.refund.toString() } : { state: "pending" });
+      } catch (error) { send(400, { error: error instanceof Error ? error.message : "Invalid v13 receipt request" }); }
     });
     return;
   }
@@ -1493,6 +1621,8 @@ server.listen(PORT, () => {
   console.log(`[Relayer]   POST /warm                                 — pre-open a batch for a market (fire-and-forget)`);
   console.log(`[Relayer]   POST /order                                — submit off-chain order details (include marketId)`);
   console.log(`[Relayer]   POST /v12/private-order                    — queue a proof-locked private buy`);
+  console.log(`[Relayer]   POST /v13/private-order                    — queue an unlinkable private buy`);
+  console.log(`[Relayer]   POST /v13/private-receipt                  — authenticated v13 allocation receipt`);
   console.log(`[Relayer]   GET  /v12/status/:batchId                  — private batch execution status`);
   console.log(`[Relayer]   POST /v12/private-receipt                  — authenticated private allocation receipt`);
   console.log(`[Relayer]   GET  /order-status/:commitment             — requeue/failure status for a commitment (frontend polling)`);
@@ -1500,8 +1630,12 @@ server.listen(PORT, () => {
   console.log(`[Relayer]   POST /claim-proof                          — generate ZK claim proof and submit claimWithProof()`);
   console.log(`[Relayer]   POST /admin/force-advance?marketId=0x...   — skip stuck SETTLING batch`);
   console.log(`[Relayer] V12 intake: ${v12PrivateTradingEnabled ? "enabled" : "disabled"}; execution epoch: ${v12ExecutionEpochMs}ms`);
+  console.log(`[Relayer] V13 intake: ${v13PrivateTradingEnabled ? "enabled" : "disabled"}; execution epoch: ${v13ExecutionEpochMs}ms`);
   void resumeV12Executions().catch((error) => {
     console.error("[Relayer] V12 startup recovery failed:", error instanceof Error ? error.message : error);
+  });
+  void resumeV13Executions().catch((error) => {
+    console.error("[Relayer] V13 startup recovery failed:", error instanceof Error ? error.message : error);
   });
 });
 

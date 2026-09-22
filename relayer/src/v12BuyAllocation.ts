@@ -1,4 +1,6 @@
-import type { V12BuyFill, V12PrivateBuyOrder } from "./v12BuyBatchProver.js";
+import type { V12BuyFill } from "./v12BuyBatchProver.js";
+
+export interface PrivateBuyOrderBounds { deposit: bigint; limitPrice: bigint }
 
 const PRICE_SCALE = 1_000_000n;
 
@@ -12,7 +14,7 @@ function ceilDiv(numerator: bigint, denominator: bigint): bigint {
  * shifted only as needed to satisfy each hidden limit exactly.
  */
 export function allocateV12BuyFill(
-  orders: V12PrivateBuyOrder[],
+  orders: PrivateBuyOrderBounds[],
   totalSpent: bigint,
   totalShares: bigint,
 ): V12BuyFill[] {
@@ -66,7 +68,7 @@ export function allocateV12BuyFill(
   return fills;
 }
 
-export function aggregateV12BuyLimit(orders: V12PrivateBuyOrder[]): bigint {
+export function aggregateV12BuyLimit(orders: PrivateBuyOrderBounds[]): bigint {
   if (!orders.length) throw new Error("V12 batch has no orders");
   return orders.reduce((limit, order) => order.limitPrice < limit ? order.limitPrice : limit, orders[0].limitPrice);
 }

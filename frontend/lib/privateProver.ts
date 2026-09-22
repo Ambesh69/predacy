@@ -6,9 +6,9 @@ import {
   type Address,
   type Hex,
 } from "viem";
-import orderCircuit from "@/circuits/shielded_order_v1.json";
+import orderCircuit from "@/circuits/shielded_order_v13.json";
 import withdrawCircuit from "@/circuits/shielded_withdraw_v1.json";
-import buyBatchCircuit from "@/circuits/shielded_buy_batch_v1.json";
+import cancelCircuit from "@/circuits/shielded_cancel_v13.json";
 import type { InputMap } from "@noir-lang/noir_js";
 
 const MAX_U64 = (1n << 64n) - 1n;
@@ -16,7 +16,8 @@ const LOW_128 = (1n << 128n) - 1n;
 const DOMAIN_NOTE = `0x${"00".repeat(31)}01` as Hex;
 const DOMAIN_NULLIFIER = `0x${"00".repeat(31)}02` as Hex;
 const DOMAIN_WITHDRAW = `0x${"00".repeat(31)}03` as Hex;
-const DOMAIN_ORDER = `0x${"00".repeat(31)}04` as Hex;
+const DOMAIN_ORDER = `0x${"00".repeat(31)}05` as Hex;
+const DOMAIN_ORDER_NULLIFIER = `0x${"00".repeat(31)}06` as Hex;
 
 export interface PrivateMerkleWitness {
   root: Hex;
@@ -33,7 +34,7 @@ export interface PrivateOrderProofRequest {
   merkle: PrivateMerkleWitness;
   refundPublicKey: Hex;
   positionPublicKey: Hex;
-  orderSalt: Hex;
+  orderSecret: Hex;
 }
 
 export interface PrivateWithdrawalProofRequest {
@@ -52,12 +53,12 @@ export interface BrowserProof {
 export interface PrivateCancellationProofRequest {
   collateralAsset: Hex;
   positionAsset: Hex;
-  inputNote: Hex;
   deposit: bigint;
   limitPrice: bigint;
-  orderSalt: Hex;
+  orderSecret: Hex;
   refundPublicKey: Hex;
   positionPublicKey: Hex;
+  merkle: PrivateMerkleWitness;
 }
 
 function assertBytes32(value: Hex, label: string): void {
@@ -97,11 +98,11 @@ export function privateNoteCommitment(asset: Hex, amount: bigint, publicKey: Hex
 export function privateOrderCommitment(request: PrivateCancellationProofRequest): Hex {
   return keccak256(encodeAbiParameters(
     [
-      { type: "bytes32" }, { type: "bytes32" }, { type: "bytes32" }, { type: "uint256" },
+      { type: "bytes32" }, { type: "bytes32" }, { type: "uint256" },
       { type: "uint256" }, { type: "bytes32" }, { type: "bytes32" }, { type: "bytes32" },
     ],
-    [DOMAIN_ORDER, request.inputNote, request.positionAsset, request.deposit, request.limitPrice,
-      request.refundPublicKey, request.positionPublicKey, request.orderSalt],
+    [DOMAIN_ORDER, request.positionAsset, request.deposit, request.limitPrice,
+      request.refundPublicKey, request.positionPublicKey, keccak256(request.orderSecret)],
   ));
 }
 
@@ -162,13 +163,13 @@ export async function provePrivateBuyOrder(request: PrivateOrderProofRequest): P
     throw new Error("Limit price must be between 1 and 999999");
   }
   [request.collateralAsset, request.positionAsset, request.noteSecret, request.refundPublicKey,
-    request.positionPublicKey, request.orderSalt].forEach((value, index) => assertBytes32(value, `Order value ${index}`));
+    request.positionPublicKey, request.orderSecret].forEach((value, index) => assertBytes32(value, `Order value ${index}`));
   const publicKey = keccak256(request.noteSecret);
   const inputNote = privateNoteCommitment(request.collateralAsset, request.deposit, publicKey);
   const root = merkleRoot(inputNote, request.merkle);
   const nullifier = noteNullifier(inputNote, request.noteSecret);
-  const orderCommitment = privateOrderCommitment({ ...request, inputNote });
-  const expected = [root, nullifier, request.collateralAsset, request.positionAsset, orderCommitment]
+  const orderCommitment = privateOrderCommitment({ ...request, merkle: request.merkle });
+  const expected = [root, nullifier, request.collateralAsset, orderCommitment]
     .flatMap((value) => halves(value).map(fieldWord));
   const proof = await generateProof(orderCircuit, {
     collateral_asset: bytes(request.collateralAsset),
@@ -180,13 +181,11 @@ export async function provePrivateBuyOrder(request: PrivateOrderProofRequest): P
     index: request.merkle.index.toString(),
     refund_public_key: bytes(request.refundPublicKey),
     position_public_key: bytes(request.positionPublicKey),
-    order_salt: bytes(request.orderSalt),
+    order_secret: bytes(request.orderSecret),
     root_high: halves(root)[0].toString(), root_low: halves(root)[1].toString(),
-    nullifier_high: halves(nullifier)[0].toString(), nullifier_low: halves(nullifier)[1].toString(),
-    collateral_asset_high: halves(request.collateralAsset)[0].toString(),
-    collateral_asset_low: halves(request.collateralAsset)[1].toString(),
-    position_asset_high: halves(request.positionAsset)[0].toString(),
-    position_asset_low: halves(request.positionAsset)[1].toString(),
+    note_nullifier_high: halves(nullifier)[0].toString(), note_nullifier_low: halves(nullifier)[1].toString(),
+    collateral_high: halves(request.collateralAsset)[0].toString(),
+    collateral_low: halves(request.collateralAsset)[1].toString(),
     order_high: halves(orderCommitment)[0].toString(), order_low: halves(orderCommitment)[1].toString(),
   }, expected);
   return { ...proof, root, nullifier, orderCommitment };
@@ -233,43 +232,42 @@ export async function provePrivateWithdrawal(request: PrivateWithdrawalProofRequ
 
 export async function provePrivateOrderCancellation(request: PrivateCancellationProofRequest): Promise<BrowserProof & {
   orderCommitment: Hex;
+  orderNullifier: Hex;
   refundCommitment: Hex;
 }> {
   assertU64(request.deposit, "Cancellation deposit");
   if (request.limitPrice <= 0n || request.limitPrice >= 1_000_000n) throw new Error("Invalid cancellation limit");
-  const zero = `0x${"00".repeat(32)}` as Hex;
   const orderCommitment = privateOrderCommitment(request);
+  const root = merkleRoot(orderCommitment, request.merkle);
+  const orderNullifier = keccak256(encodeAbiParameters(
+    [{ type: "bytes32" }, { type: "bytes32" }, { type: "bytes32" }],
+    [DOMAIN_ORDER_NULLIFIER, orderCommitment, request.orderSecret],
+  ));
   const refundCommitment = privateNoteCommitment(request.collateralAsset, request.deposit, request.refundPublicKey);
+  const [rootHigh, rootLow] = halves(root);
+  const [nullifierHigh, nullifierLow] = halves(orderNullifier);
   const [collateralHigh, collateralLow] = halves(request.collateralAsset);
-  const [positionHigh, positionLow] = halves(request.positionAsset);
-  const [orderHigh, orderLow] = halves(orderCommitment);
   const [refundHigh, refundLow] = halves(refundCommitment);
   const expected = [
-    fieldWord(1n), fieldWord(collateralHigh), fieldWord(collateralLow),
-    fieldWord(positionHigh), fieldWord(positionLow),
-    fieldWord(orderHigh), fieldWord(0n), fieldWord(orderLow), fieldWord(0n),
-    fieldWord(refundHigh), fieldWord(0n), fieldWord(refundLow), fieldWord(0n),
-    fieldWord(0n), fieldWord(0n), fieldWord(0n), fieldWord(0n),
-    fieldWord(request.deposit), fieldWord(0n), fieldWord(0n),
+    fieldWord(rootHigh), fieldWord(rootLow), fieldWord(nullifierHigh), fieldWord(nullifierLow),
+    fieldWord(collateralHigh), fieldWord(collateralLow), fieldWord(refundHigh), fieldWord(refundLow),
+    fieldWord(request.deposit),
   ];
-  const proof = await generateProof(buyBatchCircuit, {
-    collateral_asset: bytes(request.collateralAsset),
+  const proof = await generateProof(cancelCircuit, {
     position_asset: bytes(request.positionAsset),
-    input_notes: [bytes(request.inputNote), bytes(zero)],
-    deposits: [request.deposit.toString(), "0"],
-    limits: [request.limitPrice.toString(), "0"],
-    salts: [bytes(request.orderSalt), bytes(zero)],
-    refund_public_keys: [bytes(request.refundPublicKey), bytes(zero)],
-    position_public_keys: [bytes(request.positionPublicKey), bytes(zero)],
-    spent: ["0", "0"],
-    shares: ["0", "0"],
-    order_count: "1",
+    deposit: request.deposit.toString(),
+    limit_price: request.limitPrice.toString(),
+    refund_public_key: bytes(request.refundPublicKey),
+    position_public_key: bytes(request.positionPublicKey),
+    order_secret: bytes(request.orderSecret),
+    path: request.merkle.path.map(bytes),
+    index: request.merkle.index.toString(),
+    root_high: rootHigh.toString(), root_low: rootLow.toString(),
+    order_nullifier_high: nullifierHigh.toString(), order_nullifier_low: nullifierLow.toString(),
     collateral_high: collateralHigh.toString(), collateral_low: collateralLow.toString(),
-    position_high: positionHigh.toString(), position_low: positionLow.toString(),
-    order_high: [orderHigh.toString(), "0"], order_low: [orderLow.toString(), "0"],
-    refund_high: [refundHigh.toString(), "0"], refund_low: [refundLow.toString(), "0"],
-    position_note_high: ["0", "0"], position_note_low: ["0", "0"],
-    total_deposit: request.deposit.toString(), total_spent: "0", total_shares: "0",
+    refund_high: refundHigh.toString(), refund_low: refundLow.toString(),
+    total_deposit: request.deposit.toString(),
+    collateral_asset: bytes(request.collateralAsset),
   }, expected);
-  return { ...proof, orderCommitment, refundCommitment };
+  return { ...proof, orderCommitment, orderNullifier, refundCommitment };
 }

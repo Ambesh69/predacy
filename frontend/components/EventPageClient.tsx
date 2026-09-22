@@ -1202,13 +1202,13 @@ export default function EventPageClient({ params }: { params: Promise<{ id: stri
     if (IS_MAINNET) {
       if (!privateDeployment) throw new Error("Private trading is not configured yet.");
       if (params.side !== YES_BUY && params.side !== NO_BUY) {
-        throw new Error("Private v12 currently supports BUY YES and BUY NO only.");
+        throw new Error("Private trading currently supports BUY YES and BUY NO only.");
       }
       if (!wallet || !walletAddress) throw new Error("Connect a wallet before trading.");
       const tokenIndex = params.side === YES_BUY ? 0 : 1;
       const tokenId = selectedMarket.clobTokenIds?.[tokenIndex] ?? selectedMarket.tokens?.[tokenIndex]?.token_id;
       if (!tokenId || !/^\d+$/.test(tokenId)) throw new Error("This market has no tradeable outcome token.");
-      const depositWallet = process.env.NEXT_PUBLIC_V12_DEPOSIT_WALLET?.trim();
+      const depositWallet = process.env.NEXT_PUBLIC_V13_DEPOSIT_WALLET?.trim();
       if (!depositWallet || !/^0x[0-9a-fA-F]{40}$/.test(depositWallet)) {
         throw new Error("Private Deposit Wallet is not configured.");
       }

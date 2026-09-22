@@ -62,7 +62,7 @@ export async function executePrivateBuy(args: {
   const refundPublicKey = keccak256(refundSecret);
   const positionSecret = randomWord();
   const positionPublicKey = keccak256(positionSecret);
-  const orderSalt = randomWord();
+  const orderSecret = randomWord();
   const receiptToken = randomWord();
 
   args.onStep?.("depositing");
@@ -86,14 +86,16 @@ export async function executePrivateBuy(args: {
   args.onStep?.("proving");
   const authorization = await provePrivateBuyOrder({
     collateralAsset, positionAsset, deposit: args.amount, limitPrice: args.limitPrice,
-    noteSecret, merkle, refundPublicKey, positionPublicKey, orderSalt,
+    noteSecret, merkle, refundPublicKey, positionPublicKey, orderSecret,
   });
   args.onStep?.("locking");
   await send(args.provider, args.wallet, deployment.pool, encodeFunctionData({
-    abi: SHIELDED_POOL_ABI, functionName: "lockBuyOrder",
-    args: [authorization.proof, authorization.root, authorization.nullifier,
-      args.positionTokenId, authorization.orderCommitment],
+    abi: SHIELDED_POOL_ABI, functionName: "lockOrder",
+    args: [authorization.proof, authorization.root, authorization.nullifier, authorization.orderCommitment],
   }));
+  const orderMerkle = await loadPrivateMerkleWitness(
+    publicClient, deployment.pool, deployment.deploymentBlock, authorization.orderCommitment,
+  );
   note.state = "locked";
   await savePrivateNotes(args.wallet, args.vaultSignature, [note, ...notes]);
 
@@ -107,7 +109,8 @@ export async function executePrivateBuy(args: {
     positionTokenId: args.positionTokenId.toString(),
     collateralAsset,
     positionAsset,
-    orderSalt,
+    orderSecret,
+    orderLeafIndex: orderMerkle.index.toString(),
     refundSecret,
     refundPublicKey,
     positionSecret,
@@ -130,10 +133,10 @@ export async function executePrivateBuy(args: {
     orderCommitment: authorization.orderCommitment,
     receiptToken,
     order: {
-      inputNote,
       deposit: args.amount.toString(),
       limitPrice: args.limitPrice.toString(),
-      salt: orderSalt,
+      orderSecret,
+      orderLeafIndex: orderMerkle.index.toString(),
       refundPublicKey,
       positionPublicKey,
     },
@@ -261,23 +264,26 @@ export async function cancelPrivateOrder(args: {
   if (!current || !["locked", "queued"].includes(current.state)) {
     throw new Error("Only an unbatched private order can be cancelled");
   }
+  const orderMerkle = await loadPrivateMerkleWitness(
+    publicClient, deployment.pool, deployment.deploymentBlock, current.orderCommitment,
+  );
   const cancellation = await provePrivateOrderCancellation({
     collateralAsset: current.collateralAsset,
     positionAsset: current.positionAsset,
-    inputNote: current.inputNote,
     deposit: BigInt(current.deposit),
     limitPrice: BigInt(current.limitPrice),
-    orderSalt: current.orderSalt,
+    orderSecret: current.orderSecret,
     refundPublicKey: current.refundPublicKey,
     positionPublicKey: current.positionPublicKey,
+    merkle: orderMerkle,
   });
   if (cancellation.orderCommitment.toLowerCase() !== current.orderCommitment.toLowerCase()) {
     throw new Error("Private cancellation proof does not match the locked order");
   }
   await send(args.provider, args.wallet, deployment.pool, encodeFunctionData({
     abi: SHIELDED_POOL_ABI,
-    functionName: "cancelLockedBuyOrder",
-    args: [cancellation.proof, BigInt(current.positionTokenId), current.orderCommitment,
+    functionName: "cancelOrder",
+    args: [cancellation.proof, orderMerkle.root, cancellation.orderNullifier,
       cancellation.refundCommitment, BigInt(current.deposit)],
   }));
   const witness = await loadPrivateMerkleWitness(

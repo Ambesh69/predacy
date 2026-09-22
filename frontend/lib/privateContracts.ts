@@ -6,8 +6,8 @@ export interface PrivateContracts {
 }
 
 export function getPrivateContracts(): PrivateContracts | null {
-  const pool = process.env.NEXT_PUBLIC_V12_POOL_ADDRESS?.trim();
-  const block = process.env.NEXT_PUBLIC_V12_DEPLOYMENT_BLOCK?.trim();
+  const pool = process.env.NEXT_PUBLIC_V13_POOL_ADDRESS?.trim();
+  const block = process.env.NEXT_PUBLIC_V13_DEPLOYMENT_BLOCK?.trim();
   if (process.env.NEXT_PUBLIC_PRIVATE_TRADING_ENABLED !== "true" || !pool || !isAddress(pool) || !block || !/^\d+$/.test(block)) {
     return null;
   }
@@ -33,18 +33,17 @@ export const SHIELDED_POOL_ABI = [
     outputs: [{ name: "leafIndex", type: "uint256" }, { name: "commitment", type: "bytes32" }],
   },
   {
-    name: "lockBuyOrder", type: "function", stateMutability: "nonpayable",
+    name: "lockOrder", type: "function", stateMutability: "nonpayable",
     inputs: [
       { name: "proof", type: "bytes" }, { name: "root", type: "bytes32" },
-      { name: "nullifier", type: "bytes32" }, { name: "positionTokenId", type: "uint256" },
-      { name: "orderCommitment", type: "bytes32" },
+      { name: "nullifier", type: "bytes32" }, { name: "orderCommitment", type: "bytes32" },
     ], outputs: [],
   },
   {
-    name: "cancelLockedBuyOrder", type: "function", stateMutability: "nonpayable",
+    name: "cancelOrder", type: "function", stateMutability: "nonpayable",
     inputs: [
-      { name: "proof", type: "bytes" }, { name: "positionTokenId", type: "uint256" },
-      { name: "orderCommitment", type: "bytes32" }, { name: "fullRefundCommitment", type: "bytes32" },
+      { name: "proof", type: "bytes" }, { name: "root", type: "bytes32" },
+      { name: "orderNullifier", type: "bytes32" }, { name: "fullRefundCommitment", type: "bytes32" },
       { name: "totalDeposit", type: "uint256" },
     ], outputs: [],
   },

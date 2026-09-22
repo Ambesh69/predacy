@@ -24,7 +24,8 @@ export interface PrivateOrderRecord {
   positionTokenId: string;
   collateralAsset: Hex;
   positionAsset: Hex;
-  orderSalt: Hex;
+  orderSecret: Hex;
+  orderLeafIndex: string;
   refundSecret: Hex;
   refundPublicKey: Hex;
   positionSecret: Hex;
@@ -52,8 +53,8 @@ interface PrivateVaultBackup {
   exportedAt: number;
 }
 
-const STORAGE_KEY = "predacy_private_notes_v12";
-const ORDER_STORAGE_KEY = "predacy_private_orders_v12";
+const STORAGE_KEY = "predacy_private_notes_v13";
+const ORDER_STORAGE_KEY = "predacy_private_orders_v13";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
@@ -96,10 +97,11 @@ function validateOrders(orders: PrivateOrderRecord[]): void {
   if (!Array.isArray(orders) || orders.some((order) =>
     !bytes32.test(order.orderCommitment) || !bytes32.test(order.receiptToken) ||
     !bytes32.test(order.inputNote) || !bytes32.test(order.marketId) || !bytes32.test(order.collateralAsset) ||
-    !bytes32.test(order.positionAsset) || !bytes32.test(order.orderSalt) ||
+    !bytes32.test(order.positionAsset) || !bytes32.test(order.orderSecret) ||
     !bytes32.test(order.refundSecret) || !bytes32.test(order.refundPublicKey) ||
     !bytes32.test(order.positionSecret) || !bytes32.test(order.positionPublicKey) ||
     !decimal.test(order.deposit) || !decimal.test(order.limitPrice) || !decimal.test(order.positionTokenId) ||
+    !decimal.test(order.orderLeafIndex) ||
     (order.spent !== undefined && !decimal.test(order.spent)) ||
     (order.shares !== undefined && !decimal.test(order.shares)) ||
     (order.refund !== undefined && !decimal.test(order.refund)) || !Number.isSafeInteger(order.createdAt))) {

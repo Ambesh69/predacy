@@ -11,10 +11,10 @@ export interface PrivateOrderSubmission {
   orderCommitment: Hex;
   receiptToken: Hex;
   order: {
-    inputNote: Hex;
     deposit: string;
     limitPrice: string;
-    salt: Hex;
+    orderSecret: Hex;
+    orderLeafIndex: string;
     refundPublicKey: Hex;
     positionPublicKey: Hex;
   };
@@ -40,7 +40,7 @@ export async function submitPrivateOrder(submission: PrivateOrderSubmission): Pr
   const relayer = getRelayerUrl();
   if (!relayer) throw new Error("Private relayer is not configured");
   const { receiptToken, ...order } = submission;
-  const response = await fetch(`${relayer}/v12/private-order`, {
+  const response = await fetch(`${relayer}/v13/private-order`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ...order, receiptTokenHash: keccak256(receiptToken) }),
@@ -58,7 +58,7 @@ export async function getPrivateAllocationReceipt(
   assertSecret(receiptToken);
   const relayer = getRelayerUrl();
   if (!relayer) throw new Error("Private relayer is not configured");
-  const response = await fetch(`${relayer}/v12/private-receipt`, {
+  const response = await fetch(`${relayer}/v13/private-receipt`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ orderCommitment, receiptToken }),

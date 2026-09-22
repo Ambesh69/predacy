@@ -579,7 +579,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
         throw new Error("Private trading is not configured yet.");
       }
       if (params.side !== YES_BUY && params.side !== 2) {
-        throw new Error("Private v12 currently supports BUY YES and BUY NO only.");
+        throw new Error("Private trading currently supports BUY YES and BUY NO only.");
       }
       if (!walletAddress || !wallet || !market || !/^0x[0-9a-fA-F]{64}$/.test(id)) {
         throw new Error("Connect a wallet and reload this market before trading.");
@@ -587,7 +587,7 @@ export default function MarketPageClient({ params }: { params: Promise<{ id: str
       const tokenIndex = params.side === YES_BUY ? 0 : 1;
       const tokenId = market.clobTokenIds?.[tokenIndex] ?? market.tokens?.[tokenIndex]?.token_id;
       if (!tokenId || !/^\d+$/.test(tokenId)) throw new Error("This market has no tradeable Polymarket outcome token.");
-      const depositWallet = process.env.NEXT_PUBLIC_V12_DEPOSIT_WALLET?.trim();
+      const depositWallet = process.env.NEXT_PUBLIC_V13_DEPOSIT_WALLET?.trim();
       if (!depositWallet || !/^0x[0-9a-fA-F]{40}$/.test(depositWallet)) {
         throw new Error("Private Deposit Wallet is not configured.");
       }
