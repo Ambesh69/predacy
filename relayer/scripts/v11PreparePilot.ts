@@ -20,6 +20,7 @@ const vaultAbi = parseAbi([
   "function tradingPaused() view returns (bool)",
   "function nextBatchId() view returns (uint256)",
   "function activeBatchId() view returns (uint256)",
+  "function batches(uint256) view returns(bytes32,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint8)",
   "function usdce() view returns (address)",
   "function allocationVerifier() view returns (address)",
   "function openBatch(bytes32,uint256,uint256) returns (uint256)",
@@ -83,7 +84,14 @@ async function main(): Promise<void> {
     reader.readContract({ address: vault, abi: vaultAbi, functionName: "usdce" }),
     reader.readContract({ address: vault, abi: vaultAbi, functionName: "allocationVerifier" }),
   ]);
-  if (!paused || nextBatchId <= 0n || activeBatchId !== 0n) {
+  const activeStatus = activeBatchId === 0n ? 0 : Number((await reader.readContract({
+    address: vault,
+    abi: vaultAbi,
+    functionName: "batches",
+    args: [activeBatchId],
+  }))[12]);
+  if (!paused || nextBatchId <= 0n ||
+      (activeBatchId !== 0n && activeStatus !== 4 && activeStatus !== 5)) {
     throw new Error("Pilot preparation requires a paused vault with no active batch");
   }
   const [balance, allowance] = await Promise.all([

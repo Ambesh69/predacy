@@ -159,7 +159,7 @@ async function main(): Promise<void> {
 
   async function openBatch(): Promise<Hex> {
     const current = await state();
-    if (current.paused || current.next !== batchId || current.active !== 0n ||
+    if (current.paused || current.next !== batchId ||
         current.batchStatus !== "NONE" || current.balance < deposit || current.allowance < deposit ||
         current.walletPusd !== 0n || current.walletYes !== 0n || current.walletNo !== 0n) {
       throw new Error("Pilot readiness changed; batch was not opened");
