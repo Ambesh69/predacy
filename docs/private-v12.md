@@ -167,9 +167,10 @@ fails unless both the budget and deployer balance cover it.
 All deployment scripts also fail before `startBroadcast` when either Polygon's
 base fee or the effective transaction gas price exceeds
 `V12_MAX_GAS_PRICE_WEI` (5 gwei by default). Pass the same value to Forge with
-`--gas-price`, and set `FOUNDRY_PROFILE=mainnet` for every verifier broadcast so
-the existing transcript library is reused. Never override the cap without a new
-explicit POL budget.
+`--legacy --with-gas-price <wei> --gas-price <wei>`, and set
+`FOUNDRY_PROFILE=mainnet` for every verifier broadcast so the existing transcript
+library is reused. `--gas-price` alone does not cap Foundry's EIP-1559 broadcast.
+Never override the cap without a new explicit POL budget.
 
 The September 2026 attempt successfully deployed the withdrawal circuit's
 reusable `ZKTranscriptLib` at `0x9a2abcf4ca811335cff4ed1b1d0d4d4034889350`.
@@ -177,3 +178,18 @@ All four verifier projects use its byte-for-byte identical library source and
 the `mainnet` Foundry profile links them to this shared address. The withdrawal
 verifier transaction itself was not broadcast. The remaining measured deployment
 is 25,458,834 gas before the safety margin.
+
+## Polygon mainnet deployment
+
+The paused v12 contracts were deployed on September 23, 2026:
+
+- Withdrawal verifier: `0x84E162dB396Cf2708aef3D3c06cbBBD84E6d6a98`
+- Transfer verifier: `0x9948b33D6Bb716586d10BE56a088Fc4e1d6eE8F9`
+- Order verifier: `0x72F1A32b381eA40Ce3E5AfB42d4a99C381819E4C`
+- Buy-batch verifier: `0x4173143e37f4Cf9a4a8b8aa81BCFD9322a8d1660`
+- Adapter: `0xb13c590614097d2833D4A1Bd404D4Ed10397D764`
+- Pool: `0xfD533100FE8a38Fe7b3cBb49d441AF296bd24B35`
+
+The pool deployed paused and production private intake remains disabled. Railway
+requires both the PostgreSQL recovery rehearsal and `preflight:v12` to pass before
+starting a release.
