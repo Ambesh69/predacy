@@ -159,6 +159,17 @@ describe("v11 single-order runner", () => {
     expect(h.sendShares).toHaveBeenCalledOnce();
   });
 
+  it("reconciles a terminal FAK omitted by the order endpoint from trades and wallet balances", async () => {
+    const h = harness("partial");
+    h.driver.fetchOrder = async () => null;
+    const result = await runV11SingleOrder(order, h.batchJournal, h.orderJournal, h.driver, h.budget);
+    expect(result.allocation).toMatchObject({
+      filledShares: 1_000_000n, usdcPayout: 405_000n, refund: 5_000n,
+    });
+    expect(h.sendPusd).toHaveBeenCalledOnce();
+    expect(h.sendShares).toHaveBeenCalledOnce();
+  });
+
   it("returns the full escrow after an explicit CLOB rejection", async () => {
     const h = harness("rejected");
     const result = await runV11SingleOrder(order, h.batchJournal, h.orderJournal, h.driver, h.budget);

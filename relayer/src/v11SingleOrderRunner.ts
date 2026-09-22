@@ -5,7 +5,7 @@ import type { V11OrderJournal } from "./v11OrderJournal.js";
 import { prepareV11Order, type V11MarketOrderSigner } from "./v11OrderPreparation.js";
 import { submitV11OrderOnce, type ClobOrderPoster } from "./v11OrderSubmission.js";
 import {
-  collectV11TradeEvidence, verifyV11TerminalOrder,
+  collectV11TradeEvidence, verifyV11TerminalOrder, verifyV11TradeReceipts,
   type V11OrderRecord, type V11ReceiptReader, type V11TradeReader,
 } from "./v11OrderReconciliation.js";
 import {
@@ -36,7 +36,7 @@ export interface V11SingleOrderDriver {
   assertFunding(order: V11EscrowedOrder): Promise<void>;
   signer: V11MarketOrderSigner;
   poster: ClobOrderPoster;
-  fetchOrder(orderId: string): Promise<V11OrderRecord>;
+  fetchOrder(orderId: string): Promise<V11OrderRecord | null>;
   tradeReader: V11TradeReader;
   receiptReader: V11ReceiptReader;
   returnPusd(amount: bigint): V11BatchTransaction;
@@ -67,6 +67,23 @@ function assertFundedWallet(order: V11EscrowedOrder, balances: V11WalletBalances
   if (balances.pusd !== expected.pusd || balances.yes !== expected.yes || balances.no !== expected.no) {
     throw new Error("Deposit Wallet contains funds outside this v11 escrow or route is unconfirmed");
   }
+}
+
+function matchedSharesFromDedicatedWallet(order: V11EscrowedOrder, balances: V11WalletBalances): bigint {
+  if (order.side === "YES_BUY") {
+    if (balances.no !== 0n || balances.pusd > order.deposit) throw new Error("Unexpected assets after v11 FAK fill");
+    return balances.yes;
+  }
+  if (order.side === "NO_BUY") {
+    if (balances.yes !== 0n || balances.pusd > order.deposit) throw new Error("Unexpected assets after v11 FAK fill");
+    return balances.no;
+  }
+  if (order.side === "YES_SELL") {
+    if (balances.no !== 0n || balances.yes > order.deposit) throw new Error("Unexpected assets after v11 FAK fill");
+    return order.deposit - balances.yes;
+  }
+  if (balances.yes !== 0n || balances.no > order.deposit) throw new Error("Unexpected assets after v11 FAK fill");
+  return order.deposit - balances.no;
 }
 
 /** One escrowed order, one FAK attempt, exact returned assets. Never resolves ambiguous sends by retrying. */
@@ -176,18 +193,31 @@ export async function runV11SingleOrder(
 
   let matchedShares = 0n;
   let confirmedTradeCount = 0;
+  let terminalBalances: V11WalletBalances | undefined;
   if (intent.state === "accepted") {
     if (!intent.orderId) throw new Error("Accepted CLOB order has no ID");
-    const record = await driver.fetchOrder(intent.orderId);
     const evidence = await collectV11TradeEvidence(driver.tradeReader, order.marketId, intent.orderId);
-    ({ filledShares: matchedShares, confirmedTradeCount } = await verifyV11TerminalOrder(record, {
-      orderId: intent.orderId, marketId: order.marketId, tokenId: order.tokenId,
-      maker: order.depositWallet, side,
-    }, evidence, driver.receiptReader));
+    const record = await driver.fetchOrder(intent.orderId);
+    if (record) {
+      ({ filledShares: matchedShares, confirmedTradeCount } = await verifyV11TerminalOrder(record, {
+        orderId: intent.orderId, marketId: order.marketId, tokenId: order.tokenId,
+        maker: order.depositWallet, side,
+      }, evidence, driver.receiptReader));
+    } else {
+      if (evidence.tradeIds.length === 0 || evidence.pendingTradeIds.length || evidence.failedTradeIds.length) {
+        throw new Error("Missing terminal FAK order lacks fully confirmed trade evidence");
+      }
+      await verifyV11TradeReceipts(driver.receiptReader, evidence);
+      terminalBalances = await driver.readWalletBalances();
+      matchedShares = matchedSharesFromDedicatedWallet(order, terminalBalances);
+      if (matchedShares <= 0n) throw new Error("Missing terminal FAK order has no matching wallet fill");
+      confirmedTradeCount = evidence.tradeIds.length;
+    }
   }
 
   const existingPlan = await batchJournal.get(order.batchId, "plan");
-  const after = existingPlan ? decodeBalances(existingPlan.payload) : await driver.readWalletBalances();
+  const after = existingPlan ? decodeBalances(existingPlan.payload)
+    : terminalBalances ?? await driver.readWalletBalances();
   const allocation = planV11SingleOrderReturn({
     side: order.side, deposit: order.deposit, limitPrice: order.limitPrice,
     walletBeforeRoute: { pusd: 0n, yes: 0n, no: 0n },

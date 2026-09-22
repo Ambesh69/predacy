@@ -172,8 +172,15 @@ export class V11PolygonDriver implements V11SingleOrderDriver {
   }
 
   async fetchOrder(orderId: string) {
-    const record = await this.config.clob.fetchOrder({ orderId });
-    return { ...record, tokenId: record.tokenId.toString(), conditionId: record.conditionId.toString() };
+    try {
+      const record = await this.config.clob.fetchOrder({ orderId });
+      return { ...record, tokenId: record.tokenId.toString(), conditionId: record.conditionId.toString() };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      if (message.includes(`/data/order/${orderId}`) &&
+          message.includes("expected object, received null")) return null;
+      throw error;
+    }
   }
 
   returnPusd(amount: bigint): V11BatchTransaction {
