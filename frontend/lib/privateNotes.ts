@@ -45,6 +45,13 @@ interface EncryptedNoteVault {
   ciphertext: string;
 }
 
+interface PrivateVaultBackup {
+  version: 2;
+  notes: string | null;
+  orders: string | null;
+  exportedAt: number;
+}
+
 const STORAGE_KEY = "predacy_private_notes_v12";
 const ORDER_STORAGE_KEY = "predacy_private_orders_v12";
 const encoder = new TextEncoder();
@@ -162,6 +169,37 @@ export async function importPrivateNoteBackup(wallet: string, signature: Hex, ba
   const notes = await decryptPrivateNotes(wallet, signature, backup);
   localStorage.setItem(STORAGE_KEY, backup);
   return notes.length;
+}
+
+export function exportPrivateVaultBackup(): string | null {
+  if (typeof window === "undefined") return null;
+  const notes = localStorage.getItem(STORAGE_KEY);
+  const orders = localStorage.getItem(ORDER_STORAGE_KEY);
+  if (!notes && !orders) return null;
+  return JSON.stringify({ version: 2, notes, orders, exportedAt: Date.now() } satisfies PrivateVaultBackup);
+}
+
+export async function importPrivateVaultBackup(
+  wallet: string,
+  signature: Hex,
+  backup: string,
+): Promise<{ notes: number; orders: number }> {
+  if (typeof window === "undefined") throw new Error("Private vault backups are available only in the wallet client");
+  const parsed = JSON.parse(backup) as Partial<PrivateVaultBackup>;
+  if (parsed.version !== 2 || (typeof parsed.notes !== "string" && parsed.notes !== null) ||
+      (typeof parsed.orders !== "string" && parsed.orders !== null)) {
+    throw new Error("Private vault backup has an unsupported format");
+  }
+  const notes = parsed.notes ? await decryptPrivateNotes(wallet, signature, parsed.notes) : [];
+  const orders = parsed.orders
+    ? await decryptPrivateValue<PrivateOrderRecord[]>(wallet, signature, parsed.orders)
+    : [];
+  validateOrders(orders);
+  if (parsed.notes) localStorage.setItem(STORAGE_KEY, parsed.notes);
+  else localStorage.removeItem(STORAGE_KEY);
+  if (parsed.orders) localStorage.setItem(ORDER_STORAGE_KEY, parsed.orders);
+  else localStorage.removeItem(ORDER_STORAGE_KEY);
+  return { notes: notes.length, orders: orders.length };
 }
 
 export async function loadPrivateOrders(wallet: string, signature: Hex): Promise<PrivateOrderRecord[]> {

@@ -85,9 +85,10 @@ entrypoint is `npm run run:v12 -- --execute <order-set-hash>`; it loads the
 private request only from the encrypted PostgreSQL witness vault.
 
 The frontend private-note vault encrypts note secrets, ownership keys, amounts,
-leaf metadata, and local position state with AES-GCM. Ciphertext is bound to the
-wallet address and can be exported or restored as an encrypted backup; plaintext
-note material is never written to browser storage.
+leaf metadata, order receipt tokens, output secrets, and local position state
+with AES-GCM. Ciphertext is bound to the wallet address and the positions panel
+can export or restore one validated full-vault backup; plaintext note material
+is never written to browser storage.
 
 The frontend also contains browser-only Noir/Barretenberg order and withdrawal
 provers. It reconstructs 20-level Merkle paths from `NoteInserted` logs and
