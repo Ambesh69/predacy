@@ -1,17 +1,20 @@
 # Mainnet launch gate
 
-Status: **v12 mainnet intake enabled September 23, 2026**. The owner explicitly
-opened the production gate and unpaused the pool before a live recovery exercise
-or independent security review was complete. Treat this as an elevated-risk
-launch and do not remove the recovery controls or privacy disclosures below.
+Status: **closed for new mainnet orders**. V12 was briefly enabled on September
+23, 2026, but no notes or batches were created. Review then confirmed that
+`lockBuyOrder` publishes each order's outcome asset and `startBuyBatch` links
+the two order commitments to the public aggregate hedge. Intake was disabled
+and the empty pool was paused.
 
 ## Privacy decision
 
-V12 hides each user's order, balance, allocation, and claim in a shielded note
-pool. Its omnibus Deposit Wallet prevents the public Polymarket hedge from being
-attributed to one customer, but the aggregate market, direction, amount, and
-fill remain observable on Polygon. Do not describe those aggregate trades as
-private or claim that the relayer cannot inspect submitted order plaintext.
+V12 hides balances, order amounts and limits, allocations, and note ownership.
+It does not hide each locked order's outcome asset, and exact batch membership
+is public. Its omnibus Deposit Wallet prevents the public Polymarket hedge from
+being attributed to a funding wallet, but the aggregate market, direction,
+amount, and fill remain observable on Polygon. A replacement must
+insert a generic private order note and consume it by proof-bound nullifier;
+the public batch must not enumerate the originating order commitments.
 
 Production v12 configuration, deployed addresses, privacy guarantees, and the
 remaining gate are documented in [private-v12.md](private-v12.md). The sections

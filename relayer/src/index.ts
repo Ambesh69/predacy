@@ -15,6 +15,7 @@ import { isAdminAuthorized } from "./adminAuth.js";
 import { parseV12QueuedBuyOrder, PostgresV12OrderQueue } from "./v12OrderQueue.js";
 import { v12OrderCommitment } from "./v12BuyBatchProver.js";
 import { assertV12GeoEligible } from "./v12GeoEligibility.js";
+import { resolveV12LaunchPolicy } from "./v12LaunchPolicy.js";
 
 // ── Environment ───────────────────────────────────────────────────────────────
 const missingVars = ["VAULT_ADDRESS", "RELAYER_PRIVATE_KEY"].filter((v) => !process.env[v]);
@@ -261,10 +262,11 @@ interface V11RecoveryJob {
 const v11RecoveryJobs = new Map<string, V11RecoveryJob>();
 const v12ExecutionJobs = new Map<string, V11RecoveryJob>();
 let v12OrderQueue: Promise<PostgresV12OrderQueue> | null = null;
-const v12PrivateTradingEnabled = process.env.V12_PRIVATE_TRADING_ENABLED === "true";
+const v12LaunchPolicy = resolveV12LaunchPolicy(chainId, process.env);
+const v12PrivateTradingEnabled = v12LaunchPolicy.enabled;
 const v12ExecutionEpochMs = Number(process.env.V12_EXECUTION_EPOCH_MS ?? "60000");
 const privateTradingBlocker = chainId === polygon.id && !v12PrivateTradingEnabled
-  ? "V12 private intake is disabled pending the live recovery exercise and independent security review; aggregate Polymarket hedges remain public"
+  ? v12LaunchPolicy.blocker
   : null;
 
 function privateOrderQueue(): Promise<PostgresV12OrderQueue> {

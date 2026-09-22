@@ -2,10 +2,11 @@
 
 ## Privacy boundary
 
-V12 hides each user's balance, order, position, allocation, and claim inside a
-shielded note pool. Polymarket only sees pooled execution wallets and aggregate
-hedges. Those aggregate hedges remain public because Polymarket settles them on
-Polygon; they must not be represented as fully private.
+V12 hides balances, amounts, limits, allocations, and note ownership inside a
+shielded note pool. It does not hide each locked order's outcome asset:
+`lockBuyOrder` publishes that asset, and `startBuyBatch` publicly enumerates the
+two commitments routed into the Polymarket hedge. V12 therefore does not meet
+the product's individual trade-detail privacy requirement.
 
 The relayer must not learn note secrets or withdrawal ownership. A relayer may
 learn decrypted orders while constructing a batch until encrypted matching is
@@ -123,8 +124,10 @@ generated verifier symbols collide when multiple generated verifiers share one
 Solidity compilation unit.
 
 The contracts are intentionally deployed paused by the v12 deployment script.
-The owner enabled production intake and unpaused the pool on September 23, 2026
-before an independent security review or live recovery exercise was complete.
+The owner briefly enabled production intake and unpaused the pool on September
+23, 2026 before an independent security review or live recovery exercise was
+complete. No notes or batches were created; intake was disabled and the empty
+pool was paused after the public per-order asset link was confirmed.
 Private order intake requires a current HMAC-signed Vercel location assertion
 and rejects Polymarket's blocked countries and regions.
 
@@ -191,7 +194,8 @@ The paused v12 contracts were deployed on September 23, 2026:
 - Adapter: `0xb13c590614097d2833D4A1Bd404D4Ed10397D764`
 - Pool: `0xfD533100FE8a38Fe7b3cBb49d441AF296bd24B35`
 
-The pool deployed paused and was unpaused in transaction
+The pool deployed paused and was temporarily unpaused in transaction
 `0xbac5c9f770859117286154258771d40cce9ef7a1b3483c05adf6debee294c214`.
-Production private intake is enabled. Railway requires both the PostgreSQL
-recovery rehearsal and `preflight:v12` to pass before starting a release.
+Production private intake is disabled and the pool is paused. Railway requires
+both the PostgreSQL recovery rehearsal and `preflight:v12` to pass before
+starting a release.

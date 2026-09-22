@@ -22,7 +22,8 @@ interface IShieldedExecutionAdapter {
 
 /// @notice Collateral and outcome-token pool for unlinkable private balance notes.
 /// @dev Deposits are public, while note ownership and later spends are proven in zero knowledge.
-///      Individual orders remain hidden. Only batch aggregates and the Polymarket hedge are public.
+///      Amounts and limits remain hidden. Each locked order's outcome asset and its later
+///      membership in a public Polymarket aggregate are visible on-chain.
 contract ShieldedPoolV1 {
     uint256 public constant TREE_DEPTH = 20;
     uint256 public constant MAX_LEAVES = 1 << TREE_DEPTH;

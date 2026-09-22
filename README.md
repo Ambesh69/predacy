@@ -2,12 +2,11 @@
 
 Private sealed-bid batch auction layer on top of [Polymarket](https://polymarket.com).
 
-**Launch status:** V12 production intake is enabled on Polygon mainnet. The
-owner opened intake before completing a live recovery exercise or independent
-security review, so this remains an elevated-risk launch. V12 shields individual
-balances, orders, allocations, and claims inside a note pool. Polymarket still
-publishes the pool's aggregate hedge on Polygon; Predacy must not describe that
-aggregate as private. See [the launch gate](docs/launch-readiness.md).
+**Launch status:** Mainnet intake is closed. A post-deployment review found that
+v12 publishes each locked order's outcome asset and later links its commitment
+to the public Polymarket aggregate. The pool was paused while empty. V12 hides
+amounts and limits, but it does not meet Predacy's individual trade-detail
+privacy requirement. See [the launch gate](docs/launch-readiness.md).
 
 The legacy design used ephemeral wallets and commitments to reduce identity
 linkage. V12 replaces its public per-order escrow and allocation data with

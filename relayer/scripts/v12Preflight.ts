@@ -8,6 +8,7 @@ import { polygon } from "viem/chains";
 import { createOperatorDepositWallet } from "../src/depositWalletClient.js";
 import { PostgresV12BatchJournal } from "../src/v12BatchJournal.js";
 import { PostgresV12OrderQueue } from "../src/v12OrderQueue.js";
+import { resolveV12LaunchPolicy } from "../src/v12LaunchPolicy.js";
 
 const USDCE = getAddress("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174");
 const PUSD = getAddress("0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB");
@@ -44,6 +45,13 @@ function required(name: string): string {
 async function main(): Promise<void> {
   const errors: string[] = [];
   const checks: Record<string, unknown> = {};
+  const launchPolicy = resolveV12LaunchPolicy(polygon.id, process.env);
+  if (process.env.V12_PRIVATE_TRADING_ENABLED === "true" && !launchPolicy.enabled) {
+    errors.push(`launchPolicy: ${launchPolicy.blocker}`);
+    checks.launchPolicy = "failed";
+  } else {
+    checks.launchPolicy = launchPolicy.enabled ? "enabled" : "disabled";
+  }
   const capture = async (name: string, check: () => Promise<unknown>) => {
     try { checks[name] = await check(); } catch (error) {
       checks[name] = "failed";
