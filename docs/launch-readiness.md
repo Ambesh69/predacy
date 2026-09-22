@@ -1,9 +1,11 @@
 # Mainnet launch gate
 
 Status: **closed for new mainnet orders**. V13 is deployed paused on Polygon
-and configured in Railway. The production release at commit `5c0823b` passed
-the combined v12 recovery and v13 chain/database pre-deploy gate. No v13 live
-recovery pilot or independent review has completed.
+and configured in Railway. Production commit `b359089` passed the combined
+v12/v13 recovery, v13 chain/database, and deployed-verifier proof checks.
+Six process-restart checkpoints passed against PostgreSQL with simulated chain
+actions and CLOB fills. No v13 live recovery pilot or independent review has
+completed. See [the verification record](v13-runtime-verification.md).
 
 ## Privacy decision
 

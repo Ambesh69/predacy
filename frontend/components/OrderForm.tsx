@@ -354,18 +354,18 @@ export default function OrderForm({
             </p>
           </div>
           <p className="text-[10px] text-muted-dim">
-            This hash — not your order details — is what gets recorded on-chain.
+            Order commitments hide their contents. Public transactions and aggregate trades can still reveal information.
           </p>
           {mode === "buy" && (
             <div className="border border-accent/20 bg-accent/5 px-3 py-2 space-y-1">
               <p className="text-[10px] text-accent tracking-widest uppercase font-medium">Privacy</p>
               <div className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-[10px]">
                 <span className="text-accent">✓</span>
-                <span className="text-muted-dim">Wallet address hidden from settlement events</span>
+                <span className="text-muted-dim">Individual order witnesses omitted from batch settlement</span>
                 <span className="text-accent">✓</span>
-                <span className="text-muted-dim">USDC amount hidden until claim</span>
+                <span className="text-muted-dim">Funding, withdrawals, and aggregate trades are public</span>
                 <span className="text-accent">✓</span>
-                <span className="text-muted-dim">Ephemeral address used for on-chain commit</span>
+                <span className="text-muted-dim">Relayer sees orders; timing and small batches can reveal links</span>
               </div>
             </div>
           )}

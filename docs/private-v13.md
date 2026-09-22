@@ -62,9 +62,12 @@ spend was `6.994017334609227 POL`, below the authorized `10.2 POL` ceiling.
 | ShieldedPoolV2 | `0x66AA268ab8183AdE8081879D030f54Ab6D2b0A1b` | `0xb1dfc10f4304a71a26a489136ce14eeedf91e114da8bd868f0a128b889bc1c45` |
 | Adapter binding | Pool above | `0xfaf65fcedd0f464c13b0cb34c122eb1f8d889f7e79a3c3f34c87b1cc681ee4c3` |
 
-Railway production commit `5c0823b` passed `predeploy:production`, including
-the v13 bytecode/role/pause checks, signer separation, PostgreSQL connectivity,
-and unresolved-journal check. All three v13 launch variables remain `false`.
+Railway production commit `b359089` passed `predeploy:production`, including
+the v13 bytecode/role/pause checks, signer separation, six PostgreSQL restart
+checkpoints, concurrent queue assembly, and fresh proofs against all four
+deployed v13 verifiers. The database rehearsal simulates chain actions and CLOB
+fills. All three v13 launch variables remain `false`.
+See [the verification record](v13-runtime-verification.md).
 
 ## Privacy boundary
 

@@ -287,7 +287,7 @@ export async function cancelPrivateOrder(args: {
   const orders = await loadPrivateOrders(args.wallet, args.vaultSignature);
   const current = orders.find((order) => order.orderCommitment === args.order.orderCommitment);
   if (!current || !["locked", "queued", "batched"].includes(current.state)) {
-    throw new Error("Only an unbatched private order can be cancelled");
+    throw new Error("Only an unrouted private order can be cancelled");
   }
   const orderMerkle = await loadPrivateMerkleWitness(
     publicClient, deployment.pool, deployment.deploymentBlock, current.orderCommitment,
