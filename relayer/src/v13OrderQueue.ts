@@ -1,7 +1,7 @@
 import { Pool } from "pg";
 import { encodeAbiParameters, getAddress, keccak256, type Address, type Hex } from "viem";
 import { openV13Witness, PostgresV13WitnessVault, sealV13Witness } from "./v13BatchJournal.js";
-import { buildV13RouteInputs, v13OrderCommitment, type V13MerkleWitness, type V13PrivateOrder } from "./v13Proofs.js";
+import { buildV13RouteInputs, v13Nullifier, v13OrderCommitment, type V13MerkleWitness, type V13PrivateOrder } from "./v13Proofs.js";
 import type { V13BuyRequest } from "./v13BuyRunner.js";
 
 export interface V13QueuedOrder {
@@ -10,7 +10,8 @@ export interface V13QueuedOrder {
   order: Omit<V13PrivateOrder, "positionAsset" | "merkle">;
 }
 export interface V13Receipt { spent: bigint; shares: bigint; refund: bigint }
-export type V13WitnessResolver = (leaves: Array<{ index: number; commitment: Hex }>) => Promise<V13MerkleWitness[]>;
+export type V13WitnessResolver = (leaves: Array<{ index: number; commitment: Hex; nullifier: Hex }>) =>
+  Promise<Array<{ merkle: V13MerkleWitness; spent: boolean }>>;
 
 function word(value: unknown, label: string): Hex {
   if (typeof value !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(value)) throw new Error(`${label} must be bytes32`);
@@ -81,8 +82,11 @@ export class PostgresV13OrderQueue {
 
   async enqueue(order: V13QueuedOrder) {
     const id = commitment(order); const groupKey = v13OrderGroupKey(order);
-    const resolved = await this.resolveWitnesses([{ index: order.orderLeafIndex, commitment: id }]);
+    const resolved = await this.resolveWitnesses([{ index: order.orderLeafIndex, commitment: id,
+      nullifier: v13Nullifier(id, order.order.orderSecret, 6) }]);
     if (resolved.length !== 1) throw new Error("V13 order leaf was not found on-chain");
+    if (typeof resolved[0].spent !== "boolean") throw new Error("V13 order spend status is unavailable");
+    if (resolved[0].spent) throw new Error("V13 order has already been cancelled or routed");
     const sealed = sealV13Witness(id, order, this.key);
     const inserted = await this.pool.query(`INSERT INTO v13_private_order_queue
       (order_commitment,group_key,leaf_index,ciphertext,witness_digest) VALUES ($1,$2,$3,$4,$5)
@@ -100,38 +104,60 @@ export class PostgresV13OrderQueue {
     const connection = await this.pool.connect();
     try {
       await connection.query("BEGIN");
-      const ready = await connection.query<{ order_commitment: string; leaf_index: number; ciphertext: string }>(
-        `SELECT order_commitment,leaf_index,ciphertext FROM v13_private_order_queue
-         WHERE group_key=$1 AND state='pending' ORDER BY created_at,order_commitment LIMIT 2 FOR UPDATE`, [groupKey]);
-      if (ready.rows.length !== 2) {
-        await connection.query("ROLLBACK");
-        return null;
+      const excluded: string[] = [];
+      // Exclusions are snapshot-local: a reorg must not permanently discard a user's order.
+      while (true) {
+        const ready = await connection.query<{ order_commitment: string; leaf_index: number; ciphertext: string }>(
+          `SELECT order_commitment,leaf_index,ciphertext FROM v13_private_order_queue
+           WHERE group_key=$1 AND state='pending' AND NOT (order_commitment=ANY($2::text[]))
+           ORDER BY created_at,order_commitment LIMIT 32 FOR UPDATE`, [groupKey, excluded]);
+        if (ready.rows.length < 2) {
+          await connection.query("ROLLBACK");
+          return null;
+        }
+        const queued = ready.rows.map((row) => openV13Witness<V13QueuedOrder>(row.order_commitment, row.ciphertext, this.key));
+        if (queued.some((item) => v13OrderGroupKey(item).toLowerCase() !== groupKey.toLowerCase())) {
+          throw new Error("Encrypted v13 queue grouping mismatch");
+        }
+        const candidates = ready.rows.map((row, index) => ({ index: row.leaf_index,
+          commitment: word(row.order_commitment, "commitment"),
+          nullifier: v13Nullifier(word(row.order_commitment, "commitment"), queued[index].order.orderSecret, 6) }));
+        const states = await this.resolveWitnesses(candidates);
+        if (states.length !== candidates.length || states.some((state) => typeof state.spent !== "boolean")) {
+          throw new Error("V13 order spend status is unavailable");
+        }
+        const live = states.flatMap((state, index) => state.spent ? [] : [index]).slice(0, 2);
+        if (live.length !== 2) {
+          if (ready.rows.length < 32) {
+            await connection.query("ROLLBACK");
+            return null;
+          }
+          excluded.push(...candidates.filter((_leaf, index) => states[index].spent).map((leaf) => leaf.commitment));
+          continue;
+        }
+        const leaves = live.map((index) => candidates[index]);
+        const selected = live.map((index) => queued[index]);
+        const witnesses = live.map((index) => states[index].merkle);
+        if (witnesses[0].root.toLowerCase() !== witnesses[1].root.toLowerCase()) {
+          throw new Error("V13 orders do not share the current pool root");
+        }
+        const first = selected[0]; const now = Date.now();
+        const request: V13BuyRequest = { marketId: first.marketId, positionTokenId: first.positionTokenId,
+          priceTick: first.priceTick, depositWallet: first.depositWallet,
+          executeAfterUnixMs: this.executionEpochMs === 0 ? now
+            : (Math.floor(now / this.executionEpochMs) + 1) * this.executionEpochMs,
+          witness: { collateralAsset: first.collateralAsset, positionAsset: first.positionAsset, orders: [
+            { ...selected[0].order, positionAsset: first.positionAsset, merkle: witnesses[0] },
+            { ...selected[1].order, positionAsset: first.positionAsset, merkle: witnesses[1] },
+          ] } };
+        const batchId = buildV13RouteInputs(request.witness).binding;
+        await this.vault.put(batchId, request, connection);
+        const updated = await connection.query(`UPDATE v13_private_order_queue SET state='batched',batch_id=$1
+          WHERE state='pending' AND order_commitment IN ($2,$3)`, [batchId, leaves[0].commitment, leaves[1].commitment]);
+        if (updated.rowCount !== 2) throw new Error("V13 batch must claim both orders atomically");
+        await connection.query("COMMIT");
+        return { batchId, request };
       }
-      const queued = ready.rows.map((row) => openV13Witness<V13QueuedOrder>(row.order_commitment, row.ciphertext, this.key));
-      if (queued.some((item) => v13OrderGroupKey(item).toLowerCase() !== groupKey.toLowerCase())) {
-        throw new Error("Encrypted v13 queue grouping mismatch");
-      }
-      const leaves = ready.rows.map((row) => ({ index: row.leaf_index, commitment: word(row.order_commitment, "commitment") }));
-      const witnesses = await this.resolveWitnesses(leaves);
-      if (witnesses.length !== 2 || witnesses[0].root.toLowerCase() !== witnesses[1].root.toLowerCase()) {
-        throw new Error("V13 orders do not share the current pool root");
-      }
-      const first = queued[0]; const now = Date.now();
-      const request: V13BuyRequest = { marketId: first.marketId, positionTokenId: first.positionTokenId,
-        priceTick: first.priceTick, depositWallet: first.depositWallet,
-        executeAfterUnixMs: this.executionEpochMs === 0 ? now
-          : (Math.floor(now / this.executionEpochMs) + 1) * this.executionEpochMs,
-        witness: { collateralAsset: first.collateralAsset, positionAsset: first.positionAsset, orders: [
-          { ...queued[0].order, positionAsset: first.positionAsset, merkle: witnesses[0] },
-          { ...queued[1].order, positionAsset: first.positionAsset, merkle: witnesses[1] },
-        ] } };
-      const batchId = buildV13RouteInputs(request.witness).binding;
-      await this.vault.put(batchId, request, connection);
-      const updated = await connection.query(`UPDATE v13_private_order_queue SET state='batched',batch_id=$1
-        WHERE state='pending' AND order_commitment IN ($2,$3)`, [batchId, leaves[0].commitment, leaves[1].commitment]);
-      if (updated.rowCount !== 2) throw new Error("V13 batch must claim both orders atomically");
-      await connection.query("COMMIT");
-      return { batchId, request };
     } catch (error) {
       await connection.query("ROLLBACK");
       throw error;

@@ -8,6 +8,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "test": "vitest run",
+    "research:privacy": "vitest run tests/privateLiquidityModel.test.ts",
     "preflight:v11": "tsx scripts/v11Preflight.ts",
     "prepare:v11": "tsx scripts/v11PreparePilot.ts",
     "pilot:wallet:v11": "tsx scripts/v11PilotWalletServer.ts",

@@ -25,15 +25,22 @@ const databaseUrl = connectionUrl.toString();
 const stages = ["route", "fill", "withdraw_pusd", "unwrap_pusd", "return_shares", "settle"] as const;
 const terminal = { returnPusd: 450_000n, returnShares: 1_000_000n, confirmedTradeCount: 1 };
 
-async function checkQueueConcurrency(db: Pool) {
+async function checkQueueConcurrency(db: Pool, cancelOne = false) {
   const fixture = v13Fixture(randomBytes(32).toString("hex"));
   const base = [...fixture.witness.orders, { ...fixture.witness.orders[0],
     orderSecret: `0x${randomBytes(32).toString("hex")}` as Hex }];
+  if (cancelOne) base.push({ ...fixture.witness.orders[1],
+    orderSecret: `0x${randomBytes(32).toString("hex")}` as Hex });
   const tree = new V13MerkleTree();
   const commitments = base.map(v13OrderCommitment);
   commitments.forEach((commitment, index) => tree.append(index, commitment));
-  const resolve = async (leaves: Array<{ index: number; commitment: Hex }>) =>
-    leaves.map((leaf) => tree.witness(leaf.index, leaf.commitment));
+  let cancelled = false;
+  let failResolution = false;
+  const resolve = async (leaves: Array<{ index: number; commitment: Hex }>) => {
+    if (failResolution) throw new Error("Synthetic queue RPC failure");
+    return leaves.map((leaf) => ({ merkle: tree.witness(leaf.index, leaf.commitment),
+      spent: cancelled && leaf.index === 0 }));
+  };
   const first = await PostgresV13OrderQueue.connect(databaseUrl!, key!, resolve);
   const second = await PostgresV13OrderQueue.connect(databaseUrl!, key!, resolve);
   const batches: string[] = [];
@@ -49,16 +56,34 @@ async function checkQueueConcurrency(db: Pool) {
           orderSecret: base[index].orderSecret } };
       groupKey = (await first.enqueue(order)).groupKey;
     }
+    if (cancelOne) {
+      failResolution = true;
+      await assert.rejects(first.assemble(groupKey!), /Synthetic queue RPC failure/);
+      failResolution = false;
+      const untouched = await db.query<{ state: string }>(
+        "SELECT state FROM v13_private_order_queue WHERE order_commitment=ANY($1::text[])", [commitments]);
+      assert(untouched.rows.every((row) => row.state === "pending"), "RPC failure must not claim queued orders");
+      cancelled = true;
+    }
     const results = await Promise.all([first.assemble(groupKey!), second.assemble(groupKey!)]);
     const assembled = results.filter((result) => result !== null);
     batches.push(...assembled.map((result) => result.batchId));
-    assert.equal(assembled.length, 1, "Concurrent workers must assemble exactly one pair out of three orders");
+    assert.equal(assembled.length, 1, "Concurrent workers must assemble exactly one pair out of three live orders");
     const rows = await db.query<{ state: string; batch_id: string | null }>(
       "SELECT state,batch_id FROM v13_private_order_queue WHERE order_commitment=ANY($1::text[])", [commitments]);
     assert.equal(rows.rows.filter((row) => row.state === "batched").length, 2);
-    assert.equal(rows.rows.filter((row) => row.state === "pending").length, 1);
+    assert.equal(rows.rows.filter((row) => row.state === "pending").length, cancelOne ? 2 : 1);
     assert(rows.rows.filter((row) => row.state === "batched").every((row) => row.batch_id === batches[0]));
-    console.log(JSON.stringify({ v13AtomicQueueAssembly: "pass", workers: 2, orders: 3, batches: 1 }));
+    if (cancelOne) {
+      assert(!assembled[0]!.request.witness.orders.map(v13OrderCommitment).includes(commitments[0]),
+        "A spent order cannot consume a batch slot");
+      cancelled = false;
+      const recovered = await first.assemble(groupKey!);
+      assert(recovered, "A cancellation reversed by a reorg must leave both remaining orders available");
+      batches.push(recovered.batchId);
+    }
+    console.log(JSON.stringify({ v13AtomicQueueAssembly: "pass", workers: 2, orders: base.length,
+      batches: batches.length, cancelledQueueRecovery: cancelOne ? "pass" : "not exercised", chainState: "simulated" }));
   } finally {
     const stored = await db.query<{ batch_id: string }>(
       "SELECT DISTINCT batch_id FROM v13_private_order_queue WHERE order_commitment=ANY($1::text[]) AND batch_id IS NOT NULL",
@@ -178,6 +203,7 @@ async function main() {
       "SELECT counts FROM v13_recovery_rehearsals WHERE id=$1", [batchId])).rows[0].counts;
     for (const stage of stages) assert.equal(current[stage], 1, `${stage} replayed`);
     await checkQueueConcurrency(db);
+    await checkQueueConcurrency(db, true);
     console.log(JSON.stringify({ v13PostgresRestartRecovery: "pass", processRestarts: stages.length,
       duplicateActions: 0, encryptedWitnessRecovery: "pass", chainAndClob: "simulated" }));
   } finally {

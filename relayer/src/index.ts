@@ -17,8 +17,8 @@ import { v12OrderCommitment } from "./v12BuyBatchProver.js";
 import { assertV12GeoEligible } from "./v12GeoEligibility.js";
 import { resolveV12LaunchPolicy } from "./v12LaunchPolicy.js";
 import { parseV13QueuedOrder, PostgresV13OrderQueue } from "./v13OrderQueue.js";
+import { v13OrderStateResolver, v13RoutedNullifiers } from "./v13OrderState.js";
 import { v13OrderCommitment } from "./v13Proofs.js";
-import { V13MerkleTree } from "./v13MerkleTree.js";
 import { resolveV13LaunchPolicy } from "./v13LaunchPolicy.js";
 
 // ── Environment ───────────────────────────────────────────────────────────────
@@ -291,15 +291,36 @@ function privateOrderQueue(): Promise<PostgresV12OrderQueue> {
   return v12OrderQueue;
 }
 
-async function resolveV13Witnesses(leaves: Array<{ index: number; commitment: `0x${string}` }>) {
+function resolveV13Witnesses(...args: Parameters<ReturnType<typeof v13OrderStateResolver>>) {
   const pool = getAddress(process.env.V13_POOL_ADDRESS ?? "");
   const deploymentBlock = BigInt(process.env.V13_DEPLOYMENT_BLOCK ?? "");
-  const logs = await publicClient.getLogs({ address: pool,
-    event: parseAbiItem("event NoteInserted(uint256 indexed leafIndex, bytes32 indexed commitment)"),
-    fromBlock: deploymentBlock, toBlock: "latest" });
-  const tree = new V13MerkleTree();
-  for (const log of logs) tree.append(Number(log.args.leafIndex), log.args.commitment!);
-  return leaves.map((leaf) => tree.witness(leaf.index, leaf.commitment));
+  const abi = parseAbi(["function currentRoot() view returns (bytes32)"]);
+  return v13OrderStateResolver({
+    head: () => publicClient.getBlockNumber({ cacheTime: 0 }),
+    blockHash: async (blockNumber) => (await publicClient.getBlock({ blockNumber })).hash,
+    leaves: async (fromBlock, toBlock) => (await publicClient.getLogs({ address: pool,
+      event: parseAbiItem("event NoteInserted(uint256 indexed leafIndex, bytes32 indexed commitment)"),
+      fromBlock, toBlock })).map((log) => ({ index: Number(log.args.leafIndex), commitment: log.args.commitment! })),
+    root: (blockNumber) => publicClient.readContract({ address: pool, abi, functionName: "currentRoot", blockNumber }),
+    spentNullifiers: async (fromBlock, toBlock) => {
+      // Scan all public spends; do not disclose unpublished nullifiers to the RPC provider.
+      const cancellations = await publicClient.getLogs({ address: pool,
+        event: parseAbiItem("event OrderNoteCancelled(bytes32 indexed orderNullifier, bytes32 indexed refundCommitment)"),
+        fromBlock, toBlock });
+      const spent = cancellations.map((log) => log.args.orderNullifier!);
+      const routes = await publicClient.getLogs({ address: pool,
+        event: parseAbiItem("event BuyBatchRouted(bytes32 indexed batchBinding, uint256 indexed positionTokenId, uint256 totalDeposit)"),
+        fromBlock, toBlock });
+      for (const route of routes) {
+        const transaction = await publicClient.getTransaction({ hash: route.transactionHash });
+        if (transaction.blockHash !== route.blockHash) throw new Error("V13 route history changed during resolution");
+        spent.push(...v13RoutedNullifiers(pool, transaction, {
+          batchBinding: route.args.batchBinding!, positionTokenId: route.args.positionTokenId!,
+          totalDeposit: route.args.totalDeposit! }));
+      }
+      return spent;
+    },
+  }, deploymentBlock)(...args);
 }
 
 function privateV13OrderQueue(): Promise<PostgresV13OrderQueue> {

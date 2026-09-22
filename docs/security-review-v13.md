@@ -88,6 +88,11 @@ reconstruct that deposit's missing random secret.
   or pause; cancellation cannot strand another participant's order.
 - The privacy claim survives the listed observer and participant attacks under
   clearly stated assumptions. Residual leakage is explicitly reported.
+- Queue admission/pairing must skip cancelled or already-routed orders without
+  revealing unpublished nullifiers to an RPC provider. Check snapshot/reorg
+  consistency, complete public spend history, pagination, and preservation of
+  unspent partners. Cancellation after durable pairing still needs separate
+  reconciliation; never release an order with an ambiguous route journal.
 - Findings include severity, reproducible tests, affected code, and remediation;
   critical/high findings are fixed and independently retested before launch.
 

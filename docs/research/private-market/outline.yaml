@@ -1,0 +1,25 @@
+topic: Private prediction markets with optional public-venue liquidity
+as_of: 2026-09-23
+status: research_not_launch_approval
+time_range: foundational work through September 2026
+scope:
+  user_experience: fund once and trade without reserve-wallet management
+  mechanisms: all, including third-party inventory and execution delay
+  implementation_boundary: no new mainnet spending or trading
+items:
+  - Polymarket public execution and complete-set inventory
+  - Shielded multi-market notes and private redemption
+  - MPC crossing and collaborative proving
+  - FHE quoting and confidential shared state
+  - TEE custody and private asset control
+  - Differentially private prediction market mechanisms
+  - Inventory-backed execution and capacity-reservation tickets
+  - Solvency, private recovery, anonymous channels and traffic protection
+execution:
+  batch_size: 1
+  items_per_agent: 8
+  output_dir: docs/research/private-market
+artifacts:
+  report: README.md
+  fields: fields.yaml
+  model: ../../../relayer/research/privateLiquidityModel.ts

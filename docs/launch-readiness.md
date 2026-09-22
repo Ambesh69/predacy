@@ -13,6 +13,10 @@ cancellation. CLOB fills and balances are synthetic; it is not a live pilot.
 The [independent review package and shortlist](security-review-v13.md) are ready
 for scoping, but no external reviewer has been engaged.
 
+The [private-market research](research/private-market/README.md) evaluates a
+separate inventory-backed protocol and includes an offline leakage model. It
+does not upgrade v13's privacy guarantees or authorize opening its launch gate.
+
 ## Privacy decision
 
 V13 inserts generic private order notes and consumes them by proof-bound,

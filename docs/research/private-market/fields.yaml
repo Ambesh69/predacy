@@ -1,0 +1,25 @@
+fields:
+  evidence:
+    detail_level: detailed
+    includes: [primary_sources, maturity, implemented_vs_proposed, review_scope, novelty_uncertainty]
+  privacy:
+    detail_level: detailed
+    includes: [identity, market, side, size, fill, participation, balances, authorized_outputs, metadata]
+  adversaries:
+    detail_level: detailed
+    includes: [public_observer, operator, LP, trader_collusion, committee_collusion, probing, client_compromise]
+  lifecycle:
+    detail_level: detailed
+    includes: [funding, quoting, execution, cancellation, sells, resolution, redemption, withdrawal, recovery]
+  economics:
+    detail_level: detailed
+    includes: [inventory, cash, outcome_backing, hedge_independence, fees, adverse_selection, capacity]
+  engineering:
+    detail_level: detailed
+    includes: [existing_primitives, proving_latency, throughput, data_availability, oracle_binding, failure_modes]
+uncertain:
+  - security and novelty of the proposed composition
+  - terminal LP output privacy and adaptive probing resistance
+  - economically viable market-oblivious execution-ticket capacity
+  - measured MPC/FHE and mobile proving performance
+  - complete recovery and cross-chain backing guarantees

@@ -60,6 +60,28 @@ the [independent review](security-review-v13.md).
 
 ## Fixed failures
 
+### Queue cancellation and research follow-up
+
+Local verification on 2026-09-23 passes 183 tests with five opt-in tests skipped,
+the relayer production build, and strict type-checking of the PostgreSQL rehearsal
+and research model. Queue tests cover already-spent admission, cancellation
+between enqueue and pairing, pagination past spent entries, snapshot reorgs,
+RPC failures, and preservation of surviving orders. Public spend-history scans
+avoid querying an RPC provider with unpublished order nullifiers.
+
+The production predeploy rehearsal now additionally exercises concurrent workers
+with one cancelled queued order, a resolver failure, and a reversed cancellation
+inside its temporary PostgreSQL schema. Its chain and CLOB states are simulated;
+check the deployment's successful predeploy logs for evidence of a particular run.
+Cancellation after a batch has already been durably paired still needs separate
+route-journal reconciliation and is not automatically re-paired by this change.
+
+The nine [privacy-mechanism model](research/private-market/README.md) checks are
+offline leakage/capacity experiments, not cryptographic proofs or a private
+sell/redemption implementation. They do not satisfy a launch gate.
+
+### Earlier runtime fixes
+
 - Bundled v13 circuit artifacts inside Railway's deploy root.
 - Initialized the route prover's required 2^21 CRS instead of the smaller default.
 - Allowed recovery of routed batches while new intake is disabled.
