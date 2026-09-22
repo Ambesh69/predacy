@@ -58,6 +58,61 @@ const ORDER_STORAGE_KEY = "predacy_private_orders_v13";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
+function storageKey(base: string, wallet: string): string {
+  if (!/^0x[0-9a-fA-F]{40}$/.test(wallet)) throw new Error("Invalid private vault wallet");
+  return `${base}:${wallet.toLowerCase()}`;
+}
+
+function storedValue(base: string, wallet: string): string | null {
+  const current = localStorage.getItem(storageKey(base, wallet));
+  if (current) return current;
+  const legacy = localStorage.getItem(base);
+  // Read the old single-wallet vault without deleting it or exposing it to another wallet.
+  return legacy && JSON.parse(legacy).wallet === wallet.toLowerCase() ? legacy : null;
+}
+
+async function withVaultLock<T>(wallet: string, action: () => Promise<T>): Promise<T> {
+  if (typeof navigator === "undefined" || !navigator.locks) {
+    throw new Error("Private vault writes require browser Web Locks support");
+  }
+  return navigator.locks.request(storageKey("predacy_private_vault_write_v13", wallet), action);
+}
+
+function mergeNotes(existing: PrivateNoteRecord[], incoming: PrivateNoteRecord[]): PrivateNoteRecord[] {
+  const merged = new Map(existing.map((note) => [note.commitment.toLowerCase(), note]));
+  const rank = { pending: 0, spendable: 1, locked: 2, spent: 3 };
+  for (const note of incoming) {
+    const prior = merged.get(note.commitment.toLowerCase());
+    if (prior && ["assetId", "amount", "publicKey", "secret"].some((key) =>
+      String(prior[key as keyof PrivateNoteRecord]).toLowerCase() !== String(note[key as keyof PrivateNoteRecord]).toLowerCase())) {
+      throw new Error("Conflicting recovery data for the same private note");
+    }
+    merged.set(note.commitment.toLowerCase(), prior ? { ...prior, ...note,
+      leafIndex: note.leafIndex ?? prior.leafIndex,
+      state: rank[prior.state] > rank[note.state] ? prior.state : note.state } : note);
+  }
+  return [...merged.values()];
+}
+
+function mergeOrders(existing: PrivateOrderRecord[], incoming: PrivateOrderRecord[]): PrivateOrderRecord[] {
+  const merged = new Map(existing.map((order) => [order.orderCommitment.toLowerCase(), order]));
+  const rank = { funding: 0, funded: 1, locking: 2, locked: 3, queued: 4, batched: 5, settled: 6, cancelled: 6 };
+  const immutable: Array<keyof PrivateOrderRecord> = ["receiptToken", "inputNote", "deposit", "limitPrice", "marketId",
+    "positionTokenId", "collateralAsset", "positionAsset", "orderSecret", "refundSecret", "refundPublicKey",
+    "positionSecret", "positionPublicKey"];
+  for (const order of incoming) {
+    const prior = merged.get(order.orderCommitment.toLowerCase());
+    if (prior && immutable.some((key) => String(prior[key]).toLowerCase() !== String(order[key]).toLowerCase())) {
+      throw new Error("Conflicting recovery data for the same private order");
+    }
+    const latest = prior && rank[prior.state] > rank[order.state] ? prior : order;
+    merged.set(order.orderCommitment.toLowerCase(), prior ? { ...prior, ...latest,
+      refundWithdrawn: prior.refundWithdrawn || order.refundWithdrawn,
+      positionWithdrawn: prior.positionWithdrawn || order.positionWithdrawn } : order);
+  }
+  return [...merged.values()];
+}
+
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
@@ -86,6 +141,7 @@ function validateNotes(notes: PrivateNoteRecord[]): void {
   if (!Array.isArray(notes) || notes.some((note) => !bytes32.test(note.commitment) ||
       !bytes32.test(note.assetId) || !bytes32.test(note.publicKey) || !bytes32.test(note.secret) ||
       !/^\d+$/.test(note.amount) || (note.positionTokenId !== undefined && !/^\d+$/.test(note.positionTokenId)) ||
+      !["pending", "spendable", "locked", "spent"].includes(note.state) ||
       Number(note.amount) < 0 || !Number.isSafeInteger(note.createdAt))) {
     throw new Error("Private note vault contains invalid data");
   }
@@ -102,6 +158,7 @@ function validateOrders(orders: PrivateOrderRecord[]): void {
     !bytes32.test(order.positionSecret) || !bytes32.test(order.positionPublicKey) ||
     !decimal.test(order.deposit) || !decimal.test(order.limitPrice) || !decimal.test(order.positionTokenId) ||
     !decimal.test(order.orderLeafIndex) ||
+    !["funding", "funded", "locking", "locked", "queued", "batched", "settled", "cancelled"].includes(order.state) ||
     (order.spent !== undefined && !decimal.test(order.spent)) ||
     (order.shares !== undefined && !decimal.test(order.shares)) ||
     (order.refund !== undefined && !decimal.test(order.refund)) || !Number.isSafeInteger(order.createdAt))) {
@@ -154,29 +211,33 @@ export async function decryptPrivateNotes(
 
 export async function savePrivateNotes(wallet: string, signature: Hex, notes: PrivateNoteRecord[]): Promise<void> {
   if (typeof window === "undefined") throw new Error("Private notes are available only in the wallet client");
-  localStorage.setItem(STORAGE_KEY, await encryptPrivateNotes(wallet, signature, notes));
+  validateNotes(notes);
+  await withVaultLock(wallet, async () => {
+    const merged = mergeNotes(await loadPrivateNotes(wallet, signature), notes);
+    localStorage.setItem(storageKey(STORAGE_KEY, wallet), await encryptPrivateNotes(wallet, signature, merged));
+  });
 }
 
 export async function loadPrivateNotes(wallet: string, signature: Hex): Promise<PrivateNoteRecord[]> {
   if (typeof window === "undefined") return [];
-  const stored = localStorage.getItem(STORAGE_KEY);
+  const stored = storedValue(STORAGE_KEY, wallet);
   return stored ? decryptPrivateNotes(wallet, signature, stored) : [];
 }
 
-export function exportPrivateNoteBackup(): string | null {
-  return typeof window === "undefined" ? null : localStorage.getItem(STORAGE_KEY);
+export function exportPrivateNoteBackup(wallet: string): string | null {
+  return typeof window === "undefined" ? null : storedValue(STORAGE_KEY, wallet);
 }
 
 export async function importPrivateNoteBackup(wallet: string, signature: Hex, backup: string): Promise<number> {
   const notes = await decryptPrivateNotes(wallet, signature, backup);
-  localStorage.setItem(STORAGE_KEY, backup);
+  await savePrivateNotes(wallet, signature, notes);
   return notes.length;
 }
 
-export function exportPrivateVaultBackup(): string | null {
+export function exportPrivateVaultBackup(wallet: string): string | null {
   if (typeof window === "undefined") return null;
-  const notes = localStorage.getItem(STORAGE_KEY);
-  const orders = localStorage.getItem(ORDER_STORAGE_KEY);
+  const notes = storedValue(STORAGE_KEY, wallet);
+  const orders = storedValue(ORDER_STORAGE_KEY, wallet);
   if (!notes && !orders) return null;
   return JSON.stringify({ version: 2, notes, orders, exportedAt: Date.now() } satisfies PrivateVaultBackup);
 }
@@ -197,16 +258,21 @@ export async function importPrivateVaultBackup(
     ? await decryptPrivateValue<PrivateOrderRecord[]>(wallet, signature, parsed.orders)
     : [];
   validateOrders(orders);
-  if (parsed.notes) localStorage.setItem(STORAGE_KEY, parsed.notes);
-  else localStorage.removeItem(STORAGE_KEY);
-  if (parsed.orders) localStorage.setItem(ORDER_STORAGE_KEY, parsed.orders);
-  else localStorage.removeItem(ORDER_STORAGE_KEY);
+  await withVaultLock(wallet, async () => {
+    const mergedNotes = mergeNotes(await loadPrivateNotes(wallet, signature), notes);
+    const mergedOrders = mergeOrders(await loadPrivateOrders(wallet, signature), orders);
+    // Validate and encrypt both sets before changing storage; never delete newer secrets on import.
+    const encryptedNotes = await encryptPrivateNotes(wallet, signature, mergedNotes);
+    const encryptedOrders = await encryptPrivateValue(wallet, signature, mergedOrders);
+    localStorage.setItem(storageKey(STORAGE_KEY, wallet), encryptedNotes);
+    localStorage.setItem(storageKey(ORDER_STORAGE_KEY, wallet), encryptedOrders);
+  });
   return { notes: notes.length, orders: orders.length };
 }
 
 export async function loadPrivateOrders(wallet: string, signature: Hex): Promise<PrivateOrderRecord[]> {
   if (typeof window === "undefined") return [];
-  const stored = localStorage.getItem(ORDER_STORAGE_KEY);
+  const stored = storedValue(ORDER_STORAGE_KEY, wallet);
   if (!stored) return [];
   const orders = await decryptPrivateValue<PrivateOrderRecord[]>(wallet, signature, stored);
   validateOrders(orders);
@@ -220,5 +286,8 @@ export async function savePrivateOrders(
 ): Promise<void> {
   if (typeof window === "undefined") throw new Error("Private orders are available only in the wallet client");
   validateOrders(orders);
-  localStorage.setItem(ORDER_STORAGE_KEY, await encryptPrivateValue(wallet, signature, orders));
+  await withVaultLock(wallet, async () => {
+    const merged = mergeOrders(await loadPrivateOrders(wallet, signature), orders);
+    localStorage.setItem(storageKey(ORDER_STORAGE_KEY, wallet), await encryptPrivateValue(wallet, signature, merged));
+  });
 }

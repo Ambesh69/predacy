@@ -26,6 +26,38 @@ Local verification: 147 relayer/browser-flow tests passed, five opt-in tests
 skipped; eight ShieldedPoolV2 contract tests passed; relayer TypeScript and
 frontend production builds passed.
 
+## Follow-up fork and browser verification
+
+The local Polygon fork rehearsal passed at source block `94275137` using the
+deployed pool, real v13/withdrawal verifiers, real USDC.e/pUSD bridge contracts,
+and the real Conditional Tokens contract. It creates only a synthetic fork-local
+market and balances, and simulates the CLOB fill. No mainnet transaction or real
+order is submitted.
+
+Verified paths:
+
+- Two deposits and real order-lock proofs, followed by a real route proof.
+- Settlement rejected before assets return; partial-fill assets returned through
+  the real bridges; exact private refund and position allocations accepted.
+- Both users withdraw refunds and positions while paused; replayed withdrawals
+  revert; liabilities and the Deposit Wallet return to zero.
+- A zero-fill routed batch returns all collateral and both users withdraw full
+  refunds, ending with zero liabilities.
+- Both users independently cancel unrouted orders while paused and withdraw
+  their refunds with real proofs, ending with zero liabilities.
+
+The follow-up application suite passes 163 tests with five opt-in tests skipped.
+New coverage includes confirmed cancellation/withdrawal recovery after lost
+browser receipts, reconstruction of missing output notes, invalid allocation
+receipt rejection, confirmed-event pagination, wallet-isolated storage, Web Locks
+write serialization, and non-destructive backup import. Legacy encrypted storage
+remains readable by its original wallet and is preserved during migration.
+
+Reproduce with `npm run rehearse:fork:v13` from `relayer`, after compiling the
+Foundry artifacts. Anvil and a read-only Polygon `RPC_URL` are required. This
+contract integration rehearsal does not replace the live v13 CLOB exercise or
+the [independent review](security-review-v13.md).
+
 ## Fixed failures
 
 - Bundled v13 circuit artifacts inside Railway's deploy root.

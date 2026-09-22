@@ -7,6 +7,12 @@ Six process-restart checkpoints passed against PostgreSQL with simulated chain
 actions and CLOB fills. No v13 live recovery pilot or independent review has
 completed. See [the verification record](v13-runtime-verification.md).
 
+The follow-up Polygon fork exercise covers real proofs and deployed contracts
+through partial-fill settlement, zero-fill refunds, paused exits, and independent
+cancellation. CLOB fills and balances are synthetic; it is not a live pilot.
+The [independent review package and shortlist](security-review-v13.md) are ready
+for scoping, but no external reviewer has been engaged.
+
 ## Privacy decision
 
 V13 inserts generic private order notes and consumes them by proof-bound,

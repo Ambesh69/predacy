@@ -1,13 +1,14 @@
 import { encodeFunctionData, keccak256, type Address, type Hex } from "viem";
 import { ERC20_ABI } from "./contracts";
 import { getPrivateContracts, isPrivateTradingEnabled, SHIELDED_POOL_ABI } from "./privateContracts";
-import { loadPrivateMerkleWitness, loadPrivateTree } from "./privateMerkle";
+import { loadPrivateMerkleWitness, loadPrivateRecoveryEvents, loadPrivateTree } from "./privateMerkle";
 import {
   loadPrivateNotes, loadPrivateOrders, savePrivateNotes, savePrivateOrders,
   type PrivateNoteRecord, type PrivateOrderRecord,
 } from "./privateNotes";
 import {
-  privateNoteCommitment, privateOrderCommitment, provePrivateBuyOrder, provePrivateOrderCancellation, provePrivateWithdrawal,
+  privateNoteCommitment, privateNoteNullifier, privateOrderCommitment, privateOrderNullifier,
+  provePrivateBuyOrder, provePrivateOrderCancellation, provePrivateWithdrawal,
 } from "./privateProver";
 import { submitPrivateOrder } from "./privateRelayer";
 import { getPrivateAllocationReceipt } from "./privateRelayer";
@@ -161,13 +162,15 @@ export async function refreshPrivateAllocations(args: {
   const orders = await loadPrivateOrders(args.wallet, args.vaultSignature);
   const notes = await loadPrivateNotes(args.wallet, args.vaultSignature);
   const leaves = await loadPrivateTree(publicClient, deployment.pool, deployment.deploymentBlock);
+  const leafIndices = new Map(leaves.map((leaf, index) => [leaf.toLowerCase(), index]));
+  const recovery = await loadPrivateRecoveryEvents(publicClient, deployment.pool, deployment.deploymentBlock);
   let changed = false;
   for (const order of orders) {
     if (["funding", "funded", "locking"].includes(order.state)) {
       const note = notes.find((item) => item.commitment === order.inputNote);
-      const noteIndex = leaves.findIndex((leaf) => leaf.toLowerCase() === order.inputNote.toLowerCase());
-      const orderIndex = leaves.findIndex((leaf) => leaf.toLowerCase() === order.orderCommitment.toLowerCase());
-      if (note && noteIndex >= 0) {
+      const noteIndex = leafIndices.get(order.inputNote.toLowerCase());
+      const orderIndex = leafIndices.get(order.orderCommitment.toLowerCase()) ?? -1;
+      if (note && noteIndex !== undefined && note.state !== "spent") {
         note.state = orderIndex >= 0 ? "locked" : "spendable";
         note.leafIndex = noteIndex.toString();
         order.state = orderIndex >= 0 ? "locked" : "funded";
@@ -176,44 +179,86 @@ export async function refreshPrivateAllocations(args: {
       }
     }
     if (["funding", "funded", "locking"].includes(order.state)) continue;
-    if (order.state === "settled" || order.state === "cancelled" || order.state === "locked") continue;
-    const receipt = await getPrivateAllocationReceipt(order.orderCommitment, order.receiptToken);
-    if (receipt.state !== "settled" || receipt.spent === undefined || receipt.shares === undefined ||
-        receipt.refund === undefined) continue;
-    order.state = "settled";
-    order.spent = receipt.spent;
-    order.shares = receipt.shares;
-    order.refund = receipt.refund;
-    changed = true;
+    const orderNullifier = privateOrderNullifier(order.orderCommitment, order.orderSecret).toLowerCase() as Hex;
+    const cancelledRefund = recovery.cancellations.get(orderNullifier);
+    if (cancelledRefund) {
+      const expected = privateNoteCommitment(order.collateralAsset, BigInt(order.deposit), order.refundPublicKey);
+      if (cancelledRefund.toLowerCase() !== expected.toLowerCase()) throw new Error("On-chain cancellation refund mismatch");
+      order.state = "cancelled";
+      order.spent = "0"; order.shares = "0"; order.refund = order.deposit;
+      changed = true;
+    } else if (order.state === "queued" || order.state === "batched") {
+      let receipt: Awaited<ReturnType<typeof getPrivateAllocationReceipt>>;
+      try { receipt = await getPrivateAllocationReceipt(order.orderCommitment, order.receiptToken); }
+      catch { continue; } // Confirmed on-chain exits remain recoverable during a relayer outage.
+      if (receipt.state !== "settled" || receipt.spent === undefined || receipt.shares === undefined ||
+          receipt.refund === undefined) continue;
+      const spent = BigInt(receipt.spent); const shares = BigInt(receipt.shares); const refund = BigInt(receipt.refund);
+      if (spent < 0n || shares < 0n || refund < 0n || spent + refund !== BigInt(order.deposit) ||
+          (spent === 0n) !== (shares === 0n) || spent * 1_000_000n > shares * BigInt(order.limitPrice)) {
+        throw new Error("Private allocation receipt violates the order's value or price limit");
+      }
+      order.state = "settled";
+      order.spent = receipt.spent; order.shares = receipt.shares; order.refund = receipt.refund;
+      changed = true;
+    }
+    if (order.state !== "settled" && order.state !== "cancelled") continue;
 
+    // Rebuild missing outputs even when only the order write survived a browser interruption.
     const outputs: PrivateNoteRecord[] = [];
-    const refund = BigInt(receipt.refund);
-    if (refund > 0n) {
+    const refund = BigInt(order.refund ?? "0");
+    if (refund > 0n && !order.refundWithdrawn) {
       const commitment = privateNoteCommitment(order.collateralAsset, refund, order.refundPublicKey);
-      const witness = await loadPrivateMerkleWitness(
-        publicClient, deployment.pool, deployment.deploymentBlock, commitment,
-      );
+      const index = leafIndices.get(commitment.toLowerCase());
+      if (index === undefined) throw new Error("Private refund note is not present on-chain");
       outputs.push({
         commitment, assetId: order.collateralAsset, amount: refund.toString(), publicKey: order.refundPublicKey,
-        secret: order.refundSecret, leafIndex: witness.index.toString(), marketId: order.marketId,
+        secret: order.refundSecret, leafIndex: index.toString(), marketId: order.marketId,
         state: "spendable", createdAt: Date.now(),
       });
     }
-    const shares = BigInt(receipt.shares);
-    if (shares > 0n) {
+    const shares = BigInt(order.shares ?? "0");
+    if (shares > 0n && !order.positionWithdrawn) {
       const commitment = privateNoteCommitment(order.positionAsset, shares, order.positionPublicKey);
-      const witness = await loadPrivateMerkleWitness(
-        publicClient, deployment.pool, deployment.deploymentBlock, commitment,
-      );
+      const index = leafIndices.get(commitment.toLowerCase());
+      if (index === undefined) throw new Error("Private position note is not present on-chain");
       outputs.push({
         commitment, assetId: order.positionAsset, amount: shares.toString(), publicKey: order.positionPublicKey,
-        secret: order.positionSecret, leafIndex: witness.index.toString(), marketId: order.marketId,
+        secret: order.positionSecret, leafIndex: index.toString(), marketId: order.marketId,
         positionTokenId: order.positionTokenId,
         state: "spendable", createdAt: Date.now(),
       });
     }
     for (const output of outputs) {
-      if (!notes.some((note) => note.commitment.toLowerCase() === output.commitment.toLowerCase())) notes.unshift(output);
+      if (!notes.some((note) => note.commitment.toLowerCase() === output.commitment.toLowerCase())) {
+        notes.unshift(output);
+        changed = true;
+      }
+    }
+  }
+  for (const note of notes) {
+    const nullifier = privateNoteNullifier(note.commitment, note.secret).toLowerCase() as Hex;
+    const exit = recovery.withdrawals.get(nullifier);
+    if (!exit) continue;
+    if (exit.assetId.toLowerCase() !== note.assetId.toLowerCase() || exit.amount !== BigInt(note.amount)) {
+      throw new Error("On-chain withdrawal does not match the saved note");
+    }
+    if (note.state !== "spent") { note.state = "spent"; changed = true; }
+  }
+  for (const order of orders) {
+    const isSpent = (commitment: Hex) => notes.some((note) => note.state === "spent" &&
+      note.commitment.toLowerCase() === commitment.toLowerCase());
+    if (["funding", "funded", "locking"].includes(order.state) && isSpent(order.inputNote)) {
+      order.state = "cancelled"; order.refund = order.deposit; order.spent = "0"; order.shares = "0";
+      order.refundWithdrawn = true; changed = true;
+    }
+    if (BigInt(order.refund ?? "0") > 0n && !order.refundWithdrawn && isSpent(privateNoteCommitment(
+      order.collateralAsset, BigInt(order.refund!), order.refundPublicKey))) {
+      order.refundWithdrawn = true; changed = true;
+    }
+    if (BigInt(order.shares ?? "0") > 0n && !order.positionWithdrawn && isSpent(privateNoteCommitment(
+      order.positionAsset, BigInt(order.shares!), order.positionPublicKey))) {
+      order.positionWithdrawn = true; changed = true;
     }
   }
   if (changed) {

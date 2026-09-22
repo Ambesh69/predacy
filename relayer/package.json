@@ -18,6 +18,7 @@
     "preflight:v13": "tsx scripts/v13Preflight.ts",
     "preflight:proofs:v13": "tsx scripts/v13ProofPreflight.ts",
     "rehearse:recovery:v13": "tsx scripts/v13RecoveryRehearsal.ts",
+    "rehearse:fork:v13": "tsx scripts/v13ForkRehearsal.ts",
     "preflight:deploy:v13": "tsx scripts/v13DeploymentPreflight.ts",
     "preflight:deploy:v12": "tsx scripts/v12DeploymentPreflight.ts",
     "preflight:v12": "tsx scripts/v12Preflight.ts",

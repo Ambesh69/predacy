@@ -3,6 +3,25 @@ import type { PrivateMerkleWitness } from "./privateProver";
 
 const TREE_DEPTH = 20;
 const NOTE_INSERTED = parseAbiItem("event NoteInserted(uint256 indexed leafIndex, bytes32 indexed commitment)");
+const NOTE_WITHDRAWN = parseAbiItem("event NoteWithdrawn(bytes32 indexed nullifier, bytes32 indexed assetId, address indexed recipient, uint256 amount)");
+const ORDER_CANCELLED = parseAbiItem("event OrderNoteCancelled(bytes32 indexed orderNullifier, bytes32 indexed refundCommitment)");
+
+export async function loadPrivateRecoveryEvents(client: PublicClient, pool: Address, deploymentBlock: bigint) {
+  const latest = await client.getBlockNumber();
+  const confirmed = latest > 0n ? latest - 1n : 0n;
+  const withdrawals = new Map<Hex, { assetId: Hex; recipient: Address; amount: bigint }>();
+  const cancellations = new Map<Hex, Hex>();
+  // Fetch public histories without sending a user's secret-derived note associations to the RPC.
+  for (let fromBlock = deploymentBlock; fromBlock <= confirmed; fromBlock += 25_000n) {
+    const toBlock = fromBlock + 24_999n > confirmed ? confirmed : fromBlock + 24_999n;
+    const exits = await client.getLogs({ address: pool, event: NOTE_WITHDRAWN, fromBlock, toBlock, strict: true });
+    const cancelled = await client.getLogs({ address: pool, event: ORDER_CANCELLED, fromBlock, toBlock, strict: true });
+    for (const { args } of exits) withdrawals.set(args.nullifier.toLowerCase() as Hex,
+      { assetId: args.assetId, recipient: args.recipient, amount: args.amount });
+    for (const { args } of cancelled) cancellations.set(args.orderNullifier.toLowerCase() as Hex, args.refundCommitment);
+  }
+  return { withdrawals, cancellations };
+}
 
 function pair(left: Hex, right: Hex): Hex {
   return keccak256(encodePacked(["bytes32", "bytes32"], [left, right]));

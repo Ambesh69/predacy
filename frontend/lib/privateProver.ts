@@ -107,10 +107,17 @@ export function privateOrderCommitment(request: Pick<PrivateCancellationProofReq
   ));
 }
 
-function noteNullifier(commitment: Hex, secret: Hex): Hex {
+export function privateNoteNullifier(commitment: Hex, secret: Hex): Hex {
   return keccak256(encodeAbiParameters(
     [{ type: "bytes32" }, { type: "bytes32" }, { type: "bytes32" }],
     [DOMAIN_NULLIFIER, commitment, secret],
+  ));
+}
+
+export function privateOrderNullifier(commitment: Hex, secret: Hex): Hex {
+  return keccak256(encodeAbiParameters(
+    [{ type: "bytes32" }, { type: "bytes32" }, { type: "bytes32" }],
+    [DOMAIN_ORDER_NULLIFIER, commitment, secret],
   ));
 }
 
@@ -168,7 +175,7 @@ export async function provePrivateBuyOrder(request: PrivateOrderProofRequest): P
   const publicKey = keccak256(request.noteSecret);
   const inputNote = privateNoteCommitment(request.collateralAsset, request.deposit, publicKey);
   const root = merkleRoot(inputNote, request.merkle);
-  const nullifier = noteNullifier(inputNote, request.noteSecret);
+  const nullifier = privateNoteNullifier(inputNote, request.noteSecret);
   const orderCommitment = privateOrderCommitment(request);
   const expected = [root, nullifier, request.collateralAsset, orderCommitment]
     .flatMap((value) => halves(value).map(fieldWord));
@@ -202,7 +209,7 @@ export async function provePrivateWithdrawal(request: PrivateWithdrawalProofRequ
   const recipient = getAddress(request.recipient);
   const commitment = privateNoteCommitment(request.asset, request.amount, keccak256(request.noteSecret));
   const root = merkleRoot(commitment, request.merkle);
-  const nullifier = noteNullifier(commitment, request.noteSecret);
+  const nullifier = privateNoteNullifier(commitment, request.noteSecret);
   const binding = keccak256(encodeAbiParameters(
     [
       { type: "bytes32" }, { type: "bytes32" }, { type: "bytes32" }, { type: "bytes32" },
@@ -240,10 +247,7 @@ export async function provePrivateOrderCancellation(request: PrivateCancellation
   if (request.limitPrice <= 0n || request.limitPrice >= 1_000_000n) throw new Error("Invalid cancellation limit");
   const orderCommitment = privateOrderCommitment(request);
   const root = merkleRoot(orderCommitment, request.merkle);
-  const orderNullifier = keccak256(encodeAbiParameters(
-    [{ type: "bytes32" }, { type: "bytes32" }, { type: "bytes32" }],
-    [DOMAIN_ORDER_NULLIFIER, orderCommitment, request.orderSecret],
-  ));
+  const orderNullifier = privateOrderNullifier(orderCommitment, request.orderSecret);
   const refundCommitment = privateNoteCommitment(request.collateralAsset, request.deposit, request.refundPublicKey);
   const [rootHigh, rootLow] = halves(root);
   const [nullifierHigh, nullifierLow] = halves(orderNullifier);

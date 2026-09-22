@@ -31,7 +31,8 @@ export default function PrivatePositionsPanel({
 
   const exportBackup = () => {
     setError(null);
-    const backup = exportPrivateVaultBackup();
+    if (!wallet) return;
+    const backup = exportPrivateVaultBackup(wallet);
     if (!backup) { setError("There is no private vault data to export yet"); return; }
     const url = URL.createObjectURL(new Blob([backup], { type: "application/json" }));
     const anchor = document.createElement("a");
